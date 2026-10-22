@@ -23,6 +23,9 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - Screenshots now show a real storm-damage assignment instead of test frames.
 - Example outlet names removed from the export preset hint and test fixtures.
 
+### Fixed
+- Canon CR3 files now show their capture date, camera and exposure, so Copy Photos files them in the right dated folder and ingest names using the date work for CR3 too (before, CR3 fell back to the file's date).
+
 ## [0.1.0] — 2026-10-21
 
 First shareable build, ad-hoc signed: on first launch right-click › Open, or allow it under System Settings › Privacy & Security. Everything below is new.
