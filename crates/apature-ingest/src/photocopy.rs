@@ -40,10 +40,32 @@ pub enum DateFolders {
     YearMonthDay,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Where the copies go (Photo Mechanic's Destination group).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DestMode {
+    /// Next to each original, in its own folder.
+    OriginalFolder,
+    /// In a subfolder (`subfolder`, e.g. SELECTS) of each original's folder.
+    Subfolder,
+    /// `dest`, plus the optional sub-path `dest_extra`.
+    #[default]
+    ThisFolder,
+    /// Ask for a folder each time Copy is pressed; it becomes `dest`.
+    AlwaysPick,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct CopyOptions {
+    pub dest_mode: DestMode,
+    /// The chosen folder for This folder (and the last pick for Always pick).
     pub dest: PathBuf,
+    /// Appended to `dest` in This folder mode: `2nd` or `Smith/2nd`.
+    pub dest_extra: String,
+    /// Folder name for Create subfolder.
+    pub subfolder: String,
+    /// Open the destination in a new tab when the copy finishes.
+    pub open_after: bool,
     /// File name template without extension (the Rename Photos tokens);
     /// empty keeps the original names.
     pub rename_template: String,
@@ -56,6 +78,59 @@ pub struct CopyOptions {
     pub date_folders: DateFolders,
     /// `{headline}` for the rename template.
     pub headline: Option<String>,
+}
+
+impl Default for CopyOptions {
+    fn default() -> Self {
+        CopyOptions {
+            dest_mode: DestMode::default(),
+            dest: PathBuf::new(),
+            dest_extra: String::new(),
+            subfolder: "SELECTS".into(),
+            open_after: false,
+            rename_template: String::new(),
+            seq_start: 1,
+            partners: false,
+            sidecars: false,
+            on_collision: OnCollision::default(),
+            date_folders: DateFolders::default(),
+            headline: None,
+        }
+    }
+}
+
+/// Safe folder names from a typed sub-path: `/`-separated, each part
+/// sanitised; empty, `.` and `..` parts are dropped so it stays inside.
+fn sub_path(text: &str) -> PathBuf {
+    text.split(['/', '\\'])
+        .map(str::trim)
+        .filter(|c| !c.is_empty() && *c != "." && *c != "..")
+        .filter_map(sanitize_component)
+        .collect()
+}
+
+/// The folder a photo's copies go to before any dated subfolders, or `None`
+/// when the options don't name one yet (no folder chosen, no subfolder name).
+pub fn dest_base(opts: &CopyOptions, item: &PhotoItem) -> Option<PathBuf> {
+    let own = item.path().parent().map(Path::to_path_buf);
+    match opts.dest_mode {
+        DestMode::OriginalFolder => own,
+        DestMode::Subfolder => {
+            let sub = sub_path(&opts.subfolder);
+            (!sub.as_os_str().is_empty())
+                .then(|| own.map(|o| o.join(sub)))
+                .flatten()
+        }
+        DestMode::ThisFolder | DestMode::AlwaysPick => {
+            if opts.dest.as_os_str().is_empty() {
+                return None;
+            }
+            Some(match opts.dest_mode {
+                DestMode::ThisFolder => opts.dest.join(sub_path(&opts.dest_extra)),
+                _ => opts.dest.clone(),
+            })
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,7 +226,14 @@ pub fn plan_copy(items: &[&PhotoItem], opts: &CopyOptions) -> Result<CopyPlan, P
                 }
             }
         };
-        let dir = opts.dest.join(&folder);
+        let Some(base) = dest_base(opts, item) else {
+            plan.skipped.push(Skip {
+                source: item.path().to_path_buf(),
+                reason: "no destination folder".into(),
+            });
+            continue;
+        };
+        let dir = base.join(&folder);
 
         // The files of this photo, each with its extension.
         let mut files: Vec<(PathBuf, u64, bool)> =
@@ -209,6 +291,9 @@ pub fn plan_copy(items: &[&PhotoItem], opts: &CopyOptions) -> Result<CopyPlan, P
             if !in_plan {
                 match opts.on_collision {
                     OnCollision::Skip => break (dests, Some("already at the destination")),
+                    // Beside the originals nothing is ever replaced: an
+                    // existing name there may be another original.
+                    OnCollision::Replace if opts.dest_mode == DestMode::OriginalFolder => {}
                     OnCollision::Replace if hits_original => {
                         break (dests, Some("would replace the original"))
                     }
@@ -594,5 +679,115 @@ mod tests {
         });
         assert!(r.cancelled);
         assert_eq!(r.copied.len(), 1);
+    }
+
+    #[test]
+    fn destination_modes_resolve_per_photo() {
+        let d = tempfile::tempdir().unwrap();
+        let a = shoot(&d.path().join("day1"), &["A.NEF"]);
+        let b = shoot(&d.path().join("day2"), &["B.NEF"]);
+        let items = [&a[0], &b[0]];
+        let out = d.path().join("out");
+        let mut o = opts(&out);
+        let dirs = |o: &CopyOptions| -> Vec<PathBuf> {
+            plan_copy(&items, o)
+                .unwrap()
+                .entries
+                .iter()
+                .map(|e| {
+                    e.destination
+                        .parent()
+                        .unwrap()
+                        .strip_prefix(d.path())
+                        .unwrap()
+                        .to_path_buf()
+                })
+                .collect()
+        };
+        // This folder, then with a + sub-path (unsafe parts dropped).
+        assert_eq!(dirs(&o), [PathBuf::from("out"), PathBuf::from("out")]);
+        o.dest_extra = " Smith / ../2nd/ ".into();
+        assert_eq!(
+            dirs(&o),
+            [
+                PathBuf::from("out/Smith/2nd"),
+                PathBuf::from("out/Smith/2nd")
+            ]
+        );
+        // Always pick ignores the sub-path: the picked folder is the folder.
+        o.dest_mode = DestMode::AlwaysPick;
+        assert_eq!(dirs(&o), [PathBuf::from("out"), PathBuf::from("out")]);
+        // Create subfolder: inside each original's own folder.
+        o.dest_mode = DestMode::Subfolder;
+        assert_eq!(o.subfolder, "SELECTS");
+        assert_eq!(
+            dirs(&o),
+            [PathBuf::from("day1/SELECTS"), PathBuf::from("day2/SELECTS")]
+        );
+        // Original folder: beside each original, with dated folders under it.
+        o.dest_mode = DestMode::OriginalFolder;
+        o.date_folders = DateFolders::Day;
+        let got = dirs(&o);
+        assert!(
+            got[0].starts_with("day1") && got[0] != PathBuf::from("day1"),
+            "{got:?}"
+        );
+        assert!(got[1].starts_with("day2"));
+        // Nothing to resolve yet: no folder chosen, or an empty subfolder name.
+        let mut none = opts(Path::new(""));
+        assert_eq!(plan_copy(&items, &none).unwrap().skipped.len(), 2);
+        none.dest_mode = DestMode::Subfolder;
+        none.subfolder = " / ".into();
+        assert!(plan_copy(&items, &none).unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn original_folder_never_overwrites_or_copies_onto_itself() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("shoot");
+        let items = shoot(&src, &["C.NEF", "C.JPG", "D.NEF"]);
+        let refs: Vec<&PhotoItem> = items.iter().collect();
+        let before: Vec<(PathBuf, Vec<u8>)> = fs::read_dir(&src)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| (p.clone(), fs::read(&p).unwrap()))
+            .collect();
+        for policy in [
+            OnCollision::AddNumber,
+            OnCollision::Replace,
+            OnCollision::Skip,
+        ] {
+            let mut o = opts(Path::new(""));
+            o.dest_mode = DestMode::OriginalFolder;
+            o.on_collision = policy;
+            // Rename D onto C's name too: still must not touch C.
+            o.rename_template = if policy == OnCollision::Replace {
+                "C".into()
+            } else {
+                String::new()
+            };
+            let plan = plan_copy(&refs, &o).unwrap();
+            for e in &plan.entries {
+                assert_ne!(e.source, e.destination);
+                assert!(!e.replace, "{policy:?} would replace {:?}", e.destination);
+            }
+            let out = run_copy(&plan, &AtomicBool::new(false), None, |_| {});
+            assert!(out.failed.is_empty());
+        }
+        for (p, bytes) in before {
+            assert_eq!(fs::read(&p).unwrap(), bytes, "{p:?} changed");
+        }
+        // Add a number put numbered copies beside them.
+        assert!(src.join("C-1.NEF").is_file() && src.join("C-1.JPG").is_file());
+    }
+
+    #[test]
+    fn older_prefs_keep_their_folder_and_get_the_new_defaults() {
+        let old = r#"{"dest":"/x/out","rename_template":"","seq_start":1,"partners":false,"sidecars":true,"on_collision":"AddNumber","date_folders":"None","headline":null}"#;
+        let o: CopyOptions = serde_json::from_str(old).unwrap();
+        assert_eq!(o.dest_mode, DestMode::ThisFolder);
+        assert_eq!(o.dest, PathBuf::from("/x/out"));
+        assert_eq!(o.subfolder, "SELECTS");
+        assert!(o.dest_extra.is_empty() && !o.open_after);
     }
 }

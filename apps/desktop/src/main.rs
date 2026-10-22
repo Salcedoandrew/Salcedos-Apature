@@ -1,4 +1,4 @@
-//! Apature desktop. `apature [folder] [--theme dark|light] [--screenshot out.png [--frames N]]`
+//! Apature desktop. `apature [folder] [--theme dark|light] [--screenshot out.png [--frames N]] [--copy-dialog]`
 //! `--ingest-run --ingest-source <card> --ingest-dest <dir>` ingests headlessly and reports;
 //! `--export-run --export-dest <dir>` does the same for export.
 //!
@@ -66,6 +66,7 @@ pub struct Launch {
     /// Open the Rename / Trash dialog at start (screenshots).
     pub rename_dialog: bool,
     pub trash_dialog: bool,
+    pub copy_dialog: bool,
     /// Open the Settings window at start (screenshots).
     pub settings: bool,
     /// Extra folders to open as tabs.
@@ -116,6 +117,7 @@ fn parse_args() -> Launch {
             "--settings" => l.settings = true,
             "--rename-dialog" => l.rename_dialog = true,
             "--trash-dialog" => l.trash_dialog = true,
+            "--copy-dialog" => l.copy_dialog = true,
             "--preview" => l.preview = true,
             "--zoom11" => {
                 l.preview = true;

@@ -6,7 +6,7 @@ use egui::RichText;
 use super::tokens::{Theme, S1, S2, S3, S4};
 use crate::app::App;
 use crate::commands::Command;
-use apature_ingest::{DateFolders, OnCollision};
+use apature_ingest::{DateFolders, DestMode, OnCollision};
 
 const THIRD_PARTY: &str = include_str!("../../../../docs/THIRD_PARTY.md");
 
@@ -171,6 +171,39 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     }
 }
 
+/// White field with dark text (as in Photo Mechanic) for a dialog input.
+fn light<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let dark = egui::Color32::from_gray(24);
+        let v = ui.visuals_mut();
+        v.text_edit_bg_color = Some(egui::Color32::WHITE);
+        v.extreme_bg_color = egui::Color32::WHITE;
+        v.override_text_color = Some(dark);
+        v.text_cursor.stroke.color = dark;
+        v.selection.bg_fill = egui::Color32::from_rgb(179, 207, 255);
+        v.selection.stroke.color = egui::Color32::from_rgb(40, 110, 220);
+        for w in [
+            &mut v.widgets.inactive,
+            &mut v.widgets.hovered,
+            &mut v.widgets.active,
+        ] {
+            w.bg_fill = egui::Color32::WHITE;
+            w.weak_bg_fill = egui::Color32::WHITE;
+            w.fg_stroke.color = dark;
+        }
+        add(ui)
+    })
+    .inner
+}
+
+/// `~/x` typed into a path box means the home folder.
+fn expand_home(text: &str) -> std::path::PathBuf {
+    match (text.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
+        _ => std::path::PathBuf::from(text),
+    }
+}
+
 fn human_bytes(b: u64) -> String {
     let b = b as f64;
     if b >= 1e9 {
@@ -246,19 +279,84 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
         ui.label(RichText::new("Files are copied byte for byte with their dates; nothing is re-encoded and the originals are not touched.").size(11.5).color(t.text2));
         ui.add_space(S1);
         ui.label(RichText::new("DESTINATION").monospace().size(9.5).color(t.muted));
+        changed |= ui
+            .radio_value(&mut d.opts.dest_mode, DestMode::OriginalFolder, "Original folder")
+            .on_hover_text("Each copy goes next to its original. A name already there gets a number; nothing is replaced.")
+            .changed();
         ui.horizontal(|ui| {
-            let shown = if d.opts.dest.as_os_str().is_empty() { "No folder chosen".to_string() } else { d.opts.dest.display().to_string() };
-            if ui.button("Choose…").clicked() {
+            changed |= ui.radio_value(&mut d.opts.dest_mode, DestMode::Subfolder, "Create subfolder").changed();
+            let r = light(ui, |ui| ui.add(egui::TextEdit::singleline(&mut d.opts.subfolder).desired_width(180.0)))
+                .on_hover_text("A folder of this name inside each original's folder");
+            if r.changed() {
+                d.opts.dest_mode = DestMode::Subfolder;
+                changed = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            changed |= ui.radio_value(&mut d.opts.dest_mode, DestMode::ThisFolder, "This folder:").changed();
+            let mut text = d.opts.dest.display().to_string();
+            let w = (ui.available_width() - 34.0).max(120.0);
+            let r = light(ui, |ui| ui.add(egui::TextEdit::singleline(&mut text).desired_width(w)));
+            if r.changed() {
+                d.opts.dest = expand_home(text.trim());
+                d.opts.dest_mode = DestMode::ThisFolder;
+                changed = true;
+            }
+            if ui.button("…").on_hover_text("Choose a folder").clicked() {
                 cmds.push(Command::CopyChooseDest);
             }
-            ui.label(RichText::new(shown).monospace().size(11.0).color(t.text));
         });
-        ui.label(RichText::new("RENAME (EMPTY KEEPS THE NAMES)").monospace().size(9.5).color(t.muted));
-        let r = ui.add(egui::TextEdit::singleline(&mut d.opts.rename_template).desired_width(f32::INFINITY).hint_text("{headline}-{seqn:3}   tokens: {filename} {frame} {seqn} {headline} {date} {yymmdd} {time}"));
-        changed |= r.changed();
+        ui.horizontal(|ui| {
+            ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing + 64.0);
+            ui.label(RichText::new("+").strong().color(t.text2));
+            let r = light(ui, |ui| ui.add(egui::TextEdit::singleline(&mut d.opts.dest_extra).desired_width(220.0)))
+                .on_hover_text("Optional sub-path under this folder, e.g. Smith/2nd");
+            if r.changed() {
+                d.opts.dest_mode = DestMode::ThisFolder;
+                changed = true;
+            }
+        });
+        if d.opts.dest_mode == DestMode::ThisFolder && !d.opts.dest.as_os_str().is_empty() && !d.opts.dest.is_dir() {
+            ui.label(RichText::new("This folder doesn't exist yet; it will be created.").size(11.0).color(t.text2));
+        }
+        changed |= ui
+            .radio_value(&mut d.opts.dest_mode, DestMode::AlwaysPick, "Always pick destination")
+            .on_hover_text("Shows the folder picker when you press Copy")
+            .changed();
+        changed |= ui.checkbox(&mut d.opts.open_after, "Open destination as a Contact Sheet").changed();
+        ui.add_space(S1);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("RENAME").monospace().size(9.5).color(t.muted));
+            ui.label(RichText::new("empty keeps the names").size(10.5).color(t.muted));
+        });
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 90.0).max(120.0);
+            changed |= light(ui, |ui| ui.add(egui::TextEdit::singleline(&mut d.opts.rename_template).desired_width(w))).changed();
+            ui.menu_button("Variables…", |ui| {
+                for (tok, what) in [
+                    ("{filename}", "original name"),
+                    ("{frame}", "frame number"),
+                    ("{seqn}", "sequence"),
+                    ("{seqn:3}", "sequence, 3 digits"),
+                    ("{headline}", "assignment headline"),
+                    ("{date}", "2026-10-22"),
+                    ("{yymmdd}", "261022"),
+                    ("{year}", "2026"),
+                    ("{month}", "10"),
+                    ("{day}", "22"),
+                    ("{time}", "143005"),
+                ] {
+                    if ui.button(RichText::new(format!("{tok}   {what}")).monospace().size(11.0)).clicked() {
+                        d.opts.rename_template.push_str(tok);
+                        changed = true;
+                        ui.close();
+                    }
+                }
+            });
+        });
         ui.horizontal(|ui| {
             ui.label(RichText::new("SEQUENCE STARTS AT").monospace().size(9.5).color(t.muted));
-            changed |= ui.add(egui::DragValue::new(&mut d.opts.seq_start).range(1..=99999)).changed();
+            changed |= light(ui, |ui| ui.add(egui::DragValue::new(&mut d.opts.seq_start).range(1..=99999))).changed();
         });
         changed |= ui.checkbox(&mut d.opts.partners, "Copy RAW+JPEG partners").changed();
         changed |= ui.checkbox(&mut d.opts.sidecars, "Copy XMP sidecars").changed();
@@ -270,8 +368,16 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
         });
         ui.horizontal(|ui| {
             ui.label(RichText::new("IF A NAME IS TAKEN").monospace().size(9.5).color(t.muted));
+            let beside = d.opts.dest_mode == DestMode::OriginalFolder;
             for (v, label) in [(OnCollision::Skip, "Skip"), (OnCollision::AddNumber, "Add a number"), (OnCollision::Replace, "Replace")] {
-                changed |= ui.radio_value(&mut d.opts.on_collision, v, label).changed();
+                let on = d.opts.on_collision == v || (beside && v == OnCollision::AddNumber && d.opts.on_collision == OnCollision::Replace);
+                let r = ui
+                    .add_enabled(!(beside && v == OnCollision::Replace), egui::RadioButton::new(on, label))
+                    .on_disabled_hover_text("Next to the originals a taken name always gets a number");
+                if r.clicked() && d.opts.on_collision != v {
+                    d.opts.on_collision = v;
+                    changed = true;
+                }
             }
         });
         ui.add_enabled(has_pad, egui::Checkbox::new(&mut d.apply_pad, "Apply the assignment pad to the copies (XMP sidecars only)"))
@@ -279,6 +385,14 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
         ui.add_space(S1);
         if let Some(e) = &d.error {
             ui.label(RichText::new(e).size(12.0).color(t.reject));
+        }
+        if d.plan.is_none() && d.error.is_none() {
+            let why = match d.opts.dest_mode {
+                DestMode::AlwaysPick => "You'll pick the folder when you press Copy.",
+                DestMode::Subfolder => "Name the subfolder.",
+                _ => "Choose a folder.",
+            };
+            ui.label(RichText::new(why).size(12.0).color(t.text2));
         }
         if let Some(plan) = &d.plan {
             let files = plan.entries.len();
@@ -295,9 +409,11 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
             ui.label(RichText::new(line).size(12.0).color(if plan.replacing > 0 { t.reject } else { t.text }));
             egui::ScrollArea::vertical().max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
                 let root = &d.opts.dest;
+                let per_original = matches!(d.opts.dest_mode, DestMode::OriginalFolder | DestMode::Subfolder);
                 for e in plan.entries.iter().take(40) {
                     let f = e.source.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
-                    let g = e.destination.strip_prefix(root).unwrap_or(&e.destination).display().to_string();
+                    let base = if per_original { e.source.parent().unwrap_or(root) } else { root.as_path() };
+                    let g = e.destination.strip_prefix(base).unwrap_or(&e.destination).display().to_string();
                     ui.label(RichText::new(format!("{f}  →  {g}{}", if e.replace { "  (replaces)" } else { "" })).monospace().size(10.5).color(t.text2));
                 }
                 if plan.entries.len() > 40 {
@@ -311,7 +427,8 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
         ui.add_space(S3);
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can = d.plan.as_ref().is_some_and(|p| !p.entries.is_empty());
+                // Always pick plans once the folder is picked.
+                let can = d.plan.as_ref().is_some_and(|p| !p.entries.is_empty()) || (d.opts.dest_mode == DestMode::AlwaysPick && d.plan.is_none() && d.error.is_none() && !d.targets.is_empty());
                 if ui.add_enabled(can, egui::Button::new(RichText::new("Copy").strong())).clicked() {
                     cmds.push(Command::CopyStart);
                 }

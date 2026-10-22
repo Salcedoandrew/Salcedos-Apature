@@ -443,6 +443,8 @@ pub struct App {
     pub copy_dialog: Option<CopyDialog>,
     /// The copy in progress (or just finished), shown by the dialog or the status line.
     pub copy_running: Option<crate::copy_job::CopyRunning>,
+    /// Open the destination as a contact sheet when the running copy ends.
+    copy_open_after: bool,
     copy_jobs: crate::copy_job::CopyJobs,
     /// One action per keypress across the menu and the key handler.
     key_once: crate::keyonce::KeyOnce,
@@ -573,6 +575,7 @@ impl App {
             trash_dialog: None,
             copy_dialog: None,
             copy_running: None,
+            copy_open_after: false,
             copy_jobs: crate::copy_job::CopyJobs::new(cc.egui_ctx.clone()),
             key_once: Default::default(),
             export_jobs: crate::export_job::ExportJobs::new(cc.egui_ctx.clone()),
@@ -740,6 +743,10 @@ impl App {
                 d.template = "100726-SPO-BGLF-{seqn:3}".into();
             }
             app.rename_recompute();
+        }
+        if launch.copy_dialog && !app.view.is_empty() {
+            app.selection.all(&app.view.clone());
+            app.open_copy_dialog();
         }
         if launch.trash_dialog && !app.view.is_empty() {
             let picks: Vec<usize> = app.view.iter().take(2).copied().collect();
@@ -950,7 +957,11 @@ impl App {
         let Some(d) = self.copy_dialog.as_ref() else {
             return;
         };
-        if d.opts.dest.as_os_str().is_empty() {
+        let needs_folder = matches!(
+            d.opts.dest_mode,
+            apature_ingest::DestMode::ThisFolder | apature_ingest::DestMode::AlwaysPick
+        );
+        if needs_folder && d.opts.dest.as_os_str().is_empty() {
             if let Some(d) = self.copy_dialog.as_mut() {
                 d.plan = None;
                 d.error = None;
@@ -984,12 +995,32 @@ impl App {
         if let Some(dir) = dlg.pick_folder() {
             if let Some(d) = self.copy_dialog.as_mut() {
                 d.opts.dest = dir;
+                if d.opts.dest_mode != apature_ingest::DestMode::AlwaysPick {
+                    d.opts.dest_mode = apature_ingest::DestMode::ThisFolder;
+                }
             }
             self.copy_recompute();
         }
     }
 
     fn copy_start(&mut self) {
+        let Some(d) = self.copy_dialog.as_ref() else {
+            return;
+        };
+        if d.opts.dest_mode == apature_ingest::DestMode::AlwaysPick {
+            // Always pick destination: ask now, then plan against the pick.
+            let mut dlg = rfd::FileDialog::new().set_title("Copy Photos To");
+            if d.opts.dest.is_dir() {
+                dlg = dlg.set_directory(&d.opts.dest);
+            }
+            let Some(dir) = dlg.pick_folder() else {
+                return;
+            };
+            if let Some(d) = self.copy_dialog.as_mut() {
+                d.opts.dest = dir;
+            }
+            self.copy_recompute();
+        }
         let Some(d) = self.copy_dialog.as_ref() else {
             return;
         };
@@ -1003,13 +1034,20 @@ impl App {
         };
         let mut keep = d.opts.clone();
         keep.headline = None;
-        let dest = keep.dest.clone();
+        // Where the first photo goes (its own folder in the per-original modes).
+        let dest = d
+            .targets
+            .first()
+            .and_then(|&i| apature_ingest::dest_base(&d.opts, &self.items[i]))
+            .unwrap_or_else(|| keep.dest.clone());
+        self.copy_open_after = keep.open_after;
         self.prefs.copy = keep;
         self.prefs_dirty = true;
         self.copy_running = Some(self.copy_jobs.start(plan, pad, dest));
     }
 
     fn drain_copy(&mut self) {
+        let mut open_after: Option<PathBuf> = None;
         while let Some(msg) = self.copy_jobs.try_recv() {
             let Some(r) = self.copy_running.as_mut() else {
                 continue;
@@ -1046,7 +1084,16 @@ impl App {
                     } else {
                         ui::toasts::Kind::Error
                     };
-                    let into_open = self.folder.as_ref().is_some_and(|f| r.dest.starts_with(f));
+                    let into_open = self.folder.as_ref().is_some_and(|f| {
+                        r.dest.starts_with(f) || o.copied.iter().any(|(_, d)| d.starts_with(f))
+                    });
+                    if self.copy_open_after && !o.cancelled {
+                        // Open as a Contact Sheet: the folder the first photo landed in.
+                        open_after = o
+                            .copied
+                            .first()
+                            .and_then(|(_, d)| d.parent().map(Path::to_path_buf));
+                    }
                     r.done = Some(o);
                     self.status = text.clone();
                     if self.copy_dialog.is_none() {
@@ -1057,6 +1104,10 @@ impl App {
                     }
                 }
             }
+        }
+        if let Some(dir) = open_after {
+            self.close_copy_dialog();
+            self.open_folder(&dir);
         }
     }
 

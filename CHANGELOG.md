@@ -18,6 +18,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - `apature-cli preview extract FILE` writes the largest embedded preview out untouched (`--prefer smallest` or a pixel size, `--max-bytes`, `--list`), and `apature-cli preview list FILE` lists them all.
 
 ### Changed
+- Copy Photos… has Photo Mechanic's Destination choices: Original folder (next to each original, where a taken name always gets a number and nothing is ever replaced), Create subfolder (SELECTS by default, inside each original's folder), This folder plus an optional sub-path, or Always pick destination (asks when you press Copy). "Open destination as a Contact Sheet" opens the copies in a new tab afterwards. All of it is remembered, and dated subfolders, renaming and the name-clash choice apply under whichever destination you pick. The text boxes are white with dark text, and the rename box starts empty with its tokens behind a Variables… button.
 - Canon CR2 and some DNG files used to show a reduced or the wrong picture (sometimes the raw sensor data itself); lossless raw streams are no longer mistaken for previews, so the camera's real preview is used.
 - Fujifilm RAF files now show the right camera, lens, exposure and orientation.
 - Screenshots now show a real storm-damage assignment instead of test frames.

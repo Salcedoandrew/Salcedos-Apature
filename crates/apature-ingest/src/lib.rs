@@ -26,7 +26,8 @@ pub mod template;
 pub use copy::{copy_verified, sha256_file, CopyReport, IngestError};
 pub use ledger::Ledger;
 pub use photocopy::{
-    plan_copy, run_copy, CopyOptions, CopyOutcome, CopyPlan, CopyProgress, DateFolders, OnCollision,
+    dest_base, plan_copy, run_copy, CopyOptions, CopyOutcome, CopyPlan, CopyProgress, DateFolders,
+    DestMode, OnCollision,
 };
 pub use plan::{
     build_plan, example_names, today, Collision, CollisionPolicy, Entry, FileFilter, Options, Plan,
