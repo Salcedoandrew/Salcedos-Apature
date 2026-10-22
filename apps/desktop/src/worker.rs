@@ -46,6 +46,11 @@ pub struct Done {
     pub cache_hit: bool,
     /// Preview only: the decode is the file's full resolution (nothing larger exists).
     pub full: bool,
+    /// Width × height of the largest image this file can show (its biggest
+    /// embedded preview, or the JPEG itself), turned upright like `result`.
+    /// Known from a thumbnail too, so the preview can draw a small image at
+    /// the size the full one will have.
+    pub native: Option<[u32; 2]>,
 }
 
 impl Done {
@@ -62,7 +67,8 @@ type Key = (usize, JobKind);
 
 #[derive(Default)]
 struct Queue {
-    order: BTreeSet<(u32, usize, u8)>,
+    /// (priority, kind, index): at equal priority a preview goes first.
+    order: BTreeSet<(u32, u8, usize)>,
     prio: HashMap<Key, u32>,
     jobs: HashMap<Key, Job>,
     inflight: HashSet<Key>,
@@ -118,13 +124,31 @@ impl Pool {
             if old == prio {
                 return;
             }
-            q.order.remove(&(old, job.idx, kind_u8(job.kind)));
+            q.order.remove(&(old, kind_u8(job.kind), job.idx));
         }
-        q.order.insert((prio, job.idx, kind_u8(job.kind)));
+        q.order.insert((prio, kind_u8(job.kind), job.idx));
         q.prio.insert(key, prio);
         q.jobs.insert(key, job);
         drop(q);
         self.shared.cv.notify_one();
+    }
+
+    /// Drop queued preview decodes for photos not in `keep` (the user has
+    /// flipped past them). Decodes already running finish and are cached.
+    pub fn retain_previews(&self, keep: &[usize]) {
+        let mut q = self.shared.q.lock().unwrap();
+        let stale: Vec<Key> = q
+            .jobs
+            .keys()
+            .filter(|(i, k)| *k == JobKind::Preview && !keep.contains(i))
+            .copied()
+            .collect();
+        for key in stale {
+            if let Some(p) = q.prio.remove(&key) {
+                q.order.remove(&(p, kind_u8(key.1), key.0));
+            }
+            q.jobs.remove(&key);
+        }
     }
 
     pub fn clear_pending(&self) {
@@ -149,8 +173,8 @@ fn worker_loop(s: Arc<Shared>) {
         let job = {
             let mut q = s.q.lock().unwrap();
             loop {
-                if let Some(&(p, idx, k)) = q.order.iter().next() {
-                    q.order.remove(&(p, idx, k));
+                if let Some(&(p, k, idx)) = q.order.iter().next() {
+                    q.order.remove(&(p, k, idx));
                     let kind = if k == 0 {
                         JobKind::Preview
                     } else {
@@ -206,8 +230,10 @@ fn run(s: &Shared, job: &Job) -> Done {
     let mut cache_hit = false;
     let key = ThumbCache::key(&job.path, job.size, job.modified, job.long_side);
 
+    let mut native: Option<[u32; 2]> = None;
     let result: Result<(Rgb, Option<ExifSummary>, bool), String> = (|| {
         let src = Source::open(&job.path).map_err(|e| e.to_string())?;
+        native = src.largest().map(|c| [c.width, c.height]);
         let exif = apature_metadata::exif::from_bytes(src.data());
         let orientation = exif.as_ref().map(|e| e.orientation).unwrap_or(1);
 
@@ -253,7 +279,9 @@ fn run(s: &Shared, job: &Job) -> Done {
     let (result, exif, full) = match result {
         Ok((rgb, exif, full)) => {
             let file_o = exif.as_ref().map(|e| e.orientation).unwrap_or(1);
-            (Ok(sidecar_orientation(&job.path, file_o, rgb)), exif, full)
+            let rgb = sidecar_orientation(&job.path, file_o, rgb);
+            native = native.map(|n| upright(n, [rgb.width, rgb.height]));
+            (Ok(rgb), exif, full)
         }
         Err(e) => (Err(e), None, false),
     };
@@ -267,6 +295,20 @@ fn run(s: &Shared, job: &Job) -> Done {
         millis: t0.elapsed().as_secs_f32() * 1000.0,
         cache_hit,
         full,
+        native,
+    }
+}
+
+/// Turn the stored size `native` to match the decoded (already upright)
+/// image `shown`: swap width and height when one is landscape and the
+/// other portrait.
+fn upright(native: [u32; 2], shown: [u32; 2]) -> [u32; 2] {
+    let [w, h] = native;
+    let [sw, sh] = shown;
+    if w != h && sw != sh && (w > h) != (sw > sh) {
+        [h, w]
+    } else {
+        native
     }
 }
 
@@ -285,7 +327,54 @@ mod tests {
             millis: 0.0,
             cache_hit: false,
             full: true,
+            native: None,
         }
+    }
+
+    #[test]
+    fn native_size_follows_the_turned_image() {
+        // A portrait frame (EXIF 6/8): the stored preview is 6000×4000, the
+        // decoded thumbnail is upright 213×320.
+        assert_eq!(upright([6000, 4000], [213, 320]), [4000, 6000]);
+        assert_eq!(upright([6000, 4000], [320, 213]), [6000, 4000]);
+        assert_eq!(upright([4000, 4000], [320, 320]), [4000, 4000]);
+    }
+
+    fn job(idx: usize, kind: JobKind) -> Job {
+        Job {
+            idx,
+            kind,
+            path: PathBuf::from(format!("/x/{idx}.jpg")),
+            size: 0,
+            modified: None,
+            long_side: 100,
+            generation: 0,
+        }
+    }
+
+    #[test]
+    fn current_preview_beats_thumbs_and_stale_previews_drop() {
+        // No workers: inspect the queue only.
+        let (tx, rx) = unbounded();
+        let pool = Pool {
+            shared: Arc::new(Shared {
+                q: Mutex::new(Queue::default()),
+                cv: Condvar::new(),
+                cache: None,
+                ctx: egui::Context::default(),
+                tx,
+            }),
+            rx,
+        };
+        pool.request(job(1, JobKind::Thumb), 0);
+        pool.request(job(40, JobKind::Preview), 0); // flipped past
+        pool.request(job(41, JobKind::Preview), 0); // current
+        pool.request(job(42, JobKind::Preview), 1); // next
+        pool.retain_previews(&[41, 42]);
+        let q = pool.shared.q.lock().unwrap();
+        let order: Vec<(u32, u8, usize)> = q.order.iter().copied().collect();
+        assert_eq!(order, vec![(0, 0, 41), (0, 1, 1), (1, 0, 42)]);
+        assert!(!q.jobs.contains_key(&(40, JobKind::Preview)));
     }
 
     #[test]

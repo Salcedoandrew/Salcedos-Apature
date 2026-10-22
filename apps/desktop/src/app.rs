@@ -37,7 +37,44 @@ use crate::Launch;
 const THUMB_PX: u32 = 320;
 const PREFETCH_ROWS: usize = 3;
 const KEEP_ROWS: usize = 12;
-const PREVIEW_LRU: usize = 6;
+const PREVIEW_LRU: usize = 8;
+
+/// Positions to preload around `pos` in a view of `len`, most urgent
+/// first: two ahead in the direction of travel, one behind, a third ahead.
+pub fn prefetch_plan(pos: usize, len: usize, dir: isize) -> Vec<usize> {
+    let d = if dir < 0 { -1 } else { 1 };
+    [d, 2 * d, -d, 3 * d]
+        .iter()
+        .filter_map(|&k| {
+            let p = pos as isize + k;
+            (p >= 0 && (p as usize) < len).then_some(p as usize)
+        })
+        .collect()
+}
+
+/// Which cached previews to drop, oldest first, so at most `max_n` stay and
+/// their bytes fit in `budget`. Photos in `keep` (on screen, preloading)
+/// are never dropped, even when that leaves the cache over budget.
+pub fn preview_evictions(
+    lru: &VecDeque<usize>,
+    bytes: impl Fn(usize) -> usize,
+    keep: &[usize],
+    max_n: usize,
+    budget: usize,
+) -> Vec<usize> {
+    let mut left: Vec<usize> = lru.iter().copied().collect();
+    let mut total: usize = left.iter().map(|&i| bytes(i)).sum();
+    let mut out = Vec::new();
+    while left.len() > max_n || total > budget {
+        let Some(p) = left.iter().position(|i| !keep.contains(i)) else {
+            break;
+        };
+        let i = left.remove(p);
+        total -= bytes(i);
+        out.push(i);
+    }
+    out
+}
 
 /// Everything that belongs to one open folder. The active tab's state lives
 /// directly in `App` (so the UI code reads `app.items` etc.); inactive tabs
@@ -50,6 +87,9 @@ pub struct TabState {
     pub exif: Vec<Option<ExifSummary>>,
     pub thumbs: Vec<Option<TextureHandle>>,
     pub thumb_err: Vec<Option<String>>,
+    /// Upright size of the largest image each photo can show, from the
+    /// first decode of it (see `worker::Done::native`).
+    pub native: Vec<Option<[u32; 2]>>,
     /// Preview textures: (texture, long side in px, is the full resolution).
     pub previews: HashMap<usize, (TextureHandle, u32, bool)>,
     pub preview_lru: VecDeque<usize>,
@@ -138,6 +178,10 @@ pub struct PreviewView {
     /// One magnification for 1:1 and the loupe: 1.0 = one image pixel per
     /// screen pixel, up to 4.0. ⌘-scroll or ⌘= / ⌘- change it.
     pub zoom: f32,
+    /// Last view position drawn and the direction of travel (+1 / -1),
+    /// for preloading ahead.
+    pub last_pos: Option<usize>,
+    pub dir: isize,
 }
 
 /// Crop ratios as width/height of the *displayed* frame; None = free.
@@ -209,6 +253,8 @@ impl Default for PreviewView {
             zoom_from: None,
             last_rect: None,
             compare: None,
+            last_pos: None,
+            dir: 1,
         }
     }
 }
@@ -388,6 +434,9 @@ pub struct App {
     pub exif: Vec<Option<ExifSummary>>,
     pub thumbs: Vec<Option<TextureHandle>>,
     pub thumb_err: Vec<Option<String>>,
+    /// Upright size of the largest image each photo can show, from the
+    /// first decode of it (see `worker::Done::native`).
+    pub native: Vec<Option<[u32; 2]>>,
     /// Preview textures: (texture, long side in px, is the full resolution).
     pub previews: HashMap<usize, (TextureHandle, u32, bool)>,
     preview_lru: VecDeque<usize>,
@@ -547,6 +596,7 @@ impl App {
             exif: Vec::new(),
             thumbs: Vec::new(),
             thumb_err: Vec::new(),
+            native: Vec::new(),
             previews: HashMap::new(),
             preview_lru: VecDeque::new(),
             pool,
@@ -2657,6 +2707,7 @@ impl App {
             exif: std::mem::take(&mut self.exif),
             thumbs: std::mem::take(&mut self.thumbs),
             thumb_err: std::mem::take(&mut self.thumb_err),
+            native: std::mem::take(&mut self.native),
             previews: std::mem::take(&mut self.previews),
             preview_lru: std::mem::take(&mut self.preview_lru),
             generation: std::mem::replace(&mut self.generation, self.next_generation),
@@ -2684,6 +2735,7 @@ impl App {
         self.exif = t.exif;
         self.thumbs = t.thumbs;
         self.thumb_err = t.thumb_err;
+        self.native = t.native;
         self.previews = t.previews;
         self.preview_lru = t.preview_lru;
         self.generation = t.generation;
@@ -2800,6 +2852,7 @@ impl App {
                 self.exif = read.into_iter().map(|(_, _, e)| e).collect();
                 self.thumbs = vec![None; n];
                 self.thumb_err = vec![None; n];
+                self.native = vec![None; n];
                 self.previews.clear();
                 self.preview_lru.clear();
                 self.selection.clear();
@@ -3089,6 +3142,9 @@ impl App {
             }
             match done.result {
                 Ok(rgb) => {
+                    if let (Some(n), Some(slot)) = (done.native, self.native.get_mut(done.idx)) {
+                        *slot = Some(n);
+                    }
                     let gain = if done.kind == JobKind::Preview {
                         self.preview_boost
                     } else {
@@ -3136,34 +3192,39 @@ impl App {
     /// its neighbours or the compare set.
     fn evict_previews(&mut self) {
         const PREVIEW_BUDGET: usize = 768 << 20;
-        loop {
-            let total: usize = self
-                .previews
-                .values()
-                .map(|(t, ..)| {
-                    let [w, h] = t.size();
-                    w * h * 4
-                })
-                .sum();
-            if self.preview_lru.len() <= PREVIEW_LRU && total <= PREVIEW_BUDGET {
-                break;
-            }
-            // The focused photo and its neighbours in view order (what the
-            // arrow keys go to next, prefetched), not in file order.
-            let near = [
-                Some(self.cursor),
-                self.view_neighbor(-1),
-                self.view_neighbor(1),
-            ];
-            let keep = |i: usize| {
-                near.contains(&Some(i)) || self.pv.compare.as_ref().is_some_and(|c| c.contains(&i))
-            };
-            let Some(p) = self.preview_lru.iter().position(|&i| !keep(i)) else {
-                break;
-            };
-            let idx = self.preview_lru.remove(p).unwrap();
+        // The focused photo and what is preloading around it in view order
+        // (where the arrow keys go next), not in file order.
+        let mut keep = self.preview_wanted();
+        if let Some(c) = &self.pv.compare {
+            keep.extend(c.iter().copied());
+        }
+        let bytes = |i: usize| {
+            self.previews.get(&i).map_or(0, |(t, ..)| {
+                let [w, h] = t.size();
+                w * h * 4
+            })
+        };
+        let drop = preview_evictions(&self.preview_lru, bytes, &keep, PREVIEW_LRU, PREVIEW_BUDGET);
+        for idx in drop {
+            self.preview_lru.retain(|&i| i != idx);
             self.previews.remove(&idx);
         }
+    }
+
+    /// Photos to preload in Preview, most urgent first (see `prefetch_plan`),
+    /// in the direction the user last moved.
+    pub fn prefetch_targets(&self) -> Vec<usize> {
+        prefetch_plan(self.cursor_pos(), self.view.len(), self.pv.dir)
+            .into_iter()
+            .filter_map(|p| self.view.get(p).copied())
+            .collect()
+    }
+
+    /// The focused photo followed by its prefetch targets.
+    pub fn preview_wanted(&self) -> Vec<usize> {
+        let mut v = vec![self.cursor];
+        v.extend(self.prefetch_targets());
+        v
     }
 
     pub fn request_thumb(&self, idx: usize, prio: u32) {
@@ -3338,6 +3399,7 @@ impl App {
                     // Re-render this photo with the new orientation.
                     self.thumbs[i] = None;
                     self.thumb_err[i] = None;
+                    self.native[i] = None;
                     self.previews.remove(&i);
                     self.preview_lru.retain(|&p| p != i);
                 }
@@ -4802,6 +4864,35 @@ fn upload(ctx: &egui::Context, name: &str, rgb: &Rgb, gain_stops: u8) -> Texture
         ColorImage::from_rgb([rgb.width as usize, rgb.height as usize], &boosted)
     };
     ctx.load_texture(name, img, TextureOptions::LINEAR)
+}
+
+#[cfg(test)]
+mod prefetch_tests {
+    use super::*;
+
+    #[test]
+    fn prefetch_goes_ahead_in_the_direction_of_travel() {
+        assert_eq!(prefetch_plan(10, 100, 1), vec![11, 12, 9, 13]);
+        assert_eq!(prefetch_plan(10, 100, -1), vec![9, 8, 11, 7]);
+        // Clipped at the ends of the view.
+        assert_eq!(prefetch_plan(0, 100, -1), vec![1]);
+        assert_eq!(prefetch_plan(98, 100, 1), vec![99, 97]);
+        assert!(prefetch_plan(0, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn eviction_drops_oldest_but_keeps_wanted() {
+        let lru: VecDeque<usize> = (0..10).collect();
+        // Count limit only: drop the two oldest not kept.
+        let out = preview_evictions(&lru, |_| 1, &[0, 9], 8, usize::MAX);
+        assert_eq!(out, vec![1, 2]);
+        // Byte budget: 10 previews of 100 bytes, budget 350, keep 7..=9.
+        let out = preview_evictions(&lru, |_| 100, &[7, 8, 9], 8, 350);
+        assert_eq!(out, vec![0, 1, 2, 3, 4, 5, 6]);
+        // Everything wanted: nothing goes, even over budget.
+        let lru: VecDeque<usize> = (0..3).collect();
+        assert!(preview_evictions(&lru, |_| 100, &[0, 1, 2], 1, 10).is_empty());
+    }
 }
 
 #[cfg(test)]
