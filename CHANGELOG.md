@@ -12,8 +12,12 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - A new app icon (the modern A) with three optional alternates (photo frame, aperture, field), every size and `.icns`, generated from `tools/apature_icons.py` with the accent as a parameter.
 - Press kit in `docs/marketing`: hero images, social preview, feature cards, copy kit; `tools/marketing-shots.sh` recaptures the screenshot set.
 - Check for updates: once a day, or Apature › Check for Updates…, a toast offers the newest release's download. Settings › General can turn it off or include betas.
+- Previews for more RAW formats, and bigger ones. Apature now finds the camera's own JPEG in Fujifilm RAF, Canon CR3 and CRW, Panasonic RW2 and Leica RWL, Olympus ORF (from the maker note), Sony SRF and SR2 and Sigma X3F, and shows the largest one by default. Hasselblad 3FR/FFF and Phase One IIQ files carry no JPEG, so their built-in RGB thumbnail is used instead. CRW, SRF, SR2, RWL, FFF and X3F files now show up in folders.
+- `apature-cli preview extract FILE` writes the largest embedded preview out untouched (`--prefer smallest` or a pixel size, `--max-bytes`, `--list`), and `apature-cli preview list FILE` lists them all.
 
 ### Changed
+- Canon CR2 and some DNG files used to show a reduced or the wrong picture (sometimes the raw sensor data itself); lossless raw streams are no longer mistaken for previews, so the camera's real preview is used.
+- Fujifilm RAF files now show the right camera, lens, exposure and orientation.
 - Screenshots now show a real storm-damage assignment instead of test frames.
 - Example outlet names removed from the export preset hint and test fixtures.
 

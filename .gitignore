@@ -10,3 +10,7 @@
 
 # Generated Photoshop files: attached to releases as the press kit zip
 docs/marketing/*.psd
+
+# RAW samples from raw.pixls.us for the preview extractor tests (tests/raw-samples/fetch.sh)
+/tests/raw-samples/*
+!/tests/raw-samples/fetch.sh

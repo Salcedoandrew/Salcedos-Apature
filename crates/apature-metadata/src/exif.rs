@@ -83,10 +83,27 @@ pub fn read(path: &Path) -> Result<ExifSummary, ExifError> {
 /// Read the summary from in-memory bytes. Returns `None` if no TIFF header
 /// can be found (neither a TIFF container nor a JPEG with an Exif APP1).
 pub fn from_bytes(data: &[u8]) -> Option<ExifSummary> {
+    // Fujifilm RAF keeps its Exif (orientation included) in the embedded
+    // JPEG named by the big-endian offset and length at bytes 84 and 88.
+    if let Some(jpeg) = raf_jpeg(data) {
+        return from_bytes(jpeg);
+    }
     if let Some(tiff_bytes) = exif_segment_in_jpeg(data) {
         return from_tiff(tiff_bytes);
     }
     from_tiff(data)
+}
+
+fn raf_jpeg(data: &[u8]) -> Option<&[u8]> {
+    if !data.starts_with(b"FUJIFILMCCD-RAW ") {
+        return None;
+    }
+    let be = |at: usize| -> Option<usize> {
+        Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?) as usize)
+    };
+    let (off, len) = (be(84)?, be(88)?);
+    let jpeg = data.get(off..off.checked_add(len)?)?;
+    jpeg.starts_with(&[0xFF, 0xD8]).then_some(jpeg)
 }
 
 fn from_tiff(data: &[u8]) -> Option<ExifSummary> {
@@ -233,5 +250,15 @@ mod tests {
         let j = from_bytes(&jpg).unwrap();
         assert_eq!(j.model.as_deref(), Some("Z 6_2"));
         assert_eq!(from_bytes(b"nothing here"), None);
+
+        // The same JPEG inside a Fujifilm RAF header: orientation comes through.
+        let mut raf = b"FUJIFILMCCD-RAW 0201FF383501".to_vec();
+        raf.resize(100, 0);
+        raf[84..88].copy_from_slice(&100u32.to_be_bytes());
+        raf[88..92].copy_from_slice(&(jpg.len() as u32).to_be_bytes());
+        raf.extend_from_slice(&jpg);
+        let r = from_bytes(&raf).unwrap();
+        assert_eq!(r.orientation, 6);
+        assert_eq!(r.model.as_deref(), Some("Z 6_2"));
     }
 }

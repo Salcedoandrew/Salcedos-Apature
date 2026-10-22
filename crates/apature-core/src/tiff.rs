@@ -107,9 +107,9 @@ impl<'a> Tiff<'a> {
             _ => return Err(TiffError::BadMagic),
         };
         let t = Tiff { data, order };
-        // 42 = TIFF, 0x4F52 = Olympus ORF, 0x5352 = Panasonic RW2.
+        // 42 = TIFF, 0x4F52 = Olympus ORF, 0x5352 = Olympus ORF (IIRS), 0x55 = Panasonic RW2.
         match t.u16(2)? {
-            42 | 0x4F52 | 0x5352 => {}
+            42 | 0x4F52 | 0x5352 | 0x0055 => {}
             _ => return Err(TiffError::BadMagic),
         }
         let first = t.u32(4)?;

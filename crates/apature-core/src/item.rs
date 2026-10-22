@@ -13,8 +13,8 @@ pub enum Kind {
 /// Map a file extension (any case) to a [`Kind`]. Unknown extensions return `None`.
 pub fn kind_for_extension(ext: &str) -> Option<Kind> {
     match ext.to_ascii_lowercase().as_str() {
-        "nef" | "nrw" | "cr2" | "cr3" | "arw" | "dng" | "raf" | "orf" | "rw2" | "pef" | "srw"
-        | "3fr" | "iiq" => Some(Kind::Raw),
+        "nef" | "nrw" | "cr2" | "cr3" | "crw" | "arw" | "srf" | "sr2" | "dng" | "raf" | "orf"
+        | "rw2" | "rwl" | "pef" | "srw" | "3fr" | "fff" | "iiq" | "x3f" => Some(Kind::Raw),
         "jpg" | "jpeg" | "jpe" => Some(Kind::Jpeg),
         "heic" | "heif" | "hif" => Some(Kind::Heic),
         _ => None,
@@ -129,6 +129,9 @@ mod tests {
     #[test]
     fn extensions_map_to_kinds() {
         assert_eq!(kind_for_extension("NEF"), Some(Kind::Raw));
+        for ext in ["CRW", "srf", "SR2", "rwl", "FFF", "x3f"] {
+            assert_eq!(kind_for_extension(ext), Some(Kind::Raw), "{ext}");
+        }
         assert_eq!(kind_for_extension("jpg"), Some(Kind::Jpeg));
         assert_eq!(kind_for_extension("Jpeg"), Some(Kind::Jpeg));
         assert_eq!(kind_for_extension("heic"), Some(Kind::Heic));

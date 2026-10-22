@@ -84,6 +84,41 @@ go crazy about it; tell me what breaks and what you'd want next.
   decodes a RAW to show a thumbnail when the camera already did the work.
 - Optional: `brew install jpeg-xl` for JPEG XL export. Nothing else.
 
+## RAW previews
+
+Apature shows the JPEG the camera embedded in the RAW and picks the largest
+one by default. Checked against one sample per camera from
+[raw.pixls.us](https://raw.pixls.us) (`tests/raw-samples/fetch.sh`). The size
+is the biggest preview in that sample file; other bodies of the same format can
+carry bigger or smaller ones.
+
+| Format | Cameras | Status | Preview found in sample |
+|---|---|---|---|
+| CR2 | Canon (EOS 40D) | ✅ | 1936×1288 |
+| CR3 | Canon (EOS R6) | ✅ | 3408×2272 |
+| CRW | Canon (EOS 10D) | ✅ | 1536×1024 |
+| NEF | Nikon (D70s) | ✅ | 3008×2000 |
+| NRW | Nikon (Coolpix P7000) | ✅ | 3648×2736 |
+| ARW | Sony (α7S) | ✅ | 1616×1080 |
+| SRF | Sony (DSC-F828) | ✅ | 640×480, the largest the file holds |
+| SR2 | Sony (DSC-R1) | ✅ | 640×424, the largest the file holds |
+| RAF | Fujifilm (X-T3; FinePix S5000) | ✅ | 4416×2944; 1280×960 |
+| RW2 | Panasonic (DMC-LX7) | ✅ | 1920×1920 (shot 1:1) |
+| RWL | Leica (D-LUX 4) | ✅ | 1920×1280 |
+| ORF | Olympus (E-M10; E-10) | ✅ | 3200×2400; 160×120, the largest the E-10 file holds |
+| PEF | Pentax (K10D) | ✅ | 3872×2592 |
+| DNG | Adobe DNG Converter, Pentax K-x, Apple ProRAW (iPhone 12 Pro) | ✅ | 3960×2640, 4288×2848, 4032×3024 |
+| 3FR | Hasselblad (CFV; X1D) | ⚠️ no JPEG in file, RGB thumbnail re-encoded | 218×218; 1440×1080 |
+| FFF | Hasselblad (H5D-40; X1D II) | ⚠️ no JPEG in file, RGB thumbnail re-encoded | 1217×913; 1181×885 |
+| IIQ | Phase One (P25+; IQ150) | ⚠️ no JPEG in file, RGB thumbnail re-encoded | 300×220; 588×442 |
+| SRW | Samsung (NX100) | ✅ | 4592×3056 |
+| X3F | Sigma (DP1) | ✅ | 2640×1760 |
+
+`apature-cli preview list FILE` shows every preview in a file;
+`apature-cli preview extract FILE [--prefer largest|smallest|PIXELS] [--max-bytes N] [--out x.jpg]` writes one out
+untouched (default: the largest under 8 MiB). Lossless JPEG streams, which are raw sensor data rather than
+previews, are never picked.
+
 ## Install
 
 Download the DMG from the [latest release](https://github.com/McCal-Codes/apature/releases/latest) and drag Apature

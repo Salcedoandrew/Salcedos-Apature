@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use apature_core::{ColorClass, ColorClassScheme, Marks, Rating, ScanOptions};
 use apature_metadata::items;
-use apature_preview::{Source, ThumbCache};
+use apature_preview::{Prefer, Source, ThumbCache};
 
 #[derive(Parser)]
 #[command(name = "apature-cli", version, about = "Apature command line")]
@@ -35,6 +35,11 @@ enum Cmd {
         file: PathBuf,
         #[arg(short, long)]
         out: PathBuf,
+    },
+    /// Pull the camera's own JPEG preview out of a RAW file.
+    Preview {
+        #[command(subcommand)]
+        cmd: PreviewCmd,
     },
     /// Print the EXIF summary for a file.
     Exif { file: PathBuf },
@@ -218,11 +223,85 @@ enum Cmd {
     CacheDir,
 }
 
+#[derive(Subcommand)]
+enum PreviewCmd {
+    /// Write one embedded preview out as a JPEG without re-encoding
+    /// (or list them all with --list).
+    Extract {
+        file: PathBuf,
+        /// largest (default), smallest, or a pixel count: the smallest
+        /// preview at least that long on its long side.
+        #[arg(long, default_value = "largest")]
+        prefer: String,
+        /// Output path; defaults to the input name with "-preview.jpg".
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Skip previews bigger than this many bytes.
+        #[arg(long, default_value_t = apature_preview::DEFAULT_MAX_BYTES)]
+        max_bytes: usize,
+        /// List every embedded preview instead of writing one.
+        #[arg(long)]
+        list: bool,
+    },
+    /// List every embedded preview, largest first.
+    List { file: PathBuf },
+}
+
+fn parse_prefer(s: &str) -> Result<Prefer> {
+    Ok(match s.to_ascii_lowercase().as_str() {
+        "largest" | "large" => Prefer::Largest,
+        "smallest" | "small" => Prefer::Smallest,
+        n => Prefer::AtLeast(n.parse().with_context(|| {
+            format!("--prefer: expected largest, smallest or a number, got {s:?}")
+        })?),
+    })
+}
+
+fn preview_cmd(cmd: PreviewCmd) -> Result<()> {
+    match cmd {
+        PreviewCmd::List { file }
+        | PreviewCmd::Extract {
+            file, list: true, ..
+        } => previews(&file),
+        PreviewCmd::Extract {
+            file,
+            prefer,
+            out,
+            max_bytes,
+            list: false,
+        } => {
+            let prefer = parse_prefer(&prefer)?;
+            let (c, bytes) = apature_preview::extract(&file, prefer, max_bytes)?;
+            let out = out.unwrap_or_else(|| {
+                let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+                file.with_file_name(format!("{stem}-preview.jpg"))
+            });
+            if out.exists() {
+                bail!(
+                    "{} already exists; pass --out to choose another path",
+                    out.display()
+                );
+            }
+            std::fs::write(&out, &bytes)?;
+            println!(
+                "wrote {}x{} ({} bytes) from {} to {}",
+                c.width,
+                c.height,
+                c.length,
+                c.source,
+                out.display()
+            );
+            Ok(())
+        }
+    }
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Scan { dir, recursive } => scan(&dir, recursive),
         Cmd::Previews { file } => previews(&file),
         Cmd::Extract { file, out } => extract(&file, &out),
+        Cmd::Preview { cmd } => preview_cmd(cmd),
         Cmd::Exif { file } => exif(&file),
         Cmd::Bench {
             dir,
