@@ -7,7 +7,7 @@ use apature_core::ColorClassScheme;
 use super::tokens::{Theme, S1, S2, S3, S4};
 use crate::app::App;
 use crate::commands::Command;
-use crate::prefs::Appearance;
+use crate::prefs::{Appearance, NumberKeys, ShortcutLayout};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
@@ -103,6 +103,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     }
 }
 
+/// Apature classic keys (Settings › Shortcuts › Apature classic).
 const SHORTCUTS: &[(&str, &str)] = &[
     (
         "← → ↑ ↓",
@@ -134,6 +135,48 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("⌃⌘S · ⌥⌘I · ⇧F", "Sidebar · inspector · filmstrip"),
     ("⌥⌘F", "Clear filters"),
     ("⌘O / ⌘T · ⌘W", "Open folder in a new tab · close tab"),
+    ("⌘⇧] · ⌘⇧[", "Next · previous tab"),
+    ("⌘⏎", "Save caption and advance"),
+    ("⌘,", "Settings"),
+];
+
+/// Photo Mechanic's macOS keys, for the actions Apature has (the default).
+const SHORTCUTS_PM: &[(&str, &str)] = &[
+    (
+        "← → ↑ ↓",
+        "Move focus (⇧ extends the selection, ⌘ keeps it)",
+    ),
+    ("X · T", "Reject · toggle tag"),
+    ("⏎ / Space · Esc", "Preview · back"),
+    (
+        "Z · V",
+        "Preview: 1:1 at the pointer · compare the selection",
+    ),
+    (
+        "L · ⌘scroll",
+        "Preview: loupe under the pointer · magnification 100–400 %",
+    ),
+    (
+        "C · R · G",
+        "Preview: crop tool · next ratio · next guides (⏎ apply, ⌥C or ⌫ remove, Esc cancel)",
+    ),
+    ("B", "Preview: brighten +1/+2 stops, view only"),
+    ("[ · ]  or  ⌘[ · ⌘]", "Rotate left · right (sidecar only)"),
+    ("S", "Expand or collapse the focused burst stack"),
+    ("M or ⌘M", "Rename photos"),
+    ("I · ⌘⇧I", "Caption the photo · apply the assignment pad"),
+    ("F5", "Refresh the folder, keeping cursor and selection"),
+    ("⌘A · ⌘D", "Select all · none"),
+    ("⌘Z · ⌘⇧Z", "Undo · redo"),
+    ("⌘⌫", "Move to Trash"),
+    ("⌥⌘C · ⌥⌘V", "Copy · paste metadata"),
+    ("⌘R", "Preview"),
+    ("⌘⇧1 · ⌘⇧3 … ⌘⇧5", "Sheet · Caption · Ingest · Export"),
+    ("⌘G · ⌘⇧G · ⌃⌘X", "Ingest… · Live Ingest · Export…"),
+    ("⌘= · ⌘-", "Larger · smaller thumbnails"),
+    ("⌃⌘S · ⌥⌘I · ⇧F", "Sidebar · inspector · filmstrip"),
+    ("⌥⌘F", "Clear filters"),
+    ("⌘O / ⌘N · ⌘W", "Open folder in a new tab · close tab"),
     ("⌘⇧] · ⌘⇧[", "Next · previous tab"),
     ("⌘⏎", "Save caption and advance"),
     ("⌘,", "Settings"),
@@ -553,11 +596,29 @@ fn body(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Command>) 
             }
             Page::Shortcuts => {
                 heading(ui, t, "Shortcuts");
+                section(ui, t, "Shortcut layout");
+                ui.horizontal_wrapped(|ui| {
+                    for (l, label) in [
+                        (ShortcutLayout::PhotoMechanic, "Photo Mechanic"),
+                        (ShortcutLayout::Classic, "Apature classic"),
+                    ] {
+                        if super::icons::chip(ui, t, label, app.prefs.shortcut_layout == l).clicked() {
+                            app.prefs.shortcut_layout = l;
+                            app.prefs_dirty = true;
+                        }
+                    }
+                });
+                let pm = app.prefs.shortcut_layout == ShortcutLayout::PhotoMechanic;
+                hint(ui, t, if pm {
+                    "Photo Mechanic's macOS keys for everything Apature does. Keys it has no match for keep Apature's."
+                } else {
+                    "Apature's original keys."
+                });
                 section(ui, t, "Number keys 1–8");
                 ui.horizontal_wrapped(|ui| {
                     for (m, label) in [
-                        (crate::prefs::NumberKeys::Rating, "Stars: 1–5 rate, 0 clears"),
-                        (crate::prefs::NumberKeys::ColorClass, "Colour class: 1–8, 0 clears (Photo Mechanic)"),
+                        (NumberKeys::Rating, "Stars: 1–5 rate, 0 clears"),
+                        (NumberKeys::ColorClass, "Colour class: 1–8, 0 clears (Photo Mechanic)"),
                     ] {
                         if super::icons::chip(ui, t, label, app.prefs.number_keys == m).clicked() {
                             app.prefs.number_keys = m;
@@ -565,27 +626,32 @@ fn body(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Command>) 
                         }
                     }
                 });
-                hint(ui, t, match app.prefs.number_keys {
-                    crate::prefs::NumberKeys::Rating => "⌘1–⌘8 set the colour class, ⌘0 clears it.",
-                    crate::prefs::NumberKeys::ColorClass => "⌘0–⌘5 set the rating.",
+                hint(ui, t, match (pm, app.prefs.number_keys) {
+                    (true, _) => "⌘1–⌘8 always set the colour class and ⌃1–⌃5 the rating, as in Photo Mechanic.",
+                    (false, NumberKeys::Rating) => "⌘1–⌘8 set the colour class, ⌘0 clears it.",
+                    (false, NumberKeys::ColorClass) => "⌘0–⌘5 set the rating.",
                 });
                 ui.add_space(S3);
                 hint(ui, t, "Editable profiles arrive later.");
                 ui.add_space(S2);
-                let (num_keys, num_row, cmd_keys, cmd_row): (&str, &str, &str, &str) = match app.prefs.number_keys {
-                    crate::prefs::NumberKeys::Rating => ("1–5 · 0", "Rating · clear", "⌘1–⌘8 · ⌘0", "Colour class · clear"),
-                    crate::prefs::NumberKeys::ColorClass => ("1–8 · 0", "Colour class · clear", "⌘0–⌘5", "Rating · clear"),
+                let bare: (&str, &str) = match app.prefs.number_keys {
+                    NumberKeys::Rating => ("1–5 · 0", "Rating · clear"),
+                    NumberKeys::ColorClass => ("1–8 · 0", "Colour class · clear"),
                 };
+                let mut rows: Vec<(&str, &str)> = vec![bare];
+                if pm {
+                    rows.push(("⌘1–⌘8 · ⌘0", "Colour class · clear"));
+                    rows.push(("⌃1–⌃5 · ⌃0", "Rating · clear"));
+                } else if app.prefs.number_keys == NumberKeys::Rating {
+                    rows.push(("⌘1–⌘8 · ⌘0", "Colour class · clear"));
+                } else {
+                    rows.push(("⌘0–⌘5", "Rating · clear"));
+                }
+                rows.extend_from_slice(if pm { SHORTCUTS_PM } else { SHORTCUTS });
                 egui::Grid::new("keys").num_columns(2).spacing([S4, S2]).striped(true).show(ui, |ui| {
-                    ui.label(RichText::new(num_keys).monospace().size(11.5).color(t.text));
-                    ui.label(RichText::new(num_row).size(12.0).color(t.text2));
-                    ui.end_row();
-                    ui.label(RichText::new(cmd_keys).monospace().size(11.5).color(t.text));
-                    ui.label(RichText::new(cmd_row).size(12.0).color(t.text2));
-                    ui.end_row();
-                    for (k, v) in SHORTCUTS {
-                        ui.label(RichText::new(*k).monospace().size(11.5).color(t.text));
-                        ui.label(RichText::new(*v).size(12.0).color(t.text2));
+                    for (k, v) in rows {
+                        ui.label(RichText::new(k).monospace().size(11.5).color(t.text));
+                        ui.label(RichText::new(v).size(12.0).color(t.text2));
                         ui.end_row();
                     }
                 });

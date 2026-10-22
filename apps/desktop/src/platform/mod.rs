@@ -87,6 +87,21 @@ impl Platform {
         let _ = (sidebar, inspector, filmstrip, advance);
     }
 
+    /// Point the menu's key equivalents at a shortcut layout and the
+    /// number-key choice; nothing happens when neither changed.
+    pub fn set_shortcuts(
+        &self,
+        layout: crate::prefs::ShortcutLayout,
+        numbers: crate::prefs::NumberKeys,
+    ) {
+        #[cfg(target_os = "macos")]
+        if let Some(m) = &self.menu {
+            m.set_shortcuts(layout, numbers);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (layout, numbers);
+    }
+
     pub fn set_class_names(&self, names: &[String; 8]) {
         #[cfg(target_os = "macos")]
         if let Some(m) = &self.menu {

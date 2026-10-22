@@ -4,6 +4,20 @@ use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::commands::{Command, Workspace};
+use crate::prefs::{NumberKeys, ShortcutLayout};
+
+/// Digit key codes, index = digit.
+const DIGITS: [Code; 9] = [
+    Code::Digit0,
+    Code::Digit1,
+    Code::Digit2,
+    Code::Digit3,
+    Code::Digit4,
+    Code::Digit5,
+    Code::Digit6,
+    Code::Digit7,
+    Code::Digit8,
+];
 
 pub struct MenuBar {
     menu: Menu,
@@ -15,6 +29,12 @@ pub struct MenuBar {
     inspector: CheckMenuItem,
     filmstrip: CheckMenuItem,
     class_items: Vec<MenuItem>,
+    class_none: MenuItem,
+    /// Rating items with their star count (0 = Unrated).
+    rating_items: Vec<(i8, MenuItem)>,
+    /// Items whose key differs by layout: (item, Photo Mechanic, classic).
+    keyed: Vec<(MenuItem, Option<Accelerator>, Option<Accelerator>)>,
+    applied: std::cell::Cell<Option<(ShortcutLayout, NumberKeys)>>,
 }
 
 fn item(cmd: Command, text: &str, acc: Option<Accelerator>) -> MenuItem {
@@ -25,6 +45,22 @@ fn acc(mods: Modifiers, code: Code) -> Option<Accelerator> {
     Some(Accelerator::new(mods, code))
 }
 
+type Keyed = Vec<(MenuItem, Option<Accelerator>, Option<Accelerator>)>;
+
+/// An item whose key depends on the shortcut layout. It starts with the
+/// classic key; `set_shortcuts` picks the one in use.
+fn keyed(
+    list: &mut Keyed,
+    cmd: Command,
+    text: &str,
+    pm: Option<Accelerator>,
+    classic: Option<Accelerator>,
+) -> MenuItem {
+    let it = item(cmd, text, classic);
+    list.push((it.clone(), pm, classic));
+    it
+}
+
 impl MenuBar {
     pub fn install() -> muda::Result<Self> {
         let menu = Menu::new();
@@ -32,6 +68,8 @@ impl MenuBar {
         let cmd_shift = Modifiers::META | Modifiers::SHIFT;
         let cmd_alt = Modifiers::META | Modifiers::ALT;
         let ctrl_cmd = Modifiers::META | Modifiers::CONTROL;
+        let bare = Modifiers::empty();
+        let mut k: Keyed = Vec::new();
 
         let app = Submenu::new("Apature", true);
         app.append_items(&[
@@ -54,19 +92,39 @@ impl MenuBar {
                 "Open Folder in New Tab…",
                 acc(cmd, Code::KeyO),
             ),
-            &item(Command::PickFolder, "New Tab…", acc(cmd, Code::KeyT)),
+            &keyed(
+                &mut k,
+                Command::PickFolder,
+                "New Tab…",
+                acc(cmd, Code::KeyN),
+                acc(cmd, Code::KeyT),
+            ),
             &item(Command::CloseTab, "Close Tab", acc(cmd, Code::KeyW)),
             &item(Command::AddFavorite, "Add Folder to Favorites", None),
             &PredefinedMenuItem::separator(),
             &item(Command::LoadAssignment, "Load Assignment…", None),
             &item(Command::LoadCodes, "Load Code Replacements…", None),
             &PredefinedMenuItem::separator(),
-            &item(Command::IngestStart, "Ingest…", acc(cmd_shift, Code::KeyI)),
-            &item(Command::ExportStart, "Export…", acc(cmd, Code::KeyE)),
+            &keyed(
+                &mut k,
+                Command::IngestStart,
+                "Ingest…",
+                acc(cmd, Code::KeyG),
+                acc(cmd_shift, Code::KeyI),
+            ),
+            &keyed(
+                &mut k,
+                Command::ExportStart,
+                "Export…",
+                acc(ctrl_cmd, Code::KeyX),
+                acc(cmd, Code::KeyE),
+            ),
             &PredefinedMenuItem::separator(),
-            &item(
+            &keyed(
+                &mut k,
                 Command::RenamePhotos,
                 "Rename Photos…",
+                acc(cmd, Code::KeyM),
                 acc(cmd_shift, Code::KeyR),
             ),
             &item(
@@ -75,15 +133,23 @@ impl MenuBar {
                 acc(cmd, Code::Backspace),
             ),
             &PredefinedMenuItem::separator(),
-            &item(
+            &keyed(
+                &mut k,
                 Command::RevealInFinder,
                 "Reveal in Finder",
+                None,
                 acc(cmd, Code::KeyR),
             ),
             &PredefinedMenuItem::separator(),
             &item(Command::DeliverLast, "Send Last Export…", None),
             &item(Command::DeliverResendFailed, "Resend Failed Files", None),
-            &item(Command::LiveToggle, "Live Ingest", None),
+            &keyed(
+                &mut k,
+                Command::LiveToggle,
+                "Live Ingest",
+                acc(cmd_shift, Code::KeyG),
+                None,
+            ),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(Some("Close Window")),
         ])?;
@@ -109,9 +175,11 @@ impl MenuBar {
             ),
             &PredefinedMenuItem::separator(),
             &item(Command::SelectAll, "Select All", acc(cmd, Code::KeyA)),
-            &item(
+            &keyed(
+                &mut k,
                 Command::SelectNone,
                 "Deselect All",
+                acc(cmd, Code::KeyD),
                 acc(cmd_shift, Code::KeyA),
             ),
         ])?;
@@ -152,9 +220,11 @@ impl MenuBar {
                 "Contact Sheet",
                 acc(cmd_shift, Code::Digit1),
             ),
-            &item(
+            &keyed(
+                &mut k,
                 Command::SetWorkspace(Workspace::Preview),
                 "Preview",
+                acc(cmd, Code::KeyR),
                 acc(cmd_shift, Code::Digit2),
             ),
             &item(
@@ -176,9 +246,11 @@ impl MenuBar {
             &sidebar,
             &inspector,
             &filmstrip,
-            &item(
+            &keyed(
+                &mut k,
                 Command::RefreshFolder,
                 "Refresh Folder",
+                acc(bare, Code::F5),
                 acc(Modifiers::META, Code::KeyR),
             ),
             &PredefinedMenuItem::separator(),
@@ -201,10 +273,12 @@ impl MenuBar {
                 "Zoom 1:1 / Fit",
                 Some(Accelerator::new(Modifiers::empty(), Code::KeyZ)),
             ),
-            &item(
+            &keyed(
+                &mut k,
                 Command::ToggleCompare,
                 "Compare Selected",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyC)),
+                acc(bare, Code::KeyV),
+                acc(bare, Code::KeyC),
             ),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::fullscreen(None),
@@ -214,55 +288,36 @@ impl MenuBar {
         let names = apature_core::ColorClassScheme::default().names;
         let mut class_items = Vec::new();
         for (i, n) in names.iter().enumerate() {
-            let code = [
-                Code::Digit1,
-                Code::Digit2,
-                Code::Digit3,
-                Code::Digit4,
-                Code::Digit5,
-                Code::Digit6,
-                Code::Digit7,
-                Code::Digit8,
-            ][i];
             let it = item(
                 Command::SetClass(i as u8 + 1),
                 &format!("{} {n}", i + 1),
-                Some(Accelerator::new(Modifiers::empty(), code)),
+                acc(bare, DIGITS[i + 1]),
             );
             class.append(&it)?;
             class_items.push(it);
         }
-        class.append_items(&[
-            &PredefinedMenuItem::separator(),
-            &item(
-                Command::SetClass(0),
-                "None",
-                Some(Accelerator::new(Modifiers::empty(), Code::Digit0)),
-            ),
-        ])?;
+        let class_none = item(Command::SetClass(0), "None", acc(bare, Code::Digit0));
+        class.append_items(&[&PredefinedMenuItem::separator(), &class_none])?;
         let rating = Submenu::new("Rating", true);
+        let mut rating_items = Vec::new();
         for r in (1..=5).rev() {
-            let code = [
-                Code::Digit0,
-                Code::Digit1,
-                Code::Digit2,
-                Code::Digit3,
-                Code::Digit4,
-                Code::Digit5,
-            ][r as usize];
-            rating.append(&item(
+            let it = item(
                 Command::SetRating(r),
                 &format!(
                     "{} {}",
                     "★".repeat(r as usize),
                     if r == 1 { "Star" } else { "Stars" }
                 ),
-                acc(cmd, code),
-            ))?;
+                acc(cmd, DIGITS[r as usize]),
+            );
+            rating.append(&it)?;
+            rating_items.push((r, it));
         }
+        let unrated = item(Command::SetRating(0), "Unrated", acc(cmd, Code::Digit0));
+        rating_items.push((0, unrated.clone()));
         rating.append_items(&[
             &PredefinedMenuItem::separator(),
-            &item(Command::SetRating(0), "Unrated", acc(cmd, Code::Digit0)),
+            &unrated,
             &item(
                 Command::SetRating(-1),
                 "Reject",
@@ -298,19 +353,29 @@ impl MenuBar {
                 acc(cmd, Code::BracketRight),
             ),
             &PredefinedMenuItem::separator(),
-            &item(
+            &keyed(
+                &mut k,
                 Command::ApplyStationery,
                 "Apply Assignment Pad to Selection",
+                acc(cmd_shift, Code::KeyI),
                 None,
             ),
             &item(Command::SaveCaption, "Save Caption", None),
             &PredefinedMenuItem::separator(),
-            &item(
+            &keyed(
+                &mut k,
                 Command::CropToggle,
                 "Crop…",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyK)),
+                acc(bare, Code::KeyC),
+                acc(bare, Code::KeyK),
             ),
-            &item(Command::CropClear, "Remove Crop", None),
+            &keyed(
+                &mut k,
+                Command::CropClear,
+                "Remove Crop",
+                acc(Modifiers::ALT, Code::KeyC),
+                None,
+            ),
             &item(
                 Command::ToggleLoupe,
                 "Loupe",
@@ -364,6 +429,10 @@ impl MenuBar {
             filmstrip,
             advance,
             class_items,
+            class_none,
+            rating_items,
+            keyed: k,
+            applied: std::cell::Cell::new(None),
         })
     }
 
@@ -382,6 +451,33 @@ impl MenuBar {
     pub fn set_class_names(&self, names: &[String; 8]) {
         for (i, it) in self.class_items.iter().enumerate() {
             it.set_text(format!("{} {}", i + 1, names[i]));
+        }
+    }
+
+    /// Key equivalents for a layout. Photo Mechanic: ⌘ + digit sets the
+    /// colour class and ⌃ + digit the rating, and the bare digits are left to
+    /// the egui key handler (Number keys setting). Classic: the bare digits do
+    /// what the Number keys setting says and ⌘ + digit does the other.
+    pub fn set_shortcuts(&self, layout: ShortcutLayout, numbers: NumberKeys) {
+        if self.applied.get() == Some((layout, numbers)) {
+            return;
+        }
+        self.applied.set(Some((layout, numbers)));
+        let pm = layout == ShortcutLayout::PhotoMechanic;
+        for (it, p, c) in &self.keyed {
+            let _ = it.set_accelerator(if pm { *p } else { *c });
+        }
+        let (class_mods, rating_mods) = match (pm, numbers) {
+            (true, _) => (Modifiers::META, Modifiers::CONTROL),
+            (false, NumberKeys::ColorClass) => (Modifiers::empty(), Modifiers::META),
+            (false, NumberKeys::Rating) => (Modifiers::META, Modifiers::empty()),
+        };
+        for (i, it) in self.class_items.iter().enumerate() {
+            let _ = it.set_accelerator(acc(class_mods, DIGITS[i + 1]));
+        }
+        let _ = self.class_none.set_accelerator(acc(class_mods, DIGITS[0]));
+        for (r, it) in &self.rating_items {
+            let _ = it.set_accelerator(acc(rating_mods, DIGITS[*r as usize]));
         }
     }
 

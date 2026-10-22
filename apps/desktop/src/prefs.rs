@@ -116,6 +116,9 @@ pub struct Prefs {
     pub preview_in_window: bool,
     /// What the bare 1–8 keys set: colour class (Photo Mechanic) or star rating.
     pub number_keys: NumberKeys,
+    /// Photo Mechanic's macOS keys (the default, also for prefs saved before
+    /// this existed) or Apature's original set.
+    pub shortcut_layout: ShortcutLayout,
     pub assignment_file: Option<PathBuf>,
     pub codes_file: Option<PathBuf>,
     pub ingest: Option<apature_ingest::Options>,
@@ -190,6 +193,7 @@ impl Default for Prefs {
             stack_bursts: false,
             preview_in_window: false,
             number_keys: NumberKeys::Rating,
+            shortcut_layout: ShortcutLayout::PhotoMechanic,
             assignment_file: None,
             codes_file: None,
             ingest: None,
@@ -354,6 +358,16 @@ pub enum NumberKeys {
     ColorClass,
 }
 
+/// Which keys drive the menus: Photo Mechanic's macOS shortcuts or Apature's own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShortcutLayout {
+    /// ⌘1–⌘8 colour class, ⌃1–⌃5 rating, ⌘G ingest, ⌘M rename, ⌘D deselect, C crop.
+    #[default]
+    PhotoMechanic,
+    /// Apature's original keys: ⌘⇧I ingest, ⌘⇧R rename, ⌘⇧A deselect, K crop.
+    Classic,
+}
+
 impl Prefs {
     /// Remember a field value for the ▾ menu: newest first, no duplicates, 12 kept.
     pub fn remember_caption_value(&mut self, field: &str, value: &str) {
@@ -492,6 +506,15 @@ mod load_tests {
             PREFS_VERSION + 5,
             "the newer version number is kept so save() can refuse to downgrade"
         );
+    }
+
+    #[test]
+    fn file_without_a_layout_gets_photo_mechanic_keys() {
+        let (p, _) = Prefs::parse(r#"{"version":1,"number_keys":"ColorClass"}"#).unwrap();
+        assert_eq!(p.shortcut_layout, ShortcutLayout::PhotoMechanic);
+        assert_eq!(p.number_keys, NumberKeys::ColorClass);
+        let (p, _) = Prefs::parse(r#"{"version":1,"shortcut_layout":"Classic"}"#).unwrap();
+        assert_eq!(p.shortcut_layout, ShortcutLayout::Classic);
     }
 
     #[test]

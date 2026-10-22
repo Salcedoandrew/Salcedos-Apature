@@ -98,10 +98,53 @@ scripts/bundle.sh --install   # builds, bundles, signs ad-hoc, installs to /Appl
 
 ## Keys
 
-Arrows move, Enter or Space opens Preview, Esc returns. `1`–`5` rate, `0` clears, `⌘1`–`⌘8` set a colour class (or
-Photo Mechanic's layout in Settings › Shortcuts), `X` rejects, `T` tags. In Preview: `Z` 1:1, `C` compare, `L` loupe,
-`K` crop, `B` brighten, `S` burst stack, `⌘[` and `⌘]` rotate. `⌘⇧1`–`5` switch workspaces, `⌘E` exports, `⌘R`
-refreshes, `⌘,` opens Settings. The full table is in Settings › Shortcuts.
+Apature uses Photo Mechanic's macOS shortcuts out of the box, so your hands already know the way. Prefer Apature's
+original keys? Pick **Apature classic** in Settings › Shortcuts › Shortcut layout; the choice is remembered. The full
+table is also in Settings › Shortcuts.
+
+| Action | Photo Mechanic (default) | Apature classic |
+| --- | --- | --- |
+| Colour class 1–8 · clear | `⌘1`–`⌘8` · `⌘0` | `⌘1`–`⌘8` · `⌘0` (bare `1`–`8` · `0` if Number keys is set to colour class) |
+| Star rating 1–5 · clear | `⌃1`–`⌃5` · `⌃0` | `1`–`5` · `0` (`⌘0`–`⌘5` if Number keys is set to colour class) |
+| Bare number keys | stars (default) or colour class, per Settings › Shortcuts › Number keys | same |
+| Toggle tag | `T` | `T` |
+| Reject | `X` | `X` |
+| Preview · back | `Space` or `⏎` · `Esc` | `Space` or `⏎` · `Esc` |
+| Preview workspace | `⌘R` | `⌘⇧2` |
+| Zoom 1:1 / fit | `Z` | `Z` |
+| Compare the selection | `V` | `C` |
+| Crop tool · remove crop | `C` · `⌥C` | `K` · `⌫` in the crop tool |
+| Rotate left · right | `[` · `]` or `⌘[` · `⌘]` | `⌘[` · `⌘]` |
+| Rename photos | `M` or `⌘M` | `⌘⇧R` |
+| Caption the photo (Info) | `I` | `⌘⇧3` |
+| Apply assignment pad (metadata template) | `⌘⇧I` | none |
+| Copy · paste metadata | `⌥⌘C` · `⌥⌘V` | `⌥⌘C` · `⌥⌘V` |
+| Select all · none | `⌘A` · `⌘D` | `⌘A` · `⌘⇧A` |
+| Undo · redo | `⌘Z` · `⌘⇧Z` | `⌘Z` · `⌘⇧Z` |
+| Move to Trash | `⌘⌫` | `⌘⌫` |
+| Ingest · Live Ingest | `⌘G` · `⌘⇧G` | `⌘⇧I` · none |
+| Export | `⌃⌘X` | `⌘E` |
+| Refresh the folder | `F5` | `⌘R` |
+| Reveal in Finder | none | `⌘R` |
+| Open folder · new tab · close tab | `⌘O` · `⌘N` · `⌘W` | `⌘O` · `⌘T` · `⌘W` |
+| Next · previous tab | `⌘⇧]` · `⌘⇧[` | `⌘⇧]` · `⌘⇧[` |
+| First · last photo | `Home` · `End` | `Home` · `End` |
+| Settings | `⌘,` | `⌘,` |
+
+Keys Photo Mechanic has no match for stay the same in both layouts: `L` loupe, `B` brighten, `S` burst stack, `⇧F`
+filmstrip, `⌘=` and `⌘-` thumbnail size, `⌃⌘S` sidebar, `⌥⌘I` inspector, `⌥⌘F` clear filters, `⌘⇧1`–`5` workspaces
+(Photo Mechanic layout: `⌘R` takes Preview's place), `⌘⏎` save caption and advance.
+
+Not applicable yet (Apature has no matching feature, so these Photo Mechanic keys do nothing): copy/move (`Y`, `⌘Y`),
+edit in another app (`E`, `⌘E`), upload and FTP (`U`, `⌘U`, `⌃⌘U`), save as (`S`, `⌘S`), tag on / tag off (`+`, `-`,
+`⌘+`, `⌘-`), select tagged, rotated, cropped or by class and rating (`⌘T`, `⌘⇧R`, `⌘⇧C`, `⌘⌃1`–`9`, `⌥⌘1`–`6`),
+invert selection (`⌘⇧O`), view filters `F1`–`F4` and by rating or class (`⌘⇧F1`…, `⌘⌃F1`…), combined RAW+JPEG
+(`⌘J`), rescan (`⌘/`), slide show (`⌘L`, `⌘⇧L`), keywords panels (`⌘K`, `⌥⌘K`), metadata template window (`⌘I`),
+find and replace (`⌘F`, `⌘⇧F`), print (`⌘P`, `⌘⇧P`), email (`⌘⇧E`), mirror (`⌘⌃[`, `⌘⌃]`), sound (`A`), shadows and
+highlights (`N`, `B`), 2-up layouts and linked previews (`O`, `H`, `G`, `/`, `Tab`, `L` in Preview), full screen
+(`F`, `R`; use the system's `⌃⌘F`), render quality (`Q`), loupe cursor (`Z` on the sheet), add / remove from
+selection in Preview (`W`, `D`), scroll to last previewed (`L`), close other tabs (`⌃⌥⌘W`), new window and ingest from
+selection (`⌘⇧N`, `⌘⇧S`), the catalog menu (Photo Mechanic Plus), and the IPTC Info window's own keys.
 
 ## Promises
 

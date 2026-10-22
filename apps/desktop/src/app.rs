@@ -26,7 +26,7 @@ use crate::deliver_job::{DeliverJobs, Msg as DMsg, Status as DStatus};
 use crate::filter::{self, Filter};
 use crate::ingest_job::{FileStatus, IngestJobs, Msg, Running};
 use crate::platform::Platform;
-use crate::prefs::Prefs;
+use crate::prefs::{Prefs, ShortcutLayout};
 use crate::selection::{Mods, Selection};
 use crate::ui::caption::{Draft, DraftFields};
 use crate::ui::{self, tokens::Theme};
@@ -349,6 +349,19 @@ const NUM_KEYS: [Key; 9] = [
     Key::Num7,
     Key::Num8,
 ];
+
+/// The number keys pressed this frame as rating (0–5) or colour class (0–8) commands.
+fn number_commands(i: &egui::InputState, rates: bool, out: &mut Vec<Command>) {
+    for (n, k) in NUM_KEYS.iter().enumerate() {
+        if i.key_pressed(*k) {
+            if !rates {
+                out.push(Command::SetClass(n as u8));
+            } else if n <= 5 {
+                out.push(Command::SetRating(n as i8));
+            }
+        }
+    }
+}
 
 pub struct App {
     pub folder: Option<PathBuf>,
@@ -3699,6 +3712,8 @@ impl App {
             let has_menu = self.platform.has_menu();
             let cols = self.cols.max(1) as isize;
             let in_preview = self.workspace == Workspace::Preview;
+            let pm = self.prefs.shortcut_layout == ShortcutLayout::PhotoMechanic;
+            let bare_rates = self.prefs.number_keys == crate::prefs::NumberKeys::Rating;
             let pressed = |k: Key| i.key_pressed(k);
             let mv = |delta: isize| Command::MoveFocus {
                 delta,
@@ -3717,11 +3732,31 @@ impl App {
             if pressed(Key::ArrowDown) {
                 out.push(mv(if in_preview { 1 } else { cols }));
             }
+            // Photo Mechanic keys no menu item carries: [ and ] rotate, M
+            // renames, I opens the caption (its Info window). The menu leaves
+            // the bare number keys to this handler in that layout.
+            if pm && !cmd && !alt && !shift && !i.modifiers.ctrl {
+                if pressed(Key::OpenBracket) {
+                    out.push(Command::Rotate(false));
+                }
+                if pressed(Key::CloseBracket) {
+                    out.push(Command::Rotate(true));
+                }
+                if pressed(Key::M) {
+                    out.push(Command::RenamePhotos);
+                }
+                if pressed(Key::I) {
+                    out.push(Command::SetWorkspace(Workspace::Caption));
+                }
+                if has_menu {
+                    number_commands(i, bare_rates, &mut out);
+                }
+            }
             if cmd {
                 if has_menu {
                     return;
                 }
-                if pressed(Key::O) || pressed(Key::T) {
+                if pressed(Key::O) || pressed(if pm { Key::N } else { Key::T }) {
                     out.push(Command::PickFolder);
                 }
                 if pressed(Key::W) {
@@ -3733,7 +3768,12 @@ impl App {
                 if alt && pressed(Key::V) {
                     out.push(Command::PasteMetadata);
                 }
-                if pressed(Key::R) && shift {
+                let rename = if pm {
+                    pressed(Key::M)
+                } else {
+                    pressed(Key::R) && shift
+                };
+                if rename {
                     out.push(Command::RenamePhotos);
                 }
                 if pressed(Key::Backspace) {
@@ -3749,16 +3789,19 @@ impl App {
                     out.push(Command::Rotate(true));
                 }
                 if pressed(Key::A) {
-                    out.push(if shift {
+                    out.push(if shift && !pm {
                         Command::SelectNone
                     } else {
                         Command::SelectAll
                     });
                 }
+                if pm && pressed(Key::D) {
+                    out.push(Command::SelectNone);
+                }
                 if pressed(Key::Z) {
                     out.push(if shift { Command::Redo } else { Command::Undo });
                 }
-                if pressed(Key::R) && !shift {
+                if pressed(Key::R) && !shift && !pm {
                     out.push(Command::RefreshFolder);
                 }
                 if pressed(Key::Equals) || pressed(Key::Plus) {
@@ -3767,19 +3810,9 @@ impl App {
                 if pressed(Key::Minus) {
                     out.push(Command::ZoomOut);
                 }
-                // ⌘ + number: the opposite of what the bare keys do.
-                let cmd_rates = self.prefs.number_keys == crate::prefs::NumberKeys::ColorClass;
-                for (n, k) in NUM_KEYS.iter().enumerate() {
-                    if pressed(*k) {
-                        if cmd_rates {
-                            if n <= 5 {
-                                out.push(Command::SetRating(n as i8));
-                            }
-                        } else {
-                            out.push(Command::SetClass(n as u8));
-                        }
-                    }
-                }
+                // ⌘ + number: the colour class in Photo Mechanic's layout,
+                // otherwise the opposite of what the bare keys do.
+                number_commands(i, !pm && !bare_rates, &mut out);
                 return;
             }
             if pressed(Key::PageUp) {
@@ -3808,18 +3841,7 @@ impl App {
                 out.push(Command::Escape);
             }
             if !has_menu {
-                let bare_rates = self.prefs.number_keys == crate::prefs::NumberKeys::Rating;
-                for (n, k) in NUM_KEYS.iter().enumerate() {
-                    if pressed(*k) {
-                        if bare_rates {
-                            if n <= 5 {
-                                out.push(Command::SetRating(n as i8));
-                            }
-                        } else {
-                            out.push(Command::SetClass(n as u8));
-                        }
-                    }
-                }
+                number_commands(i, bare_rates, &mut out);
                 if pressed(Key::T) {
                     out.push(Command::ToggleTag);
                 }
@@ -3838,7 +3860,10 @@ impl App {
                 if in_preview && pressed(Key::L) && !shift {
                     out.push(Command::ToggleLoupe);
                 }
-                if in_preview && pressed(Key::K) && !shift {
+                if pm && pressed(Key::F5) {
+                    out.push(Command::RefreshFolder);
+                }
+                if in_preview && pressed(if pm { Key::C } else { Key::K }) && !shift {
                     out.push(Command::CropToggle);
                 }
                 if in_preview && self.pv.crop.is_some() {
@@ -3855,7 +3880,7 @@ impl App {
                 if pressed(Key::Z) && !shift {
                     out.push(Command::ToggleZoom);
                 }
-                if pressed(Key::C) && !shift {
+                if pressed(if pm { Key::V } else { Key::C }) && !shift {
                     out.push(Command::ToggleCompare);
                 }
             }
@@ -4036,6 +4061,8 @@ impl eframe::App for App {
         self.drain_export();
         self.drain_deliver();
         self.handle_drops(ctx);
+        self.platform
+            .set_shortcuts(self.prefs.shortcut_layout, self.prefs.number_keys);
         for c in self.platform.drain_menu() {
             self.dispatch(ctx, c);
         }
