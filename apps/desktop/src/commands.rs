@@ -80,6 +80,9 @@ pub enum Command {
     LiveToggle,
     /// Bring the main window to the front (menu bar extra).
     ShowMainWindow,
+    /// Window menu items of the Photo Mechanic layout (⌘⇧W; Minimize has no key).
+    CloseWindow,
+    MinimizeWindow,
     /// Help menu: Settings > Shortcuts, the log, the repository.
     OpenShortcuts,
     OpenAbout,
@@ -213,6 +216,9 @@ impl Command {
             Command::Rotate(true) => "image.rotate.cw".into(),
             Command::Rotate(false) => "image.rotate.ccw".into(),
             Command::ShowMainWindow => "app.show".into(),
+            Command::CloseWindow => "window.close".into(),
+            Command::MinimizeWindow => "window.minimize".into(),
+            Command::LiveToggle => "ingest.live".into(),
             Command::OpenShortcuts => "help.shortcuts".into(),
             Command::OpenAbout => "app.about".into(),
             Command::CheckUpdates => "app.updates".into(),
@@ -236,6 +242,8 @@ impl Command {
             "view.loupe" => Command::ToggleLoupe,
             "ingest.live" => Command::LiveToggle,
             "app.show" => Command::ShowMainWindow,
+            "window.close" => Command::CloseWindow,
+            "window.minimize" => Command::MinimizeWindow,
             "help.shortcuts" => Command::OpenShortcuts,
             "app.about" => Command::OpenAbout,
             "app.updates" => Command::CheckUpdates,

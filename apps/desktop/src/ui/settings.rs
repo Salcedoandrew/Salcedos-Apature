@@ -177,6 +177,7 @@ const SHORTCUTS_PM: &[(&str, &str)] = &[
     ("⌃⌘S · ⌥⌘I · ⇧F", "Sidebar · inspector · filmstrip"),
     ("⌥⌘F", "Clear filters"),
     ("⌘O / ⌘N · ⌘W", "Open folder in a new tab · close tab"),
+    ("⌘⇧W", "Close the window"),
     ("⌘⇧] · ⌘⇧[", "Next · previous tab"),
     ("⌘⏎", "Save caption and advance"),
     ("⌘,", "Settings"),

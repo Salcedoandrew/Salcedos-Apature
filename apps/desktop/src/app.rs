@@ -501,7 +501,7 @@ impl App {
         prefs
             .favorites
             .retain(|p| p.exists() || p.starts_with("/Volumes"));
-        let platform = Platform::new();
+        let platform = Platform::new(prefs.shortcut_layout);
         let mut app = App {
             folder: None,
             items: Vec::new(),
@@ -3530,6 +3530,10 @@ impl App {
             }
             Command::ToggleCompare => self.toggle_compare(),
             Command::IngestStart => self.ingest_start(),
+            Command::CloseWindow => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Command::MinimizeWindow => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true))
+            }
             Command::OpenShortcuts => {
                 self.settings_open = true;
                 self.settings_page = ui::settings::Page::Shortcuts;
@@ -4061,8 +4065,10 @@ impl eframe::App for App {
         self.drain_export();
         self.drain_deliver();
         self.handle_drops(ctx);
-        self.platform
-            .set_shortcuts(self.prefs.shortcut_layout, self.prefs.number_keys);
+        if self.platform.set_shortcuts(self.prefs.shortcut_layout) {
+            self.sync_menu();
+            self.platform.set_class_names(&self.scheme.names);
+        }
         for c in self.platform.drain_menu() {
             self.dispatch(ctx, c);
         }

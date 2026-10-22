@@ -104,9 +104,9 @@ table is also in Settings › Shortcuts.
 
 | Action | Photo Mechanic (default) | Apature classic |
 | --- | --- | --- |
-| Colour class 1–8 · clear | `⌘1`–`⌘8` · `⌘0` | `⌘1`–`⌘8` · `⌘0` (bare `1`–`8` · `0` if Number keys is set to colour class) |
-| Star rating 1–5 · clear | `⌃1`–`⌃5` · `⌃0` | `1`–`5` · `0` (`⌘0`–`⌘5` if Number keys is set to colour class) |
-| Bare number keys | stars (default) or colour class, per Settings › Shortcuts › Number keys | same |
+| Colour class 1–8 · clear | `⌘1`–`⌘8` · `⌘0` | `1`–`8` · `0` |
+| Star rating 1–5 · clear | `⌃1`–`⌃5` · `⌃0` | `⌘1`–`⌘5` · `⌘0` |
+| Bare number keys | stars (default) or colour class, per Settings › Shortcuts › Number keys | colour class (the Number keys setting applies off the Mac) |
 | Toggle tag | `T` | `T` |
 | Reject | `X` | `X` |
 | Preview · back | `Space` or `⏎` · `Esc` | `Space` or `⏎` · `Esc` |
@@ -127,6 +127,7 @@ table is also in Settings › Shortcuts.
 | Refresh the folder | `F5` | `⌘R` |
 | Reveal in Finder | none | `⌘R` |
 | Open folder · new tab · close tab | `⌘O` · `⌘N` · `⌘W` | `⌘O` · `⌘T` · `⌘W` |
+| Close window · minimize | `⌘⇧W` · none (`⌘M` renames) | `⌘W` · `⌘M` |
 | Next · previous tab | `⌘⇧]` · `⌘⇧[` | `⌘⇧]` · `⌘⇧[` |
 | First · last photo | `Home` · `End` | `Home` · `End` |
 | Settings | `⌘,` | `⌘,` |

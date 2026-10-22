@@ -7,6 +7,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 
 ### Added
 - Photo Mechanic's keyboard shortcuts are now the default. If you are coming from Photo Mechanic, your fingers already know where things are: ⌘1–⌘8 for colour classes, ⌃1–⌃5 for stars, T to tag, ⌘G to ingest, ⌘M to rename. Like the old keys better? Choose Apature classic in Settings › Shortcuts and Apature will remember it. The README has a side-by-side table of both.
+- In the Photo Mechanic layout every menu key is used only once: Close Window moves to ⌘⇧W and Minimize has no key, so ⌘W closes the tab and ⌘M renames, just like Photo Mechanic. Changing the layout now updates the menu bar right away, and Live Ingest in the menus works again.
 - Settings › Accent: six soft accent presets (Lavender, Sage, Sky, Peach, Rose, Mist) applied to selection, links and focus in both appearances.
 - A new app icon (the modern A) with three optional alternates (photo frame, aperture, field), every size and `.icns`, generated from `tools/apature_icons.py` with the accent as a parameter.
 - Press kit in `docs/marketing`: hero images, social preview, feature cards, copy kit; `tools/marketing-shots.sh` recaptures the screenshot set.
