@@ -181,6 +181,8 @@ pub struct Prefs {
     pub extract: apature_export::extract::ExtractOptions,
     /// Eject the card after an ingest where every file verified.
     pub eject_after_ingest: bool,
+    /// Folders open in the sidebar's folder tree.
+    pub tree_expanded: Vec<std::path::PathBuf>,
 }
 
 impl Default for Prefs {
@@ -239,6 +241,7 @@ impl Default for Prefs {
                 ..Default::default()
             },
             eject_after_ingest: false,
+            tree_expanded: Vec::new(),
             extract: Default::default(),
         }
     }

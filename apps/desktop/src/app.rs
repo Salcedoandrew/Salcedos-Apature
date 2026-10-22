@@ -423,6 +423,8 @@ pub struct App {
     pub volumes: Vec<(String, PathBuf)>,
     /// Icon class per mounted volume, filled once per mount.
     pub volume_kinds: HashMap<PathBuf, crate::platform::VolumeKind>,
+    /// The sidebar's folder tree (lazily read subfolders, expanded rows).
+    pub tree: crate::folder_tree::FolderTree,
     /// The open folder's volume vanished (name), until it comes back or the tab closes.
     pub folder_unplugged: Option<String>,
     /// Notices above the status bar (see ui/toasts.rs); at most four.
@@ -529,6 +531,10 @@ impl App {
         prefs
             .favorites
             .retain(|p| p.exists() || p.starts_with("/Volumes"));
+        prefs
+            .tree_expanded
+            .retain(|p| p.is_dir() || p.starts_with("/Volumes"));
+        let tree = crate::folder_tree::FolderTree::new(prefs.tree_expanded.clone());
         let platform = Platform::new(prefs.shortcut_layout);
         let mut app = App {
             folder: None,
@@ -564,6 +570,7 @@ impl App {
             prefs_saved_at: Instant::now(),
             volumes: Vec::new(),
             volume_kinds: HashMap::new(),
+            tree,
             folder_unplugged: None,
             toasts: Vec::new(),
             preview_boost: 0,
@@ -756,6 +763,22 @@ impl App {
                 d.template = "100726-SPO-BGLF-{seqn:3}".into();
             }
             app.rename_recompute();
+        }
+        if launch.sidebar_shot {
+            // Screenshot of the folder tree (scratch HOME, see main.rs): the
+            // open folder's grandparent as a favorite, the tree focused.
+            if app.prefs.favorites.is_empty() {
+                if let Some(f) = app
+                    .folder
+                    .as_ref()
+                    .and_then(|f| f.parent())
+                    .and_then(|f| f.parent())
+                {
+                    app.prefs.favorites.push(f.to_path_buf());
+                }
+            }
+            cc.egui_ctx
+                .memory_mut(|m| m.request_focus(ui::sidebar::tree_id()));
         }
         if launch.extract_dialog && !app.view.is_empty() {
             app.open_extract_dialog();
@@ -2572,6 +2595,33 @@ impl App {
         self.remember_tabs();
     }
 
+    /// Show `dir` in the current tab (the folder tree's single click),
+    /// replacing what the tab showed. A folder already open in another tab
+    /// switches to that tab instead; with no tabs it opens one.
+    pub fn open_folder_here(&mut self, dir: &Path) {
+        if let Some(i) = self.tabs.iter().position(|t| t.folder == dir) {
+            self.switch_tab(i);
+            return;
+        }
+        if self.tabs.is_empty() {
+            self.open_folder(dir);
+            return;
+        }
+        // Check first: a failed load would close the tab instead.
+        if let Err(e) = std::fs::read_dir(dir) {
+            self.status = format!("Could not open {}: {e}", dir.display());
+            self.status_since = Some(Instant::now());
+            return;
+        }
+        self.save_caption(false);
+        let cur = self.active;
+        self.tabs[cur].folder = dir.to_path_buf();
+        self.tabs[cur].state = None;
+        self.load_folder(dir);
+        self.sheet_fade_since = Some(Instant::now());
+        self.remember_tabs();
+    }
+
     fn remember_tabs(&mut self) {
         self.prefs.open_tabs = self.tabs.iter().map(|t| t.folder.clone()).collect();
         self.prefs.active_tab = self.active;
@@ -3479,6 +3529,14 @@ impl App {
     pub fn dispatch(&mut self, ctx: &egui::Context, cmd: Command) {
         match cmd {
             Command::OpenFolder(p) => self.open_folder(&p),
+            Command::OpenFolderHere(p) => self.open_folder_here(&p),
+            Command::RevealFolder(p) => Platform::reveal(&p),
+            Command::AddFavoritePath(p) => {
+                if !self.prefs.favorites.contains(&p) {
+                    self.prefs.favorites.push(p);
+                    self.prefs_dirty = true;
+                }
+            }
             Command::PickFolder => self.pick_folder(),
             Command::AddFavorite => {
                 if let Some(f) = self.folder.clone() {
@@ -4135,7 +4193,10 @@ impl App {
     fn keyboard_commands(&self, ctx: &egui::Context) -> Vec<Command> {
         let mut out = Vec::new();
         let has_menu = self.platform.has_menu();
-        if !crate::keyonce::handler_takes(has_menu, ctx.wants_keyboard_input(), false) {
+        // The sidebar's folder tree holds focus without taking text: culling
+        // keys still work, only the arrows and Return go to the tree.
+        let tree = ui::sidebar::tree_has_focus(ctx);
+        if !crate::keyonce::handler_takes(has_menu, ctx.wants_keyboard_input() && !tree, false) {
             return out;
         }
         if self.rename_dialog.is_some()
@@ -4166,11 +4227,22 @@ impl App {
             let in_preview = self.workspace == Workspace::Preview;
             let pm = self.prefs.shortcut_layout == ShortcutLayout::PhotoMechanic;
             let bare_rates = self.prefs.number_keys == crate::prefs::NumberKeys::Rating;
-            let pressed = |k: Key| i.key_pressed(k);
             let mv = |delta: isize| Command::MoveFocus {
                 delta,
                 shift,
                 command: cmd,
+            };
+            let pressed = |k: Key| {
+                i.key_pressed(k)
+                    && !(tree
+                        && matches!(
+                            k,
+                            Key::ArrowLeft
+                                | Key::ArrowRight
+                                | Key::ArrowUp
+                                | Key::ArrowDown
+                                | Key::Enter
+                        ))
             };
             if pressed(Key::ArrowLeft) {
                 out.push(mv(-1));
@@ -4648,7 +4720,10 @@ impl eframe::App for App {
         );
 
         self.draw_drop_overlay(ctx, &t);
-        if self.prefs_dirty && self.prefs_saved_at.elapsed().as_secs_f32() > 1.0 {
+        if self.prefs_dirty
+            && !self.launch.sidebar_shot
+            && self.prefs_saved_at.elapsed().as_secs_f32() > 1.0
+        {
             self.prefs.save();
             self.prefs_dirty = false;
             self.prefs_saved_at = Instant::now();
@@ -4657,6 +4732,10 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        if self.launch.sidebar_shot {
+            // Screenshot instance: never write prefs.
+            return;
+        }
         self.prefs.save();
     }
 }

@@ -133,6 +133,12 @@ pub enum Command {
     PickFolder,
     AddFavorite,
     RemoveFavorite(PathBuf),
+    /// Folder tree: show this folder in the current tab.
+    OpenFolderHere(PathBuf),
+    /// Folder tree: reveal this folder in Finder.
+    RevealFolder(PathBuf),
+    /// Folder tree: add this folder to Favorites.
+    AddFavoritePath(PathBuf),
     RevealInFinder,
     ToggleSidebar,
     ToggleInspector,
