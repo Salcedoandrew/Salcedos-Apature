@@ -24,6 +24,9 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - Example outlet names removed from the export preset hint and test fixtures.
 
 ### Fixed
+- Single-key shortcuts now work on the Mac: T tags, X rejects, C crops, ⌥C removes a crop, V compares, Z zooms, B brightens, L loupes, S opens a burst and the bare number keys rate (or set the class, per Settings), in both layouts. Before, macOS only passed ⌘ and ⌃ shortcuts to the menus, so these showed in the menus but did nothing. Each press acts exactly once, and nothing fires while you are typing in a caption, the rename box or a dialog field.
+- Marking never changes your JPEG files any more. Ratings, colour classes, tags, rejects, captions and the assignment pad for a JPEG now go to an XMP sidecar beside it (`name.xmp`, or the RAW's sidecar for a RAW+JPEG pair), the same place RAW marks already go. Marks earlier versions wrote inside JPEGs still show; a newer mark in the sidecar wins. If you want marks written into the JPEG too (Photo Mechanic's habit), turn on Settings › General › Write marks into JPEG files; it is off for everyone, including existing users, and when on it now keeps the file's created and modified dates.
+- A cancelled Copy Photos shows how far it got instead of 100 %, and Compare's status names the right key to stop it (V in the Photo Mechanic layout).
 - Canon CR3 files now show their capture date, camera and exposure, so Copy Photos files them in the right dated folder and ingest names using the date work for CR3 too (before, CR3 fell back to the file's date).
 
 ## [0.1.0] — 2026-10-21

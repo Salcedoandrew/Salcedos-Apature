@@ -196,7 +196,11 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
         if let Some(r) = &app.copy_running {
             let n = r.photos;
             ui.label(RichText::new(format!("Copying {n} photo{} to {}", if n == 1 { "" } else { "s" }, r.dest.display())).size(16.0).strong());
-            ui.add(egui::ProgressBar::new(if r.done.is_some() { 1.0 } else { r.fraction() }).show_percentage());
+            ui.add(egui::ProgressBar::new(match &r.done {
+                // A cancelled copy shows how far it got, not 100 %.
+                Some(d) if !d.cancelled => 1.0,
+                _ => r.fraction(),
+            }).show_percentage());
             if let Some(p) = &r.progress {
                 let cur = p.current.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
                 ui.label(RichText::new(format!("{} of {} files · {} of {}  {cur}", p.files_done, p.files_total, human_bytes(p.bytes_done), human_bytes(p.bytes_total))).monospace().size(10.5).color(t.text2));

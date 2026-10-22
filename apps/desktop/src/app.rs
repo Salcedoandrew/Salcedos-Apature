@@ -444,6 +444,8 @@ pub struct App {
     /// The copy in progress (or just finished), shown by the dialog or the status line.
     pub copy_running: Option<crate::copy_job::CopyRunning>,
     copy_jobs: crate::copy_job::CopyJobs,
+    /// One action per keypress across the menu and the key handler.
+    key_once: crate::keyonce::KeyOnce,
     ingest_jobs: IngestJobs,
     /// Files currently being dragged over the window, for the drop overlay.
     pub drag_hover: usize,
@@ -572,6 +574,7 @@ impl App {
             copy_dialog: None,
             copy_running: None,
             copy_jobs: crate::copy_job::CopyJobs::new(cc.egui_ctx.clone()),
+            key_once: Default::default(),
             export_jobs: crate::export_job::ExportJobs::new(cc.egui_ctx.clone()),
             deliver_jobs: DeliverJobs::new(cc.egui_ctx.clone()),
             ingest_jobs: IngestJobs::new(cc.egui_ctx.clone(), ledger_path),
@@ -1572,7 +1575,8 @@ impl App {
                     None
                 };
                 self.ingest.plan = Some(plan.clone());
-                self.ingest.running = Some(self.ingest_jobs.start(plan, pad));
+                self.ingest.running =
+                    Some(self.ingest_jobs.start(plan, pad, self.prefs.jpeg_marks()));
             }
             Ok(plan) => {
                 // Already in the ledger (or filtered out): forget them.
@@ -1810,7 +1814,7 @@ impl App {
         let mut files = 0;
         let mut failed = 0;
         for &i in &targets {
-            match items::write_iptc(&self.items[i], &iptc) {
+            match items::write_iptc(&self.items[i], &iptc, self.prefs.jpeg_marks()) {
                 Ok(w) => files += w.len(),
                 Err(_) => failed += 1,
             }
@@ -1849,7 +1853,7 @@ impl App {
                 pad = Some(p);
             }
         }
-        self.ingest.running = Some(self.ingest_jobs.start(plan, pad));
+        self.ingest.running = Some(self.ingest_jobs.start(plan, pad, self.prefs.jpeg_marks()));
         self.status = "Ingesting…".into();
     }
 
@@ -1983,7 +1987,7 @@ impl App {
         }
         let changes = draft.fields.changes_from(&draft.original);
         let idx = draft.idx;
-        match items::write_iptc(&self.items[idx], &changes) {
+        match items::write_iptc(&self.items[idx], &changes, self.prefs.jpeg_marks()) {
             Ok(w) => {
                 self.remember_caption_history(&changes);
                 if let Some(d) = self.caption_draft.as_mut() {
@@ -2059,7 +2063,7 @@ impl App {
         let mut written = 0usize;
         let mut failed: Option<String> = None;
         for &i in &targets {
-            match items::write_iptc(&self.items[i], &changes) {
+            match items::write_iptc(&self.items[i], &changes, self.prefs.jpeg_marks()) {
                 Ok(_) => written += 1,
                 Err(e) => failed = Some(e.to_string()),
             }
@@ -2240,7 +2244,7 @@ impl App {
         let mut written = 0;
         let mut failed = None;
         for &i in &targets {
-            match items::write_iptc(&self.items[i], &pad) {
+            match items::write_iptc(&self.items[i], &pad, self.prefs.jpeg_marks()) {
                 Ok(w) => written += w.len(),
                 Err(e) => failed = Some(e.to_string()),
             }
@@ -2629,8 +2633,11 @@ impl App {
             let saved = self.workspace;
             self.workspace = Workspace::Preview;
             let cmds = self.keyboard_commands(ctx);
+            let now = std::time::Instant::now();
             for c in cmds {
-                self.dispatch(ctx, c);
+                if self.key_once.admit(&c, crate::keyonce::Source::Keys, now) {
+                    self.dispatch(ctx, c);
+                }
             }
             let exited = self.workspace != Workspace::Preview
                 || ctx.input(|i| i.viewport().close_requested());
@@ -2712,7 +2719,12 @@ impl App {
         if self.workspace != Workspace::Preview {
             self.enter_preview();
         }
-        self.status = format!("Comparing {} photos · C to stop", set.len());
+        let key = if self.prefs.shortcut_layout == ShortcutLayout::PhotoMechanic {
+            "V"
+        } else {
+            "C"
+        };
+        self.status = format!("Comparing {} photos · {key} to stop", set.len());
         self.pv.compare = Some(set);
     }
 
@@ -3089,7 +3101,7 @@ impl App {
         let mut failed = None;
         for &(i, m) in apply {
             self.marks[i] = m;
-            match items::write(&self.items[i], &m, &self.scheme) {
+            match items::write(&self.items[i], &m, &self.scheme, self.prefs.jpeg_marks()) {
                 Ok(w) => {
                     written += w.len();
                     self.conflicts[i].clear();
@@ -3918,9 +3930,12 @@ impl App {
 
     /// Keyboard → commands. Command-modified keys are the native menu's job
     /// when a menu exists, except ⌘-arrows (move focus, keep selection).
+    /// Bare keys are always this handler's job (see `keyonce`), and nothing
+    /// fires while a text field has focus.
     fn keyboard_commands(&self, ctx: &egui::Context) -> Vec<Command> {
         let mut out = Vec::new();
-        if ctx.wants_keyboard_input() {
+        let has_menu = self.platform.has_menu();
+        if !crate::keyonce::handler_takes(has_menu, ctx.wants_keyboard_input(), false) {
             return out;
         }
         if self.rename_dialog.is_some() || self.trash_dialog.is_some() || self.copy_dialog.is_some()
@@ -3931,10 +3946,19 @@ impl App {
             return out;
         }
         ctx.input(|i| {
-            let cmd = i.modifiers.command;
-            let shift = i.modifiers.shift;
-            let alt = i.modifiers.alt;
-            let has_menu = self.platform.has_menu();
+            // The modifiers held for this frame's key presses: a quick ⌥C can
+            // release ⌥ within the same frame, leaving `i.modifiers` empty.
+            let mods = i.events.iter().fold(i.modifiers, |m, e| match e {
+                egui::Event::Key {
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => m | *modifiers,
+                _ => m,
+            });
+            let cmd = mods.command;
+            let shift = mods.shift;
+            let alt = mods.alt;
             let cols = self.cols.max(1) as isize;
             let in_preview = self.workspace == Workspace::Preview;
             let pm = self.prefs.shortcut_layout == ShortcutLayout::PhotoMechanic;
@@ -3958,9 +3982,8 @@ impl App {
                 out.push(mv(if in_preview { 1 } else { cols }));
             }
             // Photo Mechanic keys no menu item carries: [ and ] rotate, M
-            // renames, I opens the caption (its Info window). The menu leaves
-            // the bare number keys to this handler in that layout.
-            if pm && !cmd && !alt && !shift && !i.modifiers.ctrl {
+            // renames, I opens the caption (its Info window).
+            if pm && !cmd && !alt && !shift && !mods.ctrl {
                 if pressed(Key::OpenBracket) {
                     out.push(Command::Rotate(false));
                 }
@@ -3973,12 +3996,9 @@ impl App {
                 if pressed(Key::I) {
                     out.push(Command::SetWorkspace(Workspace::Caption));
                 }
-                if has_menu {
-                    number_commands(i, bare_rates, &mut out);
-                }
             }
             if cmd {
-                if has_menu {
+                if !crate::keyonce::handler_takes(has_menu, false, true) {
                     return;
                 }
                 if !shift && pressed(Key::Y) {
@@ -4071,7 +4091,15 @@ impl App {
             if pressed(Key::Escape) {
                 out.push(Command::Escape);
             }
-            if !has_menu {
+            // ⌥C removes the crop (Photo Mechanic layout), in the crop tool.
+            if pm && alt && !shift && !mods.ctrl && pressed(Key::C) {
+                out.push(Command::CropClear);
+            }
+            // Bare keys. The menus show most of them, but macOS gives the
+            // menu bar only ⌘/⌃ key equivalents, so this handler dispatches
+            // them on every platform; `KeyOnce` drops any menu echo. With a
+            // native menu, ⌃ and ⌥ combinations belong to the menu.
+            if !has_menu || (!mods.ctrl && !alt) {
                 number_commands(i, bare_rates, &mut out);
                 if pressed(Key::T) {
                     out.push(Command::ToggleTag);
@@ -4297,11 +4325,16 @@ impl eframe::App for App {
             self.sync_menu();
             self.platform.set_class_names(&self.scheme.names);
         }
+        let now = std::time::Instant::now();
         for c in self.platform.drain_menu() {
-            self.dispatch(ctx, c);
+            if self.key_once.admit(&c, crate::keyonce::Source::Menu, now) {
+                self.dispatch(ctx, c);
+            }
         }
         for c in self.keyboard_commands(ctx) {
-            self.dispatch(ctx, c);
+            if self.key_once.admit(&c, crate::keyonce::Source::Keys, now) {
+                self.dispatch(ctx, c);
+            }
         }
 
         if self.workspace == Workspace::Caption {

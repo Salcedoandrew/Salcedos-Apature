@@ -108,6 +108,9 @@ pub struct Prefs {
     pub sort: crate::filter::Sort,
     pub sort_reversed: bool,
     pub advance_after_mark: bool,
+    /// Also write marks and captions inside JPEG files (Photo Mechanic's
+    /// embed habit). Off: JPEGs are never rewritten; marks go to a sidecar.
+    pub embed_jpeg_marks: bool,
     /// Group frames shot within a second of the previous one behind one
     /// thumbnail (bursts); S expands or collapses the focused stack.
     pub stack_bursts: bool,
@@ -193,6 +196,7 @@ impl Default for Prefs {
             sort: crate::filter::Sort::Name,
             sort_reversed: false,
             advance_after_mark: true,
+            embed_jpeg_marks: false,
             stack_bursts: false,
             preview_in_window: false,
             number_keys: NumberKeys::Rating,
@@ -248,6 +252,15 @@ pub fn default_ingest_options() -> apature_ingest::Options {
 }
 
 impl Prefs {
+    /// Where marks for JPEG files go, from the "Write marks into JPEG files" setting.
+    pub fn jpeg_marks(&self) -> apature_metadata::items::JpegMarks {
+        if self.embed_jpeg_marks {
+            apature_metadata::items::JpegMarks::Embed
+        } else {
+            apature_metadata::items::JpegMarks::Sidecar
+        }
+    }
+
     pub fn path() -> Option<PathBuf> {
         directories::ProjectDirs::from("dev", "mccal", "Apature")
             .map(|d| d.config_dir().join("prefs.json"))

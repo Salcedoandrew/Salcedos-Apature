@@ -271,6 +271,9 @@ fn body(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Command>) 
                 if ui.checkbox(&mut app.prefs.advance_after_mark, "Advance to the next photo after marking one").changed() {
                     app.prefs_dirty = true;
                 }
+                if ui.checkbox(&mut app.prefs.embed_jpeg_marks, "Write marks into JPEG files (off: JPEGs are never changed; marks go to an .xmp sidecar)").changed() {
+                    app.prefs_dirty = true;
+                }
                 if ui.checkbox(&mut app.prefs.check_updates, "Check for updates once a day (one request to GitHub; nothing is sent)").changed() {
                     app.prefs_dirty = true;
                 }

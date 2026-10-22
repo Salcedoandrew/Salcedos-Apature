@@ -84,7 +84,12 @@ impl IngestJobs {
 
     /// Run the plan; afterwards optionally apply `pad` to every verified
     /// primary copy (so the ingested folder opens already stationeried).
-    pub fn start(&self, plan: Plan, pad: Option<Iptc>) -> Running {
+    pub fn start(
+        &self,
+        plan: Plan,
+        pad: Option<Iptc>,
+        jpeg: apature_metadata::items::JpegMarks,
+    ) -> Running {
         let cancel = Arc::new(AtomicBool::new(false));
         let n = plan.entries.len();
         let tx = self.tx.clone();
@@ -118,7 +123,7 @@ impl IngestJobs {
                         {
                             for it in &items {
                                 if !c2.load(Ordering::Relaxed) {
-                                    match apature_metadata::items::write_iptc(it, &pad) {
+                                    match apature_metadata::items::write_iptc(it, &pad, jpeg) {
                                         Ok(w) => files += w.len(),
                                         Err(_) => failed += 1,
                                     }

@@ -853,7 +853,7 @@ fn pad(assignment: &Path, files: &[PathBuf]) -> Result<()> {
     let fields = a.iptc();
     for f in files {
         let item = item_for(f)?;
-        let w = items::write_iptc(&item, &fields)?;
+        let w = items::write_iptc(&item, &fields, items::JpegMarks::default())?;
         println!("{}: pad applied → {} file(s)", item.display_name(), w.len());
     }
     Ok(())
@@ -905,7 +905,7 @@ fn caption(
             }),
             ..Default::default()
         };
-        let w = items::write_iptc(&item, &fields)?;
+        let w = items::write_iptc(&item, &fields, items::JpegMarks::default())?;
         println!(
             "{}: {expanded}\n  → {} file(s)",
             item.display_name(),
@@ -924,7 +924,7 @@ fn mark(file: &Path, rating: Option<i8>, class: Option<u8>, tag: Option<bool>) -
         color_class: class.map(ColorClass::clamp).unwrap_or(current.color_class),
         tagged: tag.unwrap_or(current.tagged),
     };
-    let written = items::write(&item, &next, &scheme)?;
+    let written = items::write(&item, &next, &scheme, items::JpegMarks::default())?;
     for p in &written {
         println!("wrote {}", p.display());
     }

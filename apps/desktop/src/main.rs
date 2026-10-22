@@ -12,6 +12,7 @@ mod deliver_job;
 mod export_job;
 mod filter;
 mod ingest_job;
+mod keyonce;
 mod platform;
 mod prefs;
 mod select_by;
