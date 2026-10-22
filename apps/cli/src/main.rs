@@ -493,7 +493,7 @@ fn scan(dir: &Path, recursive: bool) -> Result<()> {
             String::new()
         };
         println!("{:>5}  {}{}{}", it.id, it.display_name(), pair, mtext);
-        for (p, c) in src.conflicts() {
+        for (p, c) in src.conflicts(items::JpegMarks::default()) {
             println!(
                 "       CONFLICT {}: sidecar={} embedded({})={}",
                 c.field,

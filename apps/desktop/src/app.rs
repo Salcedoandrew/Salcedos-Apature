@@ -2525,6 +2525,7 @@ impl App {
                 self.next_generation += 1;
                 self.generation = self.next_generation;
                 let scheme = self.scheme.clone();
+                let jpeg_policy = self.prefs.jpeg_marks();
                 // Marks, conflicts and EXIF for every item up front: all three are
                 // cheap (sidecars are tiny, EXIF is a few page faults via mmap) and
                 // sorting by capture time needs them before the first frame.
@@ -2534,7 +2535,7 @@ impl App {
                         let src = items::read(it);
                         let m = src.effective(it, &scheme);
                         let c = src
-                            .conflicts()
+                            .conflicts(jpeg_policy)
                             .into_iter()
                             .map(|(p, c)| {
                                 format!(

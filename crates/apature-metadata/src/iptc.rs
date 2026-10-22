@@ -265,6 +265,11 @@ impl Iptc {
         out
     }
 
+    /// Empty `field` (a cleared value: `None`, or no keywords/creators).
+    pub fn clear(&mut self, field: Field) {
+        self.set(field, Vec::new());
+    }
+
     pub fn is_empty(&self) -> bool {
         TABLE.iter().all(|(f, ..)| self.get(*f).is_none())
     }
@@ -340,6 +345,27 @@ fn element_re(prefix: &str, name: &str) -> Regex {
 }
 
 /// Read IPTC fields from sidecar or packet text.
+/// Fields present in `text` but empty: cleared on purpose (see [`apply`]).
+pub fn cleared(text: &str) -> Vec<Field> {
+    let parsed = parse(text);
+    TABLE
+        .iter()
+        .filter(|(f, prefix, _, name, kind)| {
+            let present = match kind {
+                Kind::Simple => Regex::new(&xmp::prop_pattern(prefix, name))
+                    .unwrap()
+                    .is_match(text),
+                _ => element_re(prefix, name).is_match(text),
+            };
+            present
+                && parsed
+                    .get(*f)
+                    .is_none_or(|v| v.iter().all(|s| s.is_empty()))
+        })
+        .map(|(f, ..)| *f)
+        .collect()
+}
+
 pub fn parse(text: &str) -> Iptc {
     let mut out = Iptc::default();
     for (f, prefix, _, name, kind) in TABLE {
@@ -456,15 +482,13 @@ fn set_structured(
             .map(|i| i + 1)
             .unwrap_or(range.start);
         let replacement = match items {
-            Some(it) if !it.is_empty() => {
-                format!("\n   {}", structured(&prefix_used, name, kind, it))
-            }
-            _ => String::new(),
+            Some(it) => format!("\n   {}", structured(&prefix_used, name, kind, it)),
+            None => String::new(),
         };
         text.replace_range(ws_start..range.end, &replacement);
         return Ok(());
     }
-    let Some(it) = items.filter(|it| !it.is_empty()) else {
+    let Some(it) = items else {
         return Ok(());
     };
     ensure_ns(text, prefix, ns)?;
@@ -490,7 +514,10 @@ fn set_structured(
     Ok(())
 }
 
-/// Apply `iptc` to sidecar/packet text; `Some` fields are written, `None` left alone.
+/// Apply `iptc` to sidecar/packet text; `Some` fields are written, `None`
+/// left alone. An empty `Some` (a cleared field) is written as present but
+/// empty (`name=""`, or an empty `rdf:Alt`/`Bag`/`Seq`), so a cleared
+/// sidecar field still overrides text embedded in the JPEG; see [`cleared`].
 pub fn apply(text: &str, iptc: &Iptc) -> Result<String, XmpError> {
     let mut out = if text.trim().is_empty() {
         xmp::empty_sidecar()
@@ -502,13 +529,7 @@ pub fn apply(text: &str, iptc: &Iptc) -> Result<String, XmpError> {
         match kind {
             Kind::Simple => {
                 let v = values.first().map(String::as_str).unwrap_or("");
-                xmp::set_prop(
-                    &mut out,
-                    &[prefix],
-                    ns,
-                    name,
-                    if v.is_empty() { None } else { Some(v) },
-                )?;
+                xmp::set_prop(&mut out, &[prefix], ns, name, Some(v))?;
             }
             _ => set_structured(&mut out, prefix, ns, name, *kind, Some(&values))?,
         }
@@ -666,5 +687,46 @@ mod tests {
         let out = apply("", &merged).unwrap();
         assert!(satisfies(&merged, &parse(&out)));
         assert!(Iptc::default().is_empty());
+    }
+
+    #[test]
+    fn cleared_fields_are_written_present_and_empty() {
+        let start = apply(
+            "",
+            &Iptc {
+                headline: Some("H".into()),
+                description: Some("D".into()),
+                keywords: Some(vec!["k".into()]),
+                city: Some("C".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let out = apply(
+            &start,
+            &Iptc {
+                headline: Some(String::new()),
+                description: Some(String::new()),
+                keywords: Some(Vec::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let back = parse(&out);
+        assert_eq!((back.headline, back.description), (None, None));
+        assert_eq!(back.city.as_deref(), Some("C"));
+        let gone: Vec<String> = cleared(&out).iter().map(|f| format!("{f:?}")).collect();
+        assert_eq!(gone, ["Headline", "Description", "Keywords"]);
+        assert!(cleared(&start).is_empty());
+        // Clearing a field that was never there still records the clear.
+        let fresh = apply(
+            "",
+            &Iptc {
+                description: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cleared(&fresh).len(), 1);
     }
 }

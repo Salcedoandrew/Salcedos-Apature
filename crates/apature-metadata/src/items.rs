@@ -83,11 +83,16 @@ impl MarkSources {
         merged.to_marks(scheme)
     }
 
-    /// Disagreements between the sidecar and any embedded packet.
-    pub fn conflicts(&self) -> Vec<(PathBuf, Conflict)> {
+    /// Disagreements between the sidecar and any embedded packet. Only in
+    /// [`JpegMarks::Embed`] mode, where both are meant to agree; by default
+    /// the sidecar is the record and older embedded marks are just history.
+    pub fn conflicts(&self, policy: JpegMarks) -> Vec<(PathBuf, Conflict)> {
         let Some(side) = &self.sidecar else {
             return Vec::new();
         };
+        if policy == JpegMarks::Sidecar {
+            return Vec::new();
+        }
         self.embedded
             .iter()
             .flat_map(|(p, emb)| {
@@ -165,11 +170,7 @@ pub fn write(
 /// laid over it (the sidecar wins field by field). Empty when nothing is
 /// there.
 pub fn read_iptc(item: &PhotoItem) -> Iptc {
-    let from_sidecar = || {
-        std::fs::read_to_string(item.sidecar_path())
-            .ok()
-            .map(|t| iptc::parse(&t))
-    };
+    let side_text = std::fs::read_to_string(item.sidecar_path()).ok();
     let from_jpeg = || {
         item.variants()
             .filter(|v| v.kind == Kind::Jpeg)
@@ -178,9 +179,17 @@ pub fn read_iptc(item: &PhotoItem) -> Iptc {
                 jpeg_xmp::packet(&data).ok().flatten().map(iptc::parse)
             })
     };
-    match (from_jpeg(), from_sidecar()) {
-        (Some(j), Some(s)) => j.overlay(&s),
-        (j, s) => s.or(j).unwrap_or_default(),
+    match (from_jpeg(), side_text) {
+        (Some(j), Some(t)) => {
+            // Sidecar fields win, including ones cleared on purpose.
+            let mut m = j.overlay(&iptc::parse(&t));
+            for f in iptc::cleared(&t) {
+                m.clear(f);
+            }
+            m
+        }
+        (_, Some(t)) => iptc::parse(&t),
+        (j, None) => j.unwrap_or_default(),
     }
 }
 
@@ -258,7 +267,7 @@ mod tests {
         let src = read(&items[0]);
         assert_eq!(src.sidecar.as_ref().unwrap().rating, Some(3));
         assert_eq!(src.embedded.len(), 1);
-        assert!(src.conflicts().is_empty());
+        assert!(src.conflicts(JpegMarks::Embed).is_empty());
         assert_eq!(src.effective(&items[0], &scheme), marks);
 
         // JPEG-only item: embedded only, no sidecar created.
@@ -297,8 +306,8 @@ mod tests {
         .unwrap();
         let src = read(&items[0]);
         assert_eq!(src.effective(&items[0], &scheme).rating, Rating(5));
-        assert_eq!(src.conflicts().len(), 1);
-        assert_eq!(src.conflicts()[0].1.field, "rating");
+        assert_eq!(src.conflicts(JpegMarks::Embed).len(), 1);
+        assert_eq!(src.conflicts(JpegMarks::Embed)[0].1.field, "rating");
     }
 
     /// Set a fixed, old modified date so "unchanged" can't pass by luck.
@@ -416,5 +425,90 @@ mod tests {
             assert_eq!(now, c);
         }
         assert_eq!(read_marks(&items[0], &scheme), marks);
+    }
+
+    #[test]
+    fn clearing_embedded_caption_stays_cleared_and_jpeg_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpg = dir.path().join("IMG_3.JPG");
+        let nef = dir.path().join("DSC_7.NEF");
+        let pair = dir.path().join("DSC_7.JPG");
+        fs::write(&nef, b"not a real nef").unwrap();
+        // Captions another app (or an older Apature) embedded in the JPEGs.
+        let old = Iptc {
+            headline: Some("Old headline".into()),
+            description: Some("Old caption".into()),
+            keywords: Some(vec!["a".into(), "b".into()]),
+            copyright: Some("© Kept".into()),
+            ..Default::default()
+        };
+        for p in [&jpg, &pair] {
+            fs::write(p, jpeg_skeleton()).unwrap();
+            jpeg_xmp::write_with(p, |t| iptc::apply(t, &old), |_| true).unwrap();
+        }
+        let before = (fs::read(&jpg).unwrap(), fs::read(&pair).unwrap());
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        assert_eq!(items.len(), 2);
+        for it in &items {
+            assert_eq!(read_iptc(it).description.as_deref(), Some("Old caption"));
+        }
+        // The user clears caption, headline and keywords (what the Caption
+        // workspace sends: empty values).
+        let clear = Iptc {
+            headline: Some(String::new()),
+            description: Some(String::new()),
+            keywords: Some(Vec::new()),
+            ..Default::default()
+        };
+        for it in &items {
+            write_iptc(it, &clear, JpegMarks::Sidecar).unwrap();
+        }
+        // Reopen the folder: still cleared, untouched fields still embedded.
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        for it in &items {
+            let back = read_iptc(it);
+            assert_eq!(back.description, None, "{}", it.display_name());
+            assert_eq!(back.headline, None);
+            assert!(back.keywords.unwrap_or_default().is_empty());
+            assert_eq!(back.copyright.as_deref(), Some("© Kept"));
+        }
+        assert_eq!((fs::read(&jpg).unwrap(), fs::read(&pair).unwrap()), before);
+        // Typing a new caption later replaces the explicit clear.
+        let again = Iptc {
+            description: Some("New caption".into()),
+            ..Default::default()
+        };
+        write_iptc(&items[0], &again, JpegMarks::Sidecar).unwrap();
+        assert_eq!(
+            read_iptc(&items[0]).description.as_deref(),
+            Some("New caption")
+        );
+    }
+
+    #[test]
+    fn no_conflict_marker_by_default_when_the_sidecar_has_moved_on() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("DSC_1.NEF"), b"nef").unwrap();
+        let jpg = dir.path().join("DSC_1.JPG");
+        fs::write(&jpg, jpeg_skeleton()).unwrap();
+        jpeg_xmp::write_marks(
+            &jpg,
+            &XmpMarks {
+                rating: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        let scheme = ColorClassScheme::default();
+        let marks = Marks {
+            rating: Rating(5),
+            ..Default::default()
+        };
+        write(&items[0], &marks, &scheme, JpegMarks::Sidecar).unwrap();
+        let src = read(&items[0]);
+        assert_eq!(src.effective(&items[0], &scheme).rating, Rating(5));
+        assert!(src.conflicts(JpegMarks::Sidecar).is_empty());
+        assert_eq!(src.conflicts(JpegMarks::Embed).len(), 1);
     }
 }
