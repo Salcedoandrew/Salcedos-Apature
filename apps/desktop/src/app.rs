@@ -423,6 +423,9 @@ pub struct App {
     pub volumes: Vec<(String, PathBuf)>,
     /// Icon class per mounted volume, filled once per mount.
     pub volume_kinds: HashMap<PathBuf, crate::platform::VolumeKind>,
+    /// Device id of each mounted volume, so the folder tree notices a drive
+    /// mounting over a mount point it had already read (same path).
+    pub volume_devs: HashMap<PathBuf, u64>,
     /// The sidebar's folder tree (lazily read subfolders, expanded rows).
     pub tree: crate::folder_tree::FolderTree,
     /// The open folder's volume vanished (name), until it comes back or the tab closes.
@@ -570,6 +573,7 @@ impl App {
             prefs_saved_at: Instant::now(),
             volumes: Vec::new(),
             volume_kinds: HashMap::new(),
+            volume_devs: HashMap::new(),
             tree,
             folder_unplugged: None,
             toasts: Vec::new(),
@@ -2501,6 +2505,10 @@ impl App {
         }
         v.sort();
         let present: Vec<PathBuf> = v.iter().map(|(_, p)| p.clone()).collect();
+        self.volume_devs = present
+            .iter()
+            .map(|p| (p.clone(), crate::folder_tree::device_of(p)))
+            .collect();
         self.volume_kinds
             .retain(|p, _| present.contains(p) || p.join("DCIM").is_dir());
         self.volumes = v;
@@ -2572,9 +2580,19 @@ impl App {
         }
     }
 
+    /// The tab showing `dir`, if any: the same path, or another path to the
+    /// same folder (a symlink such as /Volumes/Macintosh HD/…, different
+    /// letter case on a case-insensitive disk).
+    fn tab_for(&self, dir: &Path) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|t| t.folder == dir)
+            .or_else(|| self.tabs.iter().position(|t| same_folder(&t.folder, dir)))
+    }
+
     /// Open `dir` in a new tab, or switch to it if it is already open.
     pub fn open_folder(&mut self, dir: &Path) {
-        if let Some(i) = self.tabs.iter().position(|t| t.folder == dir) {
+        if let Some(i) = self.tab_for(dir) {
             self.switch_tab(i);
             return;
         }
@@ -2599,7 +2617,7 @@ impl App {
     /// replacing what the tab showed. A folder already open in another tab
     /// switches to that tab instead; with no tabs it opens one.
     pub fn open_folder_here(&mut self, dir: &Path) {
-        if let Some(i) = self.tabs.iter().position(|t| t.folder == dir) {
+        if let Some(i) = self.tab_for(dir) {
             self.switch_tab(i);
             return;
         }
@@ -2808,6 +2826,12 @@ impl App {
                 if self.tabs.get(self.active).is_some_and(|t| t.folder == dir) {
                     self.tabs.remove(self.active);
                     self.active = self.active.min(self.tabs.len().saturating_sub(1));
+                    // Back to the tab that was showing: bring its parked
+                    // state back, or the next folder opened would park this
+                    // empty one over it (a blank tab that can't be reopened).
+                    if let Some(st) = self.tabs.get_mut(self.active).and_then(|t| t.state.take()) {
+                        self.put_tab(st);
+                    }
                 }
             }
         }
@@ -3052,7 +3076,12 @@ impl App {
     fn drain_results(&mut self, ctx: &egui::Context) {
         let mut n = 0;
         while let Some(done) = self.pool.try_recv() {
-            if done.generation != self.generation || done.idx >= self.items.len() {
+            // Results are keyed by folder generation and file path, not just
+            // the slot: a late decode is dropped, never shown in place of the
+            // photo now at that slot. Nothing here touches the focus or the
+            // selection.
+            let item_path = self.items.get(done.idx).map(|it| it.primary.path.as_path());
+            if !done.belongs_to(self.generation, item_path) {
                 continue;
             }
             if let (Some(e), None) = (done.exif, &self.exif[done.idx]) {
@@ -3119,9 +3148,15 @@ impl App {
             if self.preview_lru.len() <= PREVIEW_LRU && total <= PREVIEW_BUDGET {
                 break;
             }
+            // The focused photo and its neighbours in view order (what the
+            // arrow keys go to next, prefetched), not in file order.
+            let near = [
+                Some(self.cursor),
+                self.view_neighbor(-1),
+                self.view_neighbor(1),
+            ];
             let keep = |i: usize| {
-                (i + 1 >= self.cursor && i <= self.cursor + 1)
-                    || self.pv.compare.as_ref().is_some_and(|c| c.contains(&i))
+                near.contains(&Some(i)) || self.pv.compare.as_ref().is_some_and(|c| c.contains(&i))
             };
             let Some(p) = self.preview_lru.iter().position(|&i| !keep(i)) else {
                 break;
@@ -4740,6 +4775,18 @@ impl eframe::App for App {
     }
 }
 
+/// Two paths to the same folder: equal, or equal once symlinks and letter
+/// case are resolved by the file system.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// Upload RGB; `gain_stops` brightens for viewing only (culling dark frames),
 /// the file is untouched.
 fn upload(ctx: &egui::Context, name: &str, rgb: &Rgb, gain_stops: u8) -> TextureHandle {
@@ -4778,6 +4825,24 @@ mod crop_tests {
         // A frame turned right (6): the displayed top edge is the stored left edge.
         let s = crop_display_to_stored([0.0, 0.0, 1.0, 0.5], 6);
         assert!((s[0] - 0.0).abs() < 1e-6 && (s[2] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn same_folder_sees_through_symlinks() {
+        let d = std::env::temp_dir().join(format!("apature-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Work Drive/2026")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(d.join("Work Drive"), d.join("alias")).unwrap();
+        assert!(same_folder(&d.join("Work Drive"), &d.join("Work Drive/")));
+        #[cfg(unix)]
+        assert!(same_folder(&d.join("Work Drive"), &d.join("alias")));
+        assert!(!same_folder(
+            &d.join("Work Drive"),
+            &d.join("Work Drive/2026")
+        ));
+        assert!(!same_folder(&d.join("gone"), &d.join("Work Drive")));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

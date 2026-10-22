@@ -31,6 +31,13 @@ fn section_of(root: &Path, favorite: bool) -> u64 {
     }
 }
 
+/// The Favorites section's empty-state hint: only while there are none.
+pub fn favorites_hint(favorites: &[PathBuf]) -> Option<&'static str> {
+    favorites
+        .is_empty()
+        .then_some("Add the open folder with File › Add Folder to Favorites")
+}
+
 /// Indent per tree level.
 const INDENT: f32 = 12.0;
 
@@ -279,26 +286,34 @@ impl Pass<'_> {
         depth: usize,
         parent: Option<usize>,
         has_children: Option<bool>,
+        connected: bool,
     ) {
         let expanded = self.tree.is_expanded(path);
-        if expanded && self.tree.node(path).is_none() {
+        // A favorite on a drive that isn't mounted is never read: the read
+        // would fail (or list an empty mount point) and stick.
+        if connected && expanded && self.tree.node(path).is_none() {
             self.tree.request(path, Some(&self.ctx));
         }
-        let kids: Option<Vec<crate::folder_tree::Child>> =
-            self.tree.children(path).map(|c| c.to_vec());
+        let kids: Option<Vec<crate::folder_tree::Child>> = if connected {
+            self.tree.children(path).map(|c| c.to_vec())
+        } else {
+            None
+        };
         let failed = match self.tree.node(path) {
-            Some(crate::folder_tree::Node::Failed(e)) => Some(e.clone()),
+            Some(crate::folder_tree::Node::Failed(e)) if connected => Some(e.clone()),
             _ => None,
         };
-        // A triangle unless the folder is known to have no subfolders.
-        let expandable = match (&kids, has_children) {
-            (Some(k), _) if !self.tree.is_loading(path) => !k.is_empty(),
-            (_, Some(h)) => h,
-            _ => true,
-        };
+        // A triangle unless the folder is known to have no subfolders; an
+        // expanded row always keeps its (open) triangle so it can be closed.
+        let expandable = connected
+            && match (&kids, has_children) {
+                (Some(k), _) if !self.tree.is_loading(path) => !k.is_empty(),
+                (_, Some(h)) => h,
+                _ => true,
+            };
         let disc = match (expandable || failed.is_some(), expanded) {
-            (false, _) => Disclosure::None,
-            (true, true) => Disclosure::Open,
+            (_, true) => Disclosure::Open,
+            (false, false) => Disclosure::None,
             (true, false) => Disclosure::Closed,
         };
         let selected = self.current.as_deref() == Some(path);
@@ -374,27 +389,24 @@ impl Pass<'_> {
         if !expanded {
             return;
         }
-        match kids {
-            Some(kids) => {
-                for k in kids {
-                    self.node(
-                        ui,
-                        section,
-                        &k.path,
-                        &k.name,
-                        Glyph::Folder,
-                        depth + 1,
-                        Some(me),
-                        Some(k.has_children),
-                    );
-                }
-            }
-            None if failed.is_some() => {
-                let why = failed.unwrap_or_default();
-                let why = why.split(" (os error").next().unwrap_or("").to_string();
-                self.note(ui, depth + 1, &format!("Can't be read · {why}"))
-            }
-            None => self.note(ui, depth + 1, "Loading…"),
+        // Loading, empty, unreadable or not connected: one dim line says so,
+        // never a bare open triangle.
+        let note = crate::folder_tree::note_for(self.tree.node(path), connected);
+        for k in kids.unwrap_or_default() {
+            self.node(
+                ui,
+                section,
+                &k.path,
+                &k.name,
+                Glyph::Folder,
+                depth + 1,
+                Some(me),
+                Some(k.has_children),
+                true,
+            );
+        }
+        if let Some(n) = note {
+            self.note(ui, depth + 1, &n);
         }
     }
 
@@ -493,12 +505,16 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     let mut cmds: Vec<Command> = Vec::new();
     let current = app.folder.clone();
 
-    // Roots: favorites, then Home and each mounted volume.
+    // Roots: connected favorites, then Home and each mounted volume, with
+    // device ids so a drive mounting is a new root (see `tree_roots`).
     let home = home_dir();
-    let mut roots: Vec<PathBuf> = app.prefs.favorites.clone();
-    roots.extend(home.clone());
-    roots.extend(app.volumes.iter().map(|(_, p)| p.clone()));
-    app.tree.sync_roots(&roots);
+    let mounted: Vec<PathBuf> = app.volumes.iter().map(|(_, p)| p.clone()).collect();
+    let mounted_ids: Vec<crate::folder_tree::RootId> = mounted
+        .iter()
+        .map(|p| (p.clone(), app.volume_devs.get(p).copied().unwrap_or(0)))
+        .collect();
+    let roots = crate::folder_tree::tree_roots(&app.prefs.favorites, home.as_deref(), &mounted_ids);
+    app.tree.sync_root_ids(&roots);
     app.tree.poll();
     let mut expanded_changed = false;
 
@@ -569,14 +585,8 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     super::eyebrow(ui, t, "Favorites");
-                    if favorites.is_empty() {
-                        ui.label(
-                            RichText::new(
-                                "Add the open folder with File › Add Folder to Favorites",
-                            )
-                            .size(11.0)
-                            .color(t.muted),
-                        );
+                    if let Some(hint) = favorites_hint(&favorites) {
+                        ui.label(RichText::new(hint).size(11.0).color(t.muted));
                     }
                     for f in favorites.iter() {
                         pass.node(
@@ -588,6 +598,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                             0,
                             None,
                             None,
+                            crate::folder_tree::favorite_connected(f, &mounted),
                         );
                     }
                     ui.add_space(S3);
@@ -617,6 +628,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                             0,
                             None,
                             None,
+                            true,
                         );
                     }
                     for (name, path) in volumes.iter() {
@@ -633,6 +645,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                             0,
                             None,
                             None,
+                            true,
                         );
                     }
                     // One focus target for the whole tree, so egui's own
@@ -691,5 +704,19 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     );
     for c in cmds {
         app.dispatch(ctx, c);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn favorites_hint_only_without_favorites() {
+        assert!(favorites_hint(&[]).is_some());
+        assert_eq!(
+            favorites_hint(&[PathBuf::from("/Volumes/Work Drive")]),
+            None
+        );
     }
 }

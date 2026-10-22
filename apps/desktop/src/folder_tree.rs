@@ -52,6 +52,7 @@ pub struct FolderTree {
     rx: Receiver<Loaded>,
     expanded: BTreeSet<PathBuf>,
     roots: Vec<PathBuf>,
+    root_ids: Vec<RootId>,
     /// Keyboard cursor: (section, path).
     pub cursor: Option<(u64, PathBuf)>,
     /// A single click waiting out the double-click interval.
@@ -74,6 +75,7 @@ impl FolderTree {
             rx,
             expanded: expanded.into_iter().collect(),
             roots: Vec::new(),
+            root_ids: Vec::new(),
             cursor: None,
             pending_click: None,
             revealed_for: None,
@@ -174,25 +176,36 @@ impl FolderTree {
     /// The tree's top-level folders (favorites, Home, volumes). When a root
     /// appears or disappears, everything cached under it is forgotten so a
     /// re-mounted card is read afresh. True when the roots changed.
+    #[cfg(test)]
     pub fn sync_roots(&mut self, roots: &[PathBuf]) -> bool {
-        if self.roots == roots {
+        let ids: Vec<RootId> = roots.iter().map(|r| (r.clone(), 0)).collect();
+        self.sync_root_ids(&ids)
+    }
+
+    /// [`Self::sync_roots`] with device ids: a root whose path stays but
+    /// whose device changes (a drive mounted over its mount point) counts as
+    /// gone and back, so its stale listing is dropped and read again.
+    pub fn sync_root_ids(&mut self, roots: &[RootId]) -> bool {
+        if self.root_ids == roots {
             return false;
         }
         let changed: Vec<PathBuf> = self
-            .roots
+            .root_ids
             .iter()
             .filter(|r| !roots.contains(r))
-            .chain(roots.iter().filter(|r| !self.roots.contains(r)))
-            .cloned()
+            .chain(roots.iter().filter(|r| !self.root_ids.contains(r)))
+            .map(|(p, _)| p.clone())
             .collect();
         self.nodes
             .retain(|p, _| !changed.iter().any(|r| p.starts_with(r)));
+        let paths: Vec<PathBuf> = roots.iter().map(|(p, _)| p.clone()).collect();
         if let Some((_, c)) = &self.cursor {
-            if !roots.iter().any(|r| c.starts_with(r)) {
+            if !paths.iter().any(|r| c.starts_with(r)) {
                 self.cursor = None;
             }
         }
-        self.roots = roots.to_vec();
+        self.roots = paths;
+        self.root_ids = roots.to_vec();
         true
     }
 
@@ -207,6 +220,98 @@ impl FolderTree {
             }
         }
         any
+    }
+}
+
+/// Is a favorite's drive mounted? A favorite under `/Volumes/<name>` is
+/// connected only while that volume is mounted (listed in `mounted`, or its
+/// mount point exists); anything else (Home, the startup disk) always is.
+pub fn favorite_connected(fav: &Path, mounted: &[PathBuf]) -> bool {
+    connected_in(fav, mounted, Path::new("/Volumes"))
+}
+
+fn connected_in(fav: &Path, mounted: &[PathBuf], volumes_dir: &Path) -> bool {
+    let Ok(rest) = fav.strip_prefix(volumes_dir) else {
+        return true;
+    };
+    let Some(name) = rest.components().next() else {
+        return true;
+    };
+    let vol = volumes_dir.join(name);
+    mounted.iter().any(|m| m == &vol) || vol.is_dir()
+}
+
+/// A root and the device it lives on (0 when unknown). The same path on a
+/// different device is a different root: an empty mount point that was read
+/// before the drive mounted over it.
+pub type RootId = (PathBuf, u64);
+
+/// The device a folder is on, 0 when it can't be read.
+pub fn device_of(p: &Path) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(p).map(|m| m.dev()).unwrap_or(0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        0
+    }
+}
+
+/// The tree's roots: connected favorites, then Home, then each mounted
+/// volume (with its device id). A favorite on an unmounted drive is left
+/// out, and a favorite on a drive carries that drive's device id, so when
+/// the drive mounts its root is new and everything cached under it is read
+/// afresh, even though the same path was a root already.
+pub fn tree_roots(favorites: &[PathBuf], home: Option<&Path>, mounted: &[RootId]) -> Vec<RootId> {
+    roots_in(favorites, home, mounted, Path::new("/Volumes"))
+}
+
+fn roots_in(
+    favorites: &[PathBuf],
+    home: Option<&Path>,
+    mounted: &[RootId],
+    volumes_dir: &Path,
+) -> Vec<RootId> {
+    let paths: Vec<PathBuf> = mounted.iter().map(|(p, _)| p.clone()).collect();
+    let mut roots: Vec<RootId> = favorites
+        .iter()
+        .filter(|f| connected_in(f, &paths, volumes_dir))
+        .map(|f| {
+            let dev = mounted
+                .iter()
+                .find(|(v, _)| f.starts_with(v))
+                .map(|(_, d)| *d)
+                .unwrap_or(0);
+            (f.clone(), dev)
+        })
+        .collect();
+    roots.extend(home.map(|h| (h.to_path_buf(), 0)));
+    roots.extend(mounted.iter().cloned());
+    roots
+}
+
+/// The dim line under an expanded row when it has no subfolder rows to
+/// show: still loading, empty, unreadable, or its drive isn't mounted.
+pub fn note_for(node: Option<&Node>, connected: bool) -> Option<String> {
+    if !connected {
+        return Some("Not connected".into());
+    }
+    match node {
+        None | Some(Node::Loading { old: None }) => Some("Loading…".into()),
+        Some(Node::Loading { old: Some(c) }) if c.is_empty() => Some("Loading…".into()),
+        Some(Node::Ready(c)) if c.is_empty() => Some("No subfolders".into()),
+        Some(Node::Failed(e)) => {
+            let why = e.split(" (os error").next().unwrap_or("").trim();
+            Some(if why.is_empty() {
+                "Can't be read".into()
+            } else {
+                format!("Can't be read · {why}")
+            })
+        }
+        _ => None,
     }
 }
 
@@ -549,6 +654,100 @@ mod tests {
         assert!(tree.is_expanded(&b));
         fs::remove_dir_all(&a).unwrap();
         fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn volume_root_children_load_once_the_drive_mounts() {
+        // "Work Drive" is a favorite and, once mounted, a Folders volume too;
+        // its expanded state comes back from prefs before it is mounted.
+        let volumes = scratch("vol");
+        let home = scratch("volhome");
+        let vol = volumes.join("Work Drive");
+        let favs = vec![vol.clone()];
+        let mut tree = FolderTree::new([vol.clone()]);
+        // Not mounted: the favorite is not a root and is never read.
+        let roots = roots_in(&favs, Some(&home), &[], &volumes);
+        assert_eq!(roots, [(home.clone(), 0)]);
+        tree.sync_root_ids(&roots);
+        assert!(!connected_in(&vol, &[], &volumes));
+        assert_eq!(
+            note_for(tree.node(&vol), false).as_deref(),
+            Some("Not connected")
+        );
+        // The mount point shows up empty first and is read (and listed as a
+        // volume on the startup disk's device)...
+        fs::create_dir_all(&vol).unwrap();
+        let roots = roots_in(&favs, Some(&home), &[(vol.clone(), 1)], &volumes);
+        assert!(tree.sync_root_ids(&roots));
+        tree.request(&vol, None);
+        wait(&mut tree, &vol);
+        assert_eq!(
+            note_for(tree.node(&vol), true).as_deref(),
+            Some("No subfolders")
+        );
+        // ...then the drive mounts over it: same path, another device. The
+        // old tree kept the empty listing for good (the path was a root
+        // already); now it is forgotten and the drive's folders load.
+        fs::create_dir_all(vol.join("2026/Great America")).unwrap();
+        fs::create_dir_all(vol.join("EXPORTS")).unwrap();
+        let roots = roots_in(&favs, Some(&home), &[(vol.clone(), 2)], &volumes);
+        assert_eq!(
+            roots[0],
+            (vol.clone(), 2),
+            "the favorite takes the drive's id"
+        );
+        assert!(tree.sync_root_ids(&roots));
+        assert!(tree.node(&vol).is_none(), "stale listing forgotten");
+        assert!(tree.is_expanded(&vol));
+        tree.request(&vol, None);
+        assert_eq!(note_for(tree.node(&vol), true).as_deref(), Some("Loading…"));
+        wait(&mut tree, &vol);
+        assert_eq!(names(tree.children(&vol).unwrap()), ["2026", "EXPORTS"]);
+        assert_eq!(note_for(tree.node(&vol), true), None);
+        assert!(!tree.sync_root_ids(&roots), "nothing changes while mounted");
+        fs::remove_dir_all(&volumes).unwrap();
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn notes_for_loading_empty_and_unreadable_folders() {
+        assert_eq!(note_for(None, true).as_deref(), Some("Loading…"));
+        assert_eq!(
+            note_for(Some(&Node::Loading { old: Some(vec![]) }), true).as_deref(),
+            Some("Loading…")
+        );
+        assert_eq!(
+            note_for(Some(&Node::Ready(vec![])), true).as_deref(),
+            Some("No subfolders")
+        );
+        assert_eq!(
+            note_for(
+                Some(&Node::Failed("Operation not permitted (os error 1)".into())),
+                true
+            )
+            .as_deref(),
+            Some("Can't be read · Operation not permitted")
+        );
+        let kid = Child {
+            name: "2026".into(),
+            path: PathBuf::from("/Volumes/Work Drive/2026"),
+            has_children: true,
+        };
+        assert_eq!(note_for(Some(&Node::Ready(vec![kid])), true), None);
+    }
+
+    #[test]
+    fn favorites_on_unmounted_drives_are_not_connected() {
+        let gone = Path::new("/Volumes/Apature Test No Such Drive/2026");
+        assert!(!favorite_connected(gone, &[]));
+        assert!(favorite_connected(
+            gone,
+            &[PathBuf::from("/Volumes/Apature Test No Such Drive")]
+        ));
+        assert!(favorite_connected(
+            Path::new("/Users/someone/Pictures"),
+            &[]
+        ));
     }
 
     #[test]

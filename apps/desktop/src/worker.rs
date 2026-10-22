@@ -37,12 +37,25 @@ pub struct Done {
     pub idx: usize,
     pub kind: JobKind,
     pub generation: u64,
+    /// The file that was decoded. A result belongs to the photo at `idx`
+    /// only while that slot still holds this path (see [`Done::belongs_to`]).
+    pub path: PathBuf,
     pub result: Result<Rgb, String>,
     pub exif: Option<ExifSummary>,
     pub millis: f32,
     pub cache_hit: bool,
     /// Preview only: the decode is the file's full resolution (nothing larger exists).
     pub full: bool,
+}
+
+impl Done {
+    /// Is this result for the photo now at `idx` in the folder of
+    /// `generation`? A late result (another folder or tab, or a slot that
+    /// now holds a different file) is dropped: it must never replace the
+    /// image on screen, and never move the focus.
+    pub fn belongs_to(&self, generation: u64, item_path: Option<&std::path::Path>) -> bool {
+        self.generation == generation && item_path == Some(self.path.as_path())
+    }
 }
 
 type Key = (usize, JobKind);
@@ -248,10 +261,43 @@ fn run(s: &Shared, job: &Job) -> Done {
         idx: job.idx,
         kind: job.kind,
         generation: job.generation,
+        path: job.path.clone(),
         result,
         exif,
         millis: t0.elapsed().as_secs_f32() * 1000.0,
         cache_hit,
         full,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn done(idx: usize, generation: u64, path: &str) -> Done {
+        Done {
+            idx,
+            kind: JobKind::Preview,
+            generation,
+            path: PathBuf::from(path),
+            result: Err("x".into()),
+            exif: None,
+            millis: 0.0,
+            cache_hit: false,
+            full: true,
+        }
+    }
+
+    #[test]
+    fn stale_preview_result_is_ignored() {
+        let d = done(69, 7, "/shoot/DSCF7641.RAF");
+        // Same folder, same slot, same file: applied.
+        assert!(d.belongs_to(7, Some(std::path::Path::new("/shoot/DSCF7641.RAF"))));
+        // The slot now holds another file (rescan, reorder): dropped.
+        assert!(!d.belongs_to(7, Some(std::path::Path::new("/shoot/DSCF7640.RAF"))));
+        // Another folder or tab (new generation): dropped.
+        assert!(!d.belongs_to(8, Some(std::path::Path::new("/shoot/DSCF7641.RAF"))));
+        // The slot no longer exists: dropped.
+        assert!(!d.belongs_to(7, None));
     }
 }
