@@ -68,6 +68,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     about(app, ctx, t);
     let mut cmds: Vec<Command> = Vec::new();
     copy_photos(app, ctx, t, &mut cmds);
+    extract_previews(app, ctx, t, &mut cmds);
 
     if let Some(d) = app.rename_dialog.as_mut() {
         let n = d.targets.len();
@@ -168,6 +169,107 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
 
     for c in cmds {
         app.dispatch(ctx, c);
+    }
+}
+
+/// Tools › Extract JPEG Previews from RAW Photos… (Photo Mechanic's dialog),
+/// then its progress with Cancel and a summary.
+fn extract_previews(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Command>) {
+    if app.extract_dialog.is_none() {
+        return;
+    }
+    let modal = egui::Modal::new(egui::Id::new("extract-dialog")).show(ctx, |ui| {
+        ui.set_width(520.0);
+        ui.spacing_mut().item_spacing.y = S2;
+        if let Some(r) = &app.extract_running {
+            ui.label(RichText::new(format!("Extracting JPEG previews from {} photo{}", r.photos, if r.photos == 1 { "" } else { "s" })).size(16.0).strong());
+            ui.add(egui::ProgressBar::new(match &r.done {
+                Some(o) if !o.cancelled => 1.0,
+                _ => r.fraction(),
+            }).show_percentage());
+            if let (Some(p), None) = (&r.progress, &r.done) {
+                let cur = p.current.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+                ui.label(RichText::new(format!("{} of {}  {cur}", p.done, p.total)).monospace().size(10.5).color(t.text2));
+            }
+            if let Some(o) = &r.done {
+                let n = o.extracted.len();
+                let mut line = format!("{n} preview{} extracted", if n == 1 { "" } else { "s" });
+                if !o.skipped.is_empty() {
+                    line += &format!(" · {} skipped", o.skipped.len());
+                }
+                if o.cancelled {
+                    line += " · cancelled";
+                }
+                ui.label(RichText::new(line).size(12.0).color(t.text));
+                egui::ScrollArea::vertical().max_height(160.0).auto_shrink([false, true]).show(ui, |ui| {
+                    for (src, why) in o.skipped.iter().take(40) {
+                        let f = src.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+                        ui.label(RichText::new(format!("– {f}  {why}")).monospace().size(10.5).color(t.muted));
+                    }
+                    for (raw, jpg) in o.extracted.iter().take(40) {
+                        let f = raw.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+                        let g = jpg.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+                        ui.label(RichText::new(format!("{f}  →  {g}")).monospace().size(10.5).color(t.text2));
+                    }
+                });
+            }
+            ui.add_space(S3);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    match &r.done {
+                        Some(o) => {
+                            if ui.button(RichText::new("Close").strong()).clicked() {
+                                cmds.push(Command::CloseDialog);
+                            }
+                            if !o.extracted.is_empty() && ui.button("Show in Finder").clicked() {
+                                cmds.push(Command::ExtractReveal);
+                            }
+                        }
+                        None => {
+                            if ui.button("Hide").on_hover_text("Keep extracting in the background").clicked() {
+                                cmds.push(Command::CloseDialog);
+                            }
+                            if ui.button(RichText::new("Cancel").color(t.reject)).clicked() {
+                                cmds.push(Command::ExtractCancel);
+                            }
+                        }
+                    }
+                });
+            });
+            return;
+        }
+        let Some(d) = app.extract_dialog.as_ref() else { return };
+        let o = &mut app.prefs.extract;
+        let before = *o;
+        ui.label(RichText::new("Extract JPEG Previews from RAW photos").size(16.0).strong());
+        ui.label("This tool extracts JPEG previews found within certain RAW photos. A JPEG photo will be created with the same base name as the original RAW photo.");
+        ui.add_space(S1);
+        ui.label("When extracting previews:");
+        ui.indent("extract-opts", |ui| {
+            ui.checkbox(&mut o.copy_iptc, "Copy IPTC/XMP Info");
+            ui.checkbox(&mut o.keep_exif, "Preserve Exif data where possible");
+            ui.checkbox(&mut o.keep_marks, "Preserve image preferences (Tag and Color Class)");
+            ui.checkbox(&mut o.embed_icc, "Embed ICC Profile");
+        });
+        ui.add_space(S3);
+        let can = d.raws > 0;
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut o.to_source, "Extract to source folder");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(can, egui::Button::new(RichText::new("Extract").strong())).clicked() {
+                    cmds.push(Command::ExtractStart);
+                }
+                if ui.button("Cancel").clicked() {
+                    cmds.push(Command::CloseDialog);
+                }
+            });
+        });
+        if *o != before {
+            app.prefs_dirty = true;
+        }
+    });
+    if modal.should_close() {
+        cmds.push(Command::CloseDialog);
     }
 }
 

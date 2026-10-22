@@ -12,6 +12,10 @@ apature-metadata.workspace = true
 thiserror.workspace = true
 image.workspace = true
 log.workspace = true
+serde.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

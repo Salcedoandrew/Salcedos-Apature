@@ -10,6 +10,7 @@ mod commands;
 mod copy_job;
 mod deliver_job;
 mod export_job;
+mod extract_job;
 mod filter;
 mod ingest_job;
 mod keyonce;
@@ -67,6 +68,7 @@ pub struct Launch {
     pub rename_dialog: bool,
     pub trash_dialog: bool,
     pub copy_dialog: bool,
+    pub extract_dialog: bool,
     /// Open the Settings window at start (screenshots).
     pub settings: bool,
     /// Extra folders to open as tabs.
@@ -118,6 +120,7 @@ fn parse_args() -> Launch {
             "--rename-dialog" => l.rename_dialog = true,
             "--trash-dialog" => l.trash_dialog = true,
             "--copy-dialog" => l.copy_dialog = true,
+            "--extract-dialog" => l.extract_dialog = true,
             "--preview" => l.preview = true,
             "--zoom11" => {
                 l.preview = true;

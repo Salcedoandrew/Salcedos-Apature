@@ -355,6 +355,13 @@ impl MenuBar {
             &advance,
         ])?;
 
+        // Photo Mechanic keeps its batch tools in a Tools menu before Window.
+        let tools = Submenu::new("Tools", true);
+        tools.append_items(&[&item(
+            Command::ExtractPreviews,
+            "Extract JPEG Previews from RAW Photos…",
+        )])?;
+
         let window = Submenu::new("Window", true);
         window.append_items(&[
             minimize.as_ref(),
@@ -370,7 +377,7 @@ impl MenuBar {
             &item(Command::OpenRepo, "Apature on GitHub"),
         ])?;
 
-        menu.append_items(&[&app, &file, &edit, &view, &image, &window, &help])?;
+        menu.append_items(&[&app, &file, &edit, &view, &image, &tools, &window, &help])?;
         Ok(MenuBar {
             menu,
             window,

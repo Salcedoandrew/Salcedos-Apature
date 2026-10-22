@@ -215,6 +215,13 @@ impl Default for PreviewView {
 
 /// Rename Photos dialog state.
 /// Copy Photos… (File menu): the photos, the choices and the live plan.
+/// Extract JPEG Previews: the photos it will work on.
+pub struct ExtractDialog {
+    pub targets: Vec<usize>,
+    /// How many of them have a RAW.
+    pub raws: usize,
+}
+
 pub struct CopyDialog {
     pub targets: Vec<usize>,
     pub opts: apature_ingest::CopyOptions,
@@ -446,6 +453,9 @@ pub struct App {
     /// Open the destination as a contact sheet when the running copy ends.
     copy_open_after: bool,
     copy_jobs: crate::copy_job::CopyJobs,
+    pub extract_dialog: Option<ExtractDialog>,
+    pub extract_running: Option<crate::extract_job::ExtractRunning>,
+    extract_jobs: crate::extract_job::ExtractJobs,
     /// One action per keypress across the menu and the key handler.
     key_once: crate::keyonce::KeyOnce,
     ingest_jobs: IngestJobs,
@@ -577,6 +587,9 @@ impl App {
             copy_running: None,
             copy_open_after: false,
             copy_jobs: crate::copy_job::CopyJobs::new(cc.egui_ctx.clone()),
+            extract_dialog: None,
+            extract_running: None,
+            extract_jobs: crate::extract_job::ExtractJobs::new(cc.egui_ctx.clone()),
             key_once: Default::default(),
             export_jobs: crate::export_job::ExportJobs::new(cc.egui_ctx.clone()),
             deliver_jobs: DeliverJobs::new(cc.egui_ctx.clone()),
@@ -743,6 +756,9 @@ impl App {
                 d.template = "100726-SPO-BGLF-{seqn:3}".into();
             }
             app.rename_recompute();
+        }
+        if launch.extract_dialog && !app.view.is_empty() {
+            app.open_extract_dialog();
         }
         if launch.copy_dialog && !app.view.is_empty() {
             app.selection.all(&app.view.clone());
@@ -943,6 +959,111 @@ impl App {
             error: None,
         });
         self.copy_recompute();
+    }
+
+    /// Extract JPEG Previews from RAW Photos…: the selected photos, or every
+    /// photo in the tab when none is selected.
+    pub fn open_extract_dialog(&mut self) {
+        if self
+            .extract_running
+            .as_ref()
+            .is_some_and(|r| r.done.is_none())
+        {
+            self.extract_dialog.get_or_insert(ExtractDialog {
+                targets: Vec::new(),
+                raws: 0,
+            });
+            return;
+        }
+        self.extract_running = None;
+        if self.view.is_empty() {
+            return;
+        }
+        let mut targets: Vec<usize> = self
+            .view
+            .iter()
+            .copied()
+            .filter(|&i| self.selection.contains(i))
+            .collect();
+        if targets.is_empty() {
+            targets = self.view.clone();
+        }
+        let raws = targets
+            .iter()
+            .filter(|&&i| apature_export::extract::raw_of(&self.items[i]).is_some())
+            .count();
+        self.extract_dialog = Some(ExtractDialog { targets, raws });
+    }
+
+    fn extract_start(&mut self) {
+        let Some(d) = self.extract_dialog.as_ref() else {
+            return;
+        };
+        if d.targets.is_empty() {
+            return;
+        }
+        let opts = self.prefs.extract;
+        let dest = if opts.to_source {
+            None
+        } else {
+            let mut dlg = rfd::FileDialog::new().set_title("Extract JPEG Previews To");
+            if let Some(f) = &self.folder {
+                dlg = dlg.set_directory(f);
+            }
+            match dlg.pick_folder() {
+                Some(dir) => Some(dir),
+                None => return,
+            }
+        };
+        let photos: Vec<PhotoItem> = d.targets.iter().map(|&i| self.items[i].clone()).collect();
+        self.prefs_dirty = true;
+        self.extract_running =
+            Some(
+                self.extract_jobs
+                    .start(photos, dest, opts, self.scheme.clone()),
+            );
+    }
+
+    fn drain_extract(&mut self) {
+        while let Some(msg) = self.extract_jobs.try_recv() {
+            let Some(r) = self.extract_running.as_mut() else {
+                continue;
+            };
+            match msg {
+                crate::extract_job::ExtractMsg::Progress(p) => {
+                    if self.extract_dialog.is_none() && r.done.is_none() {
+                        self.status = format!("Extracting previews: {} of {}…", p.done, p.total);
+                    }
+                    r.progress = Some(p);
+                }
+                crate::extract_job::ExtractMsg::Done(o) => {
+                    let n = o.extracted.len();
+                    let mut text = format!(
+                        "Extracted {n} JPEG preview{}",
+                        if n == 1 { "" } else { "s" }
+                    );
+                    if !o.skipped.is_empty() {
+                        text += &format!(" · {} skipped", o.skipped.len());
+                    }
+                    if o.cancelled {
+                        text += " · cancelled";
+                    }
+                    let into_open = self.folder.as_ref().is_some_and(|f| {
+                        o.extracted
+                            .iter()
+                            .any(|(_, j)| j.parent() == Some(f.as_path()))
+                    });
+                    r.done = Some(o);
+                    self.status = text.clone();
+                    if self.extract_dialog.is_none() {
+                        self.toast(ui::toasts::Kind::Info, text);
+                    }
+                    if into_open {
+                        self.refresh_folder();
+                    }
+                }
+            }
+        }
     }
 
     /// Close the dialog; a running copy carries on and reports in the status line.
@@ -3430,6 +3551,23 @@ impl App {
             Command::CopyPhotos => self.open_copy_dialog(),
             Command::CopyChooseDest => self.copy_choose_dest(),
             Command::CopyStart => self.copy_start(),
+            Command::ExtractPreviews => self.open_extract_dialog(),
+            Command::ExtractStart => self.extract_start(),
+            Command::ExtractCancel => {
+                if let Some(r) = &self.extract_running {
+                    r.cancel();
+                }
+            }
+            Command::ExtractReveal => {
+                if let Some(first) = self
+                    .extract_running
+                    .as_ref()
+                    .and_then(|r| r.done.as_ref())
+                    .and_then(|o| o.extracted.first())
+                {
+                    crate::platform::Platform::reveal(&first.1);
+                }
+            }
             Command::CopyCancel => {
                 if let Some(r) = &self.copy_running {
                     r.cancel();
@@ -3809,6 +3947,14 @@ impl App {
                 self.rename_dialog = None;
                 self.trash_dialog = None;
                 self.close_copy_dialog();
+                self.extract_dialog = None;
+                if self
+                    .extract_running
+                    .as_ref()
+                    .is_some_and(|r| r.done.is_some())
+                {
+                    self.extract_running = None;
+                }
             }
             Command::ToggleCompare => self.toggle_compare(),
             Command::IngestStart => self.ingest_start(),
@@ -3947,6 +4093,8 @@ impl App {
                     self.dispatch_later = Some(Command::CropCancel);
                 } else if self.copy_dialog.is_some() {
                     self.close_copy_dialog();
+                } else if self.extract_dialog.is_some() {
+                    self.dispatch_later = Some(Command::CloseDialog);
                 } else if self.rename_dialog.is_some() || self.trash_dialog.is_some() {
                     self.rename_dialog = None;
                     self.trash_dialog = None;
@@ -3990,7 +4138,10 @@ impl App {
         if !crate::keyonce::handler_takes(has_menu, ctx.wants_keyboard_input(), false) {
             return out;
         }
-        if self.rename_dialog.is_some() || self.trash_dialog.is_some() || self.copy_dialog.is_some()
+        if self.rename_dialog.is_some()
+            || self.trash_dialog.is_some()
+            || self.copy_dialog.is_some()
+            || self.extract_dialog.is_some()
         {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
                 out.push(Command::Escape);
@@ -4370,6 +4521,7 @@ impl eframe::App for App {
         self.drain_results(ctx);
         self.drain_ingest();
         self.drain_copy();
+        self.drain_extract();
         self.drain_export();
         self.drain_deliver();
         self.handle_drops(ctx);

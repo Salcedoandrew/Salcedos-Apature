@@ -177,6 +177,8 @@ pub struct Prefs {
     /// Copy Photos… choices: destination, naming, partners, sidecars,
     /// collisions, date subfolders.
     pub copy: apature_ingest::CopyOptions,
+    /// Extract JPEG Previews from RAW Photos… checkboxes.
+    pub extract: apature_export::extract::ExtractOptions,
     /// Eject the card after an ingest where every file verified.
     pub eject_after_ingest: bool,
 }
@@ -237,6 +239,7 @@ impl Default for Prefs {
                 ..Default::default()
             },
             eject_after_ingest: false,
+            extract: Default::default(),
         }
     }
 }
