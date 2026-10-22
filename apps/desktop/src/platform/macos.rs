@@ -17,6 +17,8 @@ pub struct MenuBar {
     inspector: CheckMenuItem,
     filmstrip: CheckMenuItem,
     class_items: Vec<MenuItem>,
+    /// Edit › Select by Color Class, titled with the scheme's names.
+    select_class_items: Vec<MenuItem>,
     pub layout: ShortcutLayout,
 }
 
@@ -55,6 +57,7 @@ fn to_muda(k: Accel) -> Option<Accelerator> {
         "V" => Code::KeyV,
         "W" => Code::KeyW,
         "X" => Code::KeyX,
+        "Y" => Code::KeyY,
         "Z" => Code::KeyZ,
         "0" => Code::Digit0,
         "1" => Code::Digit1,
@@ -65,6 +68,7 @@ fn to_muda(k: Accel) -> Option<Accelerator> {
         "6" => Code::Digit6,
         "7" => Code::Digit7,
         "8" => Code::Digit8,
+        "9" => Code::Digit9,
         "[" => Code::BracketLeft,
         "]" => Code::BracketRight,
         "," => Code::Comma,
@@ -136,6 +140,7 @@ impl MenuBar {
             &item(Command::ExportStart, "Export…"),
             &PredefinedMenuItem::separator(),
             &item(Command::RenamePhotos, "Rename Photos…"),
+            &item(Command::CopyPhotos, "Copy Photos…"),
             &item(Command::MoveToTrash, "Move to Trash"),
             &PredefinedMenuItem::separator(),
             &item(Command::RevealInFinder, "Reveal in Finder"),
@@ -145,6 +150,72 @@ impl MenuBar {
             &item(Command::LiveToggle, "Live Ingest"),
             &PredefinedMenuItem::separator(),
             close_window.as_ref(),
+        ])?;
+
+        use crate::select_by::SelectBy;
+        let by = |b: SelectBy, title: &str| item(Command::SelectBy(b), title);
+        // An item titled for the menu, keyed by its table name.
+        let by_named = |b: SelectBy, title: &str, name: &str| {
+            MenuItem::with_id(Command::SelectBy(b).menu_id(), title, true, k(name))
+        };
+        let by_rating = Submenu::new("Select by Rating", true);
+        for r in (1..=5u8).rev() {
+            by_rating.append(&by_named(
+                SelectBy::Rating(r),
+                &format!(
+                    "{} {}",
+                    "★".repeat(r as usize),
+                    if r == 1 { "Star" } else { "Stars" }
+                ),
+                keymap::SELECT_RATING[r as usize],
+            ))?;
+        }
+        by_rating.append(&PredefinedMenuItem::separator())?;
+        for r in (2..=4u8).rev() {
+            by_rating.append(&by(
+                SelectBy::RatingAtLeast(r),
+                &format!("At Least {}", "★".repeat(r as usize)),
+            ))?;
+        }
+        by_rating.append_items(&[
+            &by_named(
+                SelectBy::RatingAtLeast(1),
+                "Any Star Rating",
+                keymap::SELECT_RATING[6],
+            ),
+            &by_named(
+                SelectBy::Rating(0),
+                "No Star Rating",
+                keymap::SELECT_RATING[0],
+            ),
+        ])?;
+        let by_class = Submenu::new("Select by Color Class", true);
+        let mut select_class_items = Vec::new();
+        for (i, n) in apature_core::ColorClassScheme::default()
+            .names
+            .iter()
+            .enumerate()
+        {
+            let it = by_named(
+                SelectBy::Class(i as u8 + 1),
+                &format!("{} {n}", i + 1),
+                keymap::SELECT_CLASS[i + 1],
+            );
+            by_class.append(&it)?;
+            select_class_items.push(it);
+        }
+        by_class.append_items(&[
+            &PredefinedMenuItem::separator(),
+            &by_named(
+                SelectBy::AnyClass,
+                "Any Color Class",
+                keymap::SELECT_CLASS[9],
+            ),
+            &by_named(
+                SelectBy::Class(0),
+                "No Color Class",
+                keymap::SELECT_CLASS[0],
+            ),
         ])?;
 
         let edit = Submenu::new("Edit", true);
@@ -161,6 +232,13 @@ impl MenuBar {
             &PredefinedMenuItem::separator(),
             &item(Command::SelectAll, "Select All"),
             &item(Command::SelectNone, "Deselect All"),
+            &PredefinedMenuItem::separator(),
+            &by(SelectBy::Tagged, "Select Tagged"),
+            &by(SelectBy::Untagged, "Select Untagged"),
+            &by_rating,
+            &by_class,
+            &by(SelectBy::Cropped, "Select Cropped"),
+            &by(SelectBy::Pairs, "Select RAW+JPEG Pairs"),
         ])?;
 
         let check = |cmd: Command, title: &str, on: bool| {
@@ -303,6 +381,7 @@ impl MenuBar {
             filmstrip,
             advance,
             class_items,
+            select_class_items,
             layout,
         })
     }
@@ -325,6 +404,9 @@ impl MenuBar {
 
     pub fn set_class_names(&self, names: &[String; 8]) {
         for (i, it) in self.class_items.iter().enumerate() {
+            it.set_text(format!("{} {}", i + 1, names[i]));
+        }
+        for (i, it) in self.select_class_items.iter().enumerate() {
             it.set_text(format!("{} {}", i + 1, names[i]));
         }
     }

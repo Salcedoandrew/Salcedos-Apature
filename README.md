@@ -73,6 +73,9 @@ go crazy about it; tell me what breaks and what you'd want next.
   loupe, 1:1 with one shared magnification, a view-only exposure boost, rotate and crop stored in the sidecar.
 - **Caption** with an assignment pad, code replacements, Photo Mechanic's variables, keywords, GPS, recent values and
   save-to-selection.
+- **Copy** the selection to another folder with Copy Photos… (⌘Y): rename on the way, bring partners and sidecars, dated
+  subfolders, skip / number / replace on a name clash, byte-for-byte with the original dates. Edit › Select Tagged, by
+  Rating, by Color Class, Cropped and RAW+JPEG pairs pick from the current tab.
 - **Export** JPEG or JPEG XL with presets per outlet, EXIF, XMP and IPTC-IIM kept, then **deliver** to a folder, FTP,
   FTPS or SFTP with passwords in the Keychain, retry, and a per-photo sent ledger.
 - Two appearances, Reduce Motion, text scaling, higher contrast, focus rings, a menu bar extra with live status.
@@ -151,10 +154,14 @@ table is also in Settings › Shortcuts.
 | Crop tool · remove crop | `C` · `⌥C` | `K` · `⌫` in the crop tool |
 | Rotate left · right | `[` · `]` or `⌘[` · `⌘]` | `⌘[` · `⌘]` |
 | Rename photos | `M` or `⌘M` | `⌘⇧R` |
+| Copy photos (with options) | `⌘Y` | `⌘Y` |
 | Caption the photo (Info) | `I` | `⌘⇧3` |
 | Apply assignment pad (metadata template) | `⌘⇧I` | none |
 | Copy · paste metadata | `⌥⌘C` · `⌥⌘V` | `⌥⌘C` · `⌥⌘V` |
 | Select all · none | `⌘A` · `⌘D` | `⌘A` · `⌘⇧A` |
+| Select tagged · cropped | `⌘T` · `⌘⇧C` | none (Edit menu) |
+| Select by colour class 1–8 · any · none | `⌘⌃1`–`⌘⌃8` · `⌘⌃9` · `⌘⌃0` | none (Edit menu) |
+| Select by rating 1–5 · any · none | `⌥⌘1`–`⌥⌘5` · `⌥⌘6` · `⌥⌘0` | none (Edit menu) |
 | Undo · redo | `⌘Z` · `⌘⇧Z` | `⌘Z` · `⌘⇧Z` |
 | Move to Trash | `⌘⌫` | `⌘⌫` |
 | Ingest · Live Ingest | `⌘G` · `⌘⇧G` | `⌘⇧I` · none |
@@ -171,9 +178,9 @@ Keys Photo Mechanic has no match for stay the same in both layouts: `L` loupe, `
 filmstrip, `⌘=` and `⌘-` thumbnail size, `⌃⌘S` sidebar, `⌥⌘I` inspector, `⌥⌘F` clear filters, `⌘⇧1`–`5` workspaces
 (Photo Mechanic layout: `⌘R` takes Preview's place), `⌘⏎` save caption and advance.
 
-Not applicable yet (Apature has no matching feature, so these Photo Mechanic keys do nothing): copy/move (`Y`, `⌘Y`),
+Not applicable yet (Apature has no matching feature, so these Photo Mechanic keys do nothing): move, and copy from the bare `Y` key,
 edit in another app (`E`, `⌘E`), upload and FTP (`U`, `⌘U`, `⌃⌘U`), save as (`S`, `⌘S`), tag on / tag off (`+`, `-`,
-`⌘+`, `⌘-`), select tagged, rotated, cropped or by class and rating (`⌘T`, `⌘⇧R`, `⌘⇧C`, `⌘⌃1`–`9`, `⌥⌘1`–`6`),
+`⌘+`, `⌘-`), select rotated (`⌘⇧R`),
 invert selection (`⌘⇧O`), view filters `F1`–`F4` and by rating or class (`⌘⇧F1`…, `⌘⌃F1`…), combined RAW+JPEG
 (`⌘J`), rescan (`⌘/`), slide show (`⌘L`, `⌘⇧L`), keywords panels (`⌘K`, `⌥⌘K`), metadata template window (`⌘I`),
 find and replace (`⌘F`, `⌘⇧F`), print (`⌘P`, `⌘⇧P`), email (`⌘⇧E`), mirror (`⌘⌃[`, `⌘⌃]`), sound (`A`), shadows and

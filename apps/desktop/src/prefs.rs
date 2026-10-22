@@ -171,6 +171,9 @@ pub struct Prefs {
     pub send_after_export: Option<String>,
     /// Last template used in Rename Photos.
     pub rename_template: String,
+    /// Copy Photos… choices: destination, naming, partners, sidecars,
+    /// collisions, date subfolders.
+    pub copy: apature_ingest::CopyOptions,
     /// Eject the card after an ingest where every file verified.
     pub eject_after_ingest: bool,
 }
@@ -223,6 +226,12 @@ impl Default for Prefs {
             delivery: Vec::new(),
             send_after_export: None,
             rename_template: String::new(),
+            copy: apature_ingest::CopyOptions {
+                seq_start: 1,
+                partners: true,
+                sidecars: true,
+                ..Default::default()
+            },
             eject_after_ingest: false,
         }
     }

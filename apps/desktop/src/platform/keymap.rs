@@ -38,6 +38,30 @@ pub const RATING: [&str; 6] = [
     "Unrated", "Rating 1", "Rating 2", "Rating 3", "Rating 4", "Rating 5",
 ];
 
+/// Table names of Edit › Select by Color Class: none, 1–8, any.
+pub const SELECT_CLASS: [&str; 10] = [
+    "Select No Class",
+    "Select Class 1",
+    "Select Class 2",
+    "Select Class 3",
+    "Select Class 4",
+    "Select Class 5",
+    "Select Class 6",
+    "Select Class 7",
+    "Select Class 8",
+    "Select Any Class",
+];
+/// Table names of Edit › Select by Rating: unrated, 1–5, any.
+pub const SELECT_RATING: [&str; 7] = [
+    "Select Unrated",
+    "Select Rating 1",
+    "Select Rating 2",
+    "Select Rating 3",
+    "Select Rating 4",
+    "Select Rating 5",
+    "Select Any Rating",
+];
+
 #[cfg(test)]
 /// Keys the Photo Mechanic layout handles outside the menu (the egui key
 /// handler), which no menu item may also take without modifiers.
@@ -65,6 +89,8 @@ pub fn menu_keys(layout: ShortcutLayout) -> Vec<(&'static str, Option<Accel>)> {
         ("Ingest…", pick(a(CMD, "G"), a(CMD | SHIFT, "I"))),
         ("Export…", pick(a(CMD | CTRL, "X"), a(CMD, "E"))),
         ("Rename Photos…", pick(a(CMD, "M"), a(CMD | SHIFT, "R"))),
+        // Photo Mechanic's Copy items key (File menu); free in both layouts.
+        ("Copy Photos…", a(CMD, "Y")),
         ("Move to Trash", a(CMD, "Backspace")),
         ("Reveal in Finder", pick(None, a(CMD, "R"))),
         ("Live Ingest", pick(a(CMD | SHIFT, "G"), None)),
@@ -79,6 +105,11 @@ pub fn menu_keys(layout: ShortcutLayout) -> Vec<(&'static str, Option<Accel>)> {
         ("Paste Metadata", a(CMD | ALT, "V")),
         ("Select All", a(CMD, "A")),
         ("Deselect All", pick(a(CMD, "D"), a(CMD | SHIFT, "A"))),
+        // Select by: Photo Mechanic's Edit menu keys; classic has none.
+        ("Select Tagged", pick(a(CMD, "T"), None)),
+        ("Select Untagged", None),
+        ("Select Cropped", pick(a(CMD | SHIFT, "C"), None)),
+        ("Select RAW+JPEG Pairs", None),
         // View
         ("Contact Sheet", a(CMD | SHIFT, "1")),
         ("Preview", pick(a(CMD, "R"), a(CMD | SHIFT, "2"))),
@@ -122,6 +153,26 @@ pub fn menu_keys(layout: ShortcutLayout) -> Vec<(&'static str, Option<Accel>)> {
     }
     for (n, name) in RATING.iter().enumerate() {
         v.push((name, a(rating_mods, DIGITS[n])));
+    }
+    // Photo Mechanic: ⌘⌃ + digit selects a colour class (9 any, 0 none),
+    // ⌥⌘ + digit a star rating (6 any, 0 none).
+    for (n, name) in SELECT_CLASS.iter().enumerate() {
+        v.push((
+            name,
+            pick(
+                a(
+                    CMD | CTRL,
+                    ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"][n],
+                ),
+                None,
+            ),
+        ));
+    }
+    for (n, name) in SELECT_RATING.iter().enumerate() {
+        v.push((
+            name,
+            pick(a(CMD | ALT, ["0", "1", "2", "3", "4", "5", "6"][n]), None),
+        ));
     }
     v
 }
@@ -203,5 +254,14 @@ mod tests {
         assert_eq!(key(pm, "Compare Selected"), a(0, "V"));
         assert_eq!(key(pm, "Add Folder to Favorites"), None);
         assert_eq!(key(pm, "Reveal in Finder"), None);
+        assert_eq!(key(pm, "Select Tagged"), a(CMD, "T"));
+        assert_eq!(key(pm, "Select Cropped"), a(CMD | SHIFT, "C"));
+        assert_eq!(key(pm, "Select Class 3"), a(CMD | CTRL, "3"));
+        assert_eq!(key(pm, "Select Any Rating"), a(CMD | ALT, "6"));
+        assert_eq!(key(pm, "Copy Photos…"), a(CMD, "Y"));
+        let classic = ShortcutLayout::Classic;
+        assert_eq!(key(classic, "Select Tagged"), None);
+        assert_eq!(key(classic, "Select Class 3"), None);
+        assert_eq!(key(classic, "Copy Photos…"), a(CMD, "Y"));
     }
 }

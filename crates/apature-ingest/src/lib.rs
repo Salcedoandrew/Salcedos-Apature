@@ -13,16 +13,21 @@
 //! The module split: [`template`] expands naming templates, [`plan`] builds
 //! the plan, [`run`] executes it with progress events and cancellation,
 //! [`ledger`] remembers what has been ingested for "only new photos",
-//! [`copy`] is the verified copy primitive.
+//! [`copy`] is the verified copy primitive, and [`photocopy`] is Copy
+//! Photos… from the contact sheet on top of it.
 
 pub mod copy;
 pub mod ledger;
+pub mod photocopy;
 pub mod plan;
 pub mod run;
 pub mod template;
 
 pub use copy::{copy_verified, sha256_file, CopyReport, IngestError};
 pub use ledger::Ledger;
+pub use photocopy::{
+    plan_copy, run_copy, CopyOptions, CopyOutcome, CopyPlan, CopyProgress, DateFolders, OnCollision,
+};
 pub use plan::{
     build_plan, example_names, today, Collision, CollisionPolicy, Entry, FileFilter, Options, Plan,
     Skip,

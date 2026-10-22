@@ -52,6 +52,8 @@ pub enum Command {
     },
     SelectAll,
     SelectNone,
+    /// Edit › Select Tagged, by Rating, by Color Class… over the visible photos.
+    SelectBy(crate::select_by::SelectBy),
     Undo,
     Redo,
     SetFilter(crate::filter::Filter),
@@ -105,6 +107,13 @@ pub enum Command {
     RenameApply,
     MoveToTrash,
     TrashConfirm,
+    /// Copy Photos…: open the dialog, choose the folder, start, cancel,
+    /// show the copies in Finder.
+    CopyPhotos,
+    CopyChooseDest,
+    CopyStart,
+    CopyCancel,
+    CopyReveal,
     CloseDialog,
     /// Preview: compare the selection side by side.
     ToggleCompare,
@@ -185,6 +194,8 @@ impl Command {
             Command::SetWorkspace(w) => format!("view.workspace.{}", w.label().to_lowercase()),
             Command::SelectAll => "edit.selectall".into(),
             Command::SelectNone => "edit.selectnone".into(),
+            Command::SelectBy(by) => by.menu_id(),
+            Command::CopyPhotos => "file.copyphotos".into(),
             Command::Undo => "edit.undo".into(),
             Command::Redo => "edit.redo".into(),
             Command::ClearFilter(None) => "view.clearfilter".into(),
@@ -275,6 +286,7 @@ impl Command {
             "file.export" => Command::SetWorkspace(Workspace::Export),
             "file.rename" => Command::RenamePhotos,
             "file.trash" => Command::MoveToTrash,
+            "file.copyphotos" => Command::CopyPhotos,
             "view.workspace.export" => Command::SetWorkspace(Workspace::Export),
             "file.closetab" => Command::CloseTab,
             "window.nexttab" => Command::NextTab,
@@ -298,6 +310,8 @@ impl Command {
                     Command::SetRating(r.parse().ok()?)
                 } else if let Some(c) = id.strip_prefix("image.class.") {
                     Command::SetClass(c.parse().ok()?)
+                } else if id.starts_with("edit.select.") {
+                    Command::SelectBy(crate::select_by::SelectBy::from_menu_id(id)?)
                 } else {
                     return None;
                 }

@@ -214,6 +214,16 @@ impl Default for PreviewView {
 }
 
 /// Rename Photos dialog state.
+/// Copy Photos… (File menu): the photos, the choices and the live plan.
+pub struct CopyDialog {
+    pub targets: Vec<usize>,
+    pub opts: apature_ingest::CopyOptions,
+    /// Write the assignment pad into the copies' XMP sidecars.
+    pub apply_pad: bool,
+    pub plan: Option<apature_ingest::CopyPlan>,
+    pub error: Option<String>,
+}
+
 pub struct RenameDialog {
     pub template: String,
     pub seq_start: u32,
@@ -430,6 +440,10 @@ pub struct App {
     pub meta_clip: Option<(Marks, apature_metadata::Iptc)>,
     /// Items awaiting confirmation to go to the Trash.
     pub trash_dialog: Option<Vec<usize>>,
+    pub copy_dialog: Option<CopyDialog>,
+    /// The copy in progress (or just finished), shown by the dialog or the status line.
+    pub copy_running: Option<crate::copy_job::CopyRunning>,
+    copy_jobs: crate::copy_job::CopyJobs,
     ingest_jobs: IngestJobs,
     /// Files currently being dragged over the window, for the drop overlay.
     pub drag_hover: usize,
@@ -555,6 +569,9 @@ impl App {
             rename_dialog: None,
             meta_clip: None,
             trash_dialog: None,
+            copy_dialog: None,
+            copy_running: None,
+            copy_jobs: crate::copy_job::CopyJobs::new(cc.egui_ctx.clone()),
             export_jobs: crate::export_job::ExportJobs::new(cc.egui_ctx.clone()),
             deliver_jobs: DeliverJobs::new(cc.egui_ctx.clone()),
             ingest_jobs: IngestJobs::new(cc.egui_ctx.clone(), ledger_path),
@@ -854,6 +871,187 @@ impl App {
             Err(e) => {
                 if let Some(d) = self.rename_dialog.as_mut() {
                     d.error = Some(e.to_string());
+                }
+            }
+        }
+    }
+
+    // ----- Select by, Copy Photos -------------------------------------------
+
+    /// Edit › Select Tagged / by Rating / by Color Class / Cropped / Pairs:
+    /// replace the selection with the matching visible photos.
+    fn select_by(&mut self, by: crate::select_by::SelectBy) {
+        let items = &self.items;
+        let picks = crate::select_by::pick(by, &self.view, &self.marks, items, |i| {
+            edits::read(&items[i].sidecar_path())
+                .ok()
+                .and_then(|e| e.crop)
+                .is_some_and(|c| !c.is_full())
+        });
+        let what = by.describe(&self.scheme.names);
+        if picks.is_empty() {
+            self.status = format!("No {what} photos in this tab");
+            return;
+        }
+        self.selection.all(&picks);
+        if !self.selection.contains(self.cursor) {
+            self.cursor = picks[0];
+            self.scroll_to_cursor = true;
+        }
+        self.status = format!(
+            "Selected {} {what} photo{}",
+            picks.len(),
+            if picks.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    pub fn open_copy_dialog(&mut self) {
+        if self.copy_running.as_ref().is_some_and(|r| r.done.is_none()) {
+            // A copy is running: show its progress again.
+            self.copy_dialog.get_or_insert(CopyDialog {
+                targets: Vec::new(),
+                opts: self.prefs.copy.clone(),
+                apply_pad: false,
+                plan: None,
+                error: None,
+            });
+            return;
+        }
+        self.copy_running = None;
+        if self.items.is_empty() {
+            return;
+        }
+        let mut targets = self.selection.targets(self.cursor);
+        targets.sort_by_key(|&i| self.pos[i].unwrap_or(usize::MAX));
+        let mut opts = self.prefs.copy.clone();
+        opts.headline = self.assignment.as_ref().map(|a| a.slug.clone());
+        self.copy_dialog = Some(CopyDialog {
+            targets,
+            opts,
+            apply_pad: false,
+            plan: None,
+            error: None,
+        });
+        self.copy_recompute();
+    }
+
+    /// Close the dialog; a running copy carries on and reports in the status line.
+    fn close_copy_dialog(&mut self) {
+        self.copy_dialog = None;
+        if self.copy_running.as_ref().is_some_and(|r| r.done.is_some()) {
+            self.copy_running = None;
+        }
+    }
+
+    pub fn copy_recompute(&mut self) {
+        let Some(d) = self.copy_dialog.as_ref() else {
+            return;
+        };
+        if d.opts.dest.as_os_str().is_empty() {
+            if let Some(d) = self.copy_dialog.as_mut() {
+                d.plan = None;
+                d.error = None;
+            }
+            return;
+        }
+        let refs: Vec<&PhotoItem> = d.targets.iter().map(|&i| &self.items[i]).collect();
+        let result = apature_ingest::plan_copy(&refs, &d.opts);
+        if let Some(d) = self.copy_dialog.as_mut() {
+            match result {
+                Ok(p) => {
+                    d.plan = Some(p);
+                    d.error = None;
+                }
+                Err(e) => {
+                    d.plan = None;
+                    d.error = Some(e.to_string());
+                }
+            }
+        }
+    }
+
+    fn copy_choose_dest(&mut self) {
+        let Some(d) = self.copy_dialog.as_ref() else {
+            return;
+        };
+        let mut dlg = rfd::FileDialog::new().set_title("Copy Photos To");
+        if d.opts.dest.is_dir() {
+            dlg = dlg.set_directory(&d.opts.dest);
+        }
+        if let Some(dir) = dlg.pick_folder() {
+            if let Some(d) = self.copy_dialog.as_mut() {
+                d.opts.dest = dir;
+            }
+            self.copy_recompute();
+        }
+    }
+
+    fn copy_start(&mut self) {
+        let Some(d) = self.copy_dialog.as_ref() else {
+            return;
+        };
+        let Some(plan) = d.plan.clone().filter(|p| !p.entries.is_empty()) else {
+            return;
+        };
+        let pad = if d.apply_pad {
+            self.assignment.as_ref().map(|a| a.iptc())
+        } else {
+            None
+        };
+        let mut keep = d.opts.clone();
+        keep.headline = None;
+        let dest = keep.dest.clone();
+        self.prefs.copy = keep;
+        self.prefs_dirty = true;
+        self.copy_running = Some(self.copy_jobs.start(plan, pad, dest));
+    }
+
+    fn drain_copy(&mut self) {
+        while let Some(msg) = self.copy_jobs.try_recv() {
+            let Some(r) = self.copy_running.as_mut() else {
+                continue;
+            };
+            match msg {
+                crate::copy_job::CopyMsg::Progress(p) => {
+                    if self.copy_dialog.is_none() && r.done.is_none() {
+                        self.status = format!(
+                            "Copying photos: {} of {} files…",
+                            p.files_done, p.files_total
+                        );
+                    }
+                    r.progress = Some(p);
+                }
+                crate::copy_job::CopyMsg::Done(o) => {
+                    let files = o.copied.len();
+                    let text = if o.cancelled {
+                        format!(
+                            "Copy cancelled after {files} file{}",
+                            if files == 1 { "" } else { "s" }
+                        )
+                    } else if o.failed.is_empty() {
+                        format!(
+                            "Copied {} photo{} ({files} files) to {}",
+                            r.photos,
+                            if r.photos == 1 { "" } else { "s" },
+                            r.dest.display()
+                        )
+                    } else {
+                        format!("Copied {files} files; {} failed", o.failed.len())
+                    };
+                    let kind = if o.failed.is_empty() {
+                        ui::toasts::Kind::Info
+                    } else {
+                        ui::toasts::Kind::Error
+                    };
+                    let into_open = self.folder.as_ref().is_some_and(|f| r.dest.starts_with(f));
+                    r.done = Some(o);
+                    self.status = text.clone();
+                    if self.copy_dialog.is_none() {
+                        self.toast(kind, text);
+                    }
+                    if into_open {
+                        self.refresh_folder();
+                    }
                 }
             }
         }
@@ -3164,6 +3362,25 @@ impl App {
             Command::End => self.focus_to_pos(self.view.len().saturating_sub(1), Mods::default()),
             Command::SelectAll => self.selection.all(&self.view),
             Command::SelectNone => self.selection.clear(),
+            Command::SelectBy(by) => self.select_by(by),
+            Command::CopyPhotos => self.open_copy_dialog(),
+            Command::CopyChooseDest => self.copy_choose_dest(),
+            Command::CopyStart => self.copy_start(),
+            Command::CopyCancel => {
+                if let Some(r) = &self.copy_running {
+                    r.cancel();
+                }
+            }
+            Command::CopyReveal => {
+                if let Some(first) = self
+                    .copy_running
+                    .as_ref()
+                    .and_then(|r| r.done.as_ref())
+                    .and_then(|o| o.copied.first())
+                {
+                    crate::platform::Platform::reveal(&first.1);
+                }
+            }
             Command::Undo => {
                 if let Some((label, apply)) = self.undo.undo() {
                     self.apply_marks(&apply);
@@ -3527,6 +3744,7 @@ impl App {
             Command::CloseDialog => {
                 self.rename_dialog = None;
                 self.trash_dialog = None;
+                self.close_copy_dialog();
             }
             Command::ToggleCompare => self.toggle_compare(),
             Command::IngestStart => self.ingest_start(),
@@ -3663,6 +3881,8 @@ impl App {
             Command::Escape => {
                 if self.pv.crop.is_some() {
                     self.dispatch_later = Some(Command::CropCancel);
+                } else if self.copy_dialog.is_some() {
+                    self.close_copy_dialog();
                 } else if self.rename_dialog.is_some() || self.trash_dialog.is_some() {
                     self.rename_dialog = None;
                     self.trash_dialog = None;
@@ -3703,7 +3923,8 @@ impl App {
         if ctx.wants_keyboard_input() {
             return out;
         }
-        if self.rename_dialog.is_some() || self.trash_dialog.is_some() {
+        if self.rename_dialog.is_some() || self.trash_dialog.is_some() || self.copy_dialog.is_some()
+        {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
                 out.push(Command::Escape);
             }
@@ -3759,6 +3980,12 @@ impl App {
             if cmd {
                 if has_menu {
                     return;
+                }
+                if !shift && pressed(Key::Y) {
+                    out.push(Command::CopyPhotos);
+                }
+                if pm && !shift && pressed(Key::T) {
+                    out.push(Command::SelectBy(crate::select_by::SelectBy::Tagged));
                 }
                 if pressed(Key::O) || pressed(if pm { Key::N } else { Key::T }) {
                     out.push(Command::PickFolder);
@@ -4062,6 +4289,7 @@ impl eframe::App for App {
 
         self.drain_results(ctx);
         self.drain_ingest();
+        self.drain_copy();
         self.drain_export();
         self.drain_deliver();
         self.handle_drops(ctx);

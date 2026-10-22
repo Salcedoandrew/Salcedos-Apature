@@ -7,12 +7,14 @@
 
 mod app;
 mod commands;
+mod copy_job;
 mod deliver_job;
 mod export_job;
 mod filter;
 mod ingest_job;
 mod platform;
 mod prefs;
+mod select_by;
 mod selection;
 mod ui;
 mod undo;
