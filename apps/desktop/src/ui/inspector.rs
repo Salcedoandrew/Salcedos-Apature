@@ -131,36 +131,96 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                     });
                     ui.add_space(S4 - S2);
 
-                    section(ui, t, "Capture", "", |ui| match &app.exif[idx] {
-                        Some(e) => {
-                            let mut rows = Vec::new();
-                            let cam = e.camera_line();
-                            if !cam.is_empty() {
-                                rows.push(("Camera", cam));
+                    section(ui, t, "Info", "", |ui| {
+                        match &app.exif[idx] {
+                            Some(e) => {
+                                let mut rows = Vec::new();
+                                let cam = e.camera_line();
+                                if !cam.is_empty() {
+                                    rows.push(("Camera", cam));
+                                }
+                                if let Some(l) = &e.lens {
+                                    rows.push(("Lens", l.clone()));
+                                }
+                                let ex = e.exposure_line();
+                                if !ex.is_empty() {
+                                    rows.push(("Exposure", ex));
+                                }
+                                if let Some(d) = &e.date_time_original {
+                                    rows.push(("Taken", d.clone()));
+                                }
+                                if rows.is_empty() {
+                                    ui.label(
+                                        RichText::new("No EXIF in this file")
+                                            .size(11.0)
+                                            .color(t.muted),
+                                    );
+                                } else {
+                                    kv(ui, t, &rows);
+                                }
                             }
-                            if let Some(l) = &e.lens {
-                                rows.push(("Lens", l.clone()));
+                            None => {
+                                ui.label(RichText::new("reading…").size(11.0).color(t.muted));
                             }
-                            let ex = e.exposure_line();
-                            if !ex.is_empty() {
-                                rows.push(("Exposure", ex));
-                            }
-                            if let Some(d) = &e.date_time_original {
-                                rows.push(("Taken", d.clone()));
-                            }
-                            if rows.is_empty() {
-                                ui.label(
-                                    RichText::new("No EXIF in this file")
-                                        .size(11.0)
-                                        .color(t.muted),
-                                );
+                        }
+                        // File rows (formerly the Files section), after Taken.
+                        let it = &app.items[idx];
+                        let mut rows = Vec::new();
+                        for v in it.variants() {
+                            let k = match v.kind {
+                                Kind::Raw => "RAW",
+                                Kind::Jpeg => "JPEG",
+                                Kind::Heic => "HEIC",
+                            };
+                            rows.push((
+                                k,
+                                format!("{} · {:.1} MB", v.file_name(), v.size as f64 / 1e6),
+                            ));
+                        }
+                        let sc = it.sidecar_path();
+                        rows.push((
+                            "Sidecar",
+                            if sc.is_file() {
+                                format!(
+                                    "{} · present",
+                                    sc.file_name()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_default()
+                                )
                             } else {
-                                kv(ui, t, &rows);
+                                "none yet".into()
+                            },
+                        ));
+                        if !app.conflicts[idx].is_empty() {
+                            rows.push(("Conflict", app.conflicts[idx].join("; ")));
+                        }
+                        if let Some(s) = app.deliver.sent.get(it.path()) {
+                            rows.push(("Sent", format!("{} · {}", s.target, s.at)));
+                        }
+                        if sc.is_file() {
+                            if let Ok(e) = apature_metadata::edits::read(&sc) {
+                                let mut parts = Vec::new();
+                                if let Some(o) = e.orientation {
+                                    parts.push(match o {
+                                        6 => "turned right".to_string(),
+                                        8 => "turned left".to_string(),
+                                        3 => "upside down".to_string(),
+                                        other => format!("orientation {other}"),
+                                    });
+                                }
+                                if e.crop.as_ref().is_some_and(|c| !c.is_full()) {
+                                    parts.push("cropped".into());
+                                }
+                                if e.straightened_crop {
+                                    parts.push("straightened (export only)".into());
+                                }
+                                if !parts.is_empty() {
+                                    rows.push(("Edits", parts.join(" · ")));
+                                }
                             }
                         }
-                        None => {
-                            ui.label(RichText::new("reading…").size(11.0).color(t.muted));
-                        }
+                        kv(ui, t, &rows);
+                        let _ = Rating(0);
                     });
 
                     let targets = app.selection.targets(idx);
@@ -340,66 +400,6 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                                     .color(t.muted),
                             );
                         }
-                    });
-
-                    section(ui, t, "Files", "", |ui| {
-                        let it = &app.items[idx];
-                        let mut rows = Vec::new();
-                        for v in it.variants() {
-                            let k = match v.kind {
-                                Kind::Raw => "RAW",
-                                Kind::Jpeg => "JPEG",
-                                Kind::Heic => "HEIC",
-                            };
-                            rows.push((
-                                k,
-                                format!("{} · {:.1} MB", v.file_name(), v.size as f64 / 1e6),
-                            ));
-                        }
-                        let sc = it.sidecar_path();
-                        rows.push((
-                            "Sidecar",
-                            if sc.is_file() {
-                                format!(
-                                    "{} · present",
-                                    sc.file_name()
-                                        .map(|s| s.to_string_lossy().into_owned())
-                                        .unwrap_or_default()
-                                )
-                            } else {
-                                "none yet".into()
-                            },
-                        ));
-                        if !app.conflicts[idx].is_empty() {
-                            rows.push(("Conflict", app.conflicts[idx].join("; ")));
-                        }
-                        if let Some(s) = app.deliver.sent.get(it.path()) {
-                            rows.push(("Sent", format!("{} · {}", s.target, s.at)));
-                        }
-                        if sc.is_file() {
-                            if let Ok(e) = apature_metadata::edits::read(&sc) {
-                                let mut parts = Vec::new();
-                                if let Some(o) = e.orientation {
-                                    parts.push(match o {
-                                        6 => "turned right".to_string(),
-                                        8 => "turned left".to_string(),
-                                        3 => "upside down".to_string(),
-                                        other => format!("orientation {other}"),
-                                    });
-                                }
-                                if e.crop.as_ref().is_some_and(|c| !c.is_full()) {
-                                    parts.push("cropped".into());
-                                }
-                                if e.straightened_crop {
-                                    parts.push("straightened (export only)".into());
-                                }
-                                if !parts.is_empty() {
-                                    rows.push(("Edits", parts.join(" · ")));
-                                }
-                            }
-                        }
-                        kv(ui, t, &rows);
-                        let _ = Rating(0);
                     });
                 });
         });
