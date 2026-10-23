@@ -344,7 +344,7 @@ pub struct SentRecord {
 }
 
 fn delivered_path() -> PathBuf {
-    directories::ProjectDirs::from("dev", "mccal", "Apature")
+    apature_core::project_dirs()
         .map(|d| d.data_dir().join("delivered.json"))
         .unwrap_or_else(|| PathBuf::from("delivered.json"))
 }
@@ -596,14 +596,14 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, launch: Launch) -> Self {
-        let cache = directories::ProjectDirs::from("dev", "mccal", "Apature")
+        let cache = apature_core::project_dirs()
             .and_then(|d| ThumbCache::new(d.cache_dir().join("thumbs")).ok());
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
         let threads = (threads.saturating_sub(1)).clamp(2, 12);
         let pool = Pool::new(cc.egui_ctx.clone(), cache, threads);
-        let ledger_path = directories::ProjectDirs::from("dev", "mccal", "Apature")
+        let ledger_path = apature_core::project_dirs()
             .map(|d| d.data_dir().join("ingested.json"))
             .unwrap_or_else(|| PathBuf::from("ingested.json"));
         if let Some(theme) = launch.theme {
@@ -1925,7 +1925,7 @@ impl App {
     }
 
     fn ledger_path(&self) -> PathBuf {
-        directories::ProjectDirs::from("dev", "mccal", "Apature")
+        apature_core::project_dirs()
             .map(|d| d.data_dir().join("ingested.json"))
             .unwrap_or_else(|| PathBuf::from("ingested.json"))
     }
@@ -3211,7 +3211,7 @@ impl App {
     }
 
     pub fn cache_dir(&self) -> PathBuf {
-        directories::ProjectDirs::from("dev", "mccal", "Apature")
+        apature_core::project_dirs()
             .map(|d| d.cache_dir().join("thumbs"))
             .unwrap_or_else(|| PathBuf::from("thumbs"))
     }
@@ -4349,7 +4349,7 @@ impl App {
                 self.settings_page = ui::settings::Page::Shortcuts;
             }
             Command::RevealLog => {
-                if let Some(d) = directories::ProjectDirs::from("dev", "mccal", "Apature") {
+                if let Some(d) = apature_core::project_dirs() {
                     let _ = std::process::Command::new("open")
                         .arg("-R")
                         .arg(d.data_dir().join("apature.log"))

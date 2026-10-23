@@ -14,3 +14,9 @@ pub mod tiff;
 pub use folder::{scan, ScanOptions};
 pub use item::{Kind, PhotoItem, Variant};
 pub use marks::{ColorClass, ColorClassScheme, Marks, Rating};
+
+/// Apature's own folders (cache, settings, log, ingest ledger): one place
+/// for the `dev.mccal.Apature` identity. None without a home folder.
+pub fn project_dirs() -> Option<directories::ProjectDirs> {
+    directories::ProjectDirs::from("dev", "mccal", "Apature")
+}

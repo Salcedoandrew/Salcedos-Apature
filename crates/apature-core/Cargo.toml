@@ -9,6 +9,7 @@ description = "Models, folder scanning and TIFF primitives for Apature"
 trash.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+directories.workspace = true
 log.workspace = true
 walkdir.workspace = true
 

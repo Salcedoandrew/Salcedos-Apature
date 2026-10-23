@@ -456,7 +456,7 @@ fn main() -> Result<()> {
 
 fn cache_dir() -> Result<PathBuf> {
     let dirs =
-        directories::ProjectDirs::from("dev", "mccal", "Apature").context("no home directory")?;
+        apature_core::project_dirs().context("no home directory")?;
     Ok(dirs.cache_dir().join("thumbs"))
 }
 
@@ -693,7 +693,7 @@ fn ingest(
         ),
         None => None,
     };
-    let ledger_path = directories::ProjectDirs::from("dev", "mccal", "Apature")
+    let ledger_path = apature_core::project_dirs()
         .context("no home directory")?
         .data_dir()
         .join("ingested.json");

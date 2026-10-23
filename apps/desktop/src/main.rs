@@ -318,7 +318,7 @@ fn main() -> eframe::Result {
 /// so a crash mid-ingest leaves a record of what verified.
 fn init_logging() {
     use std::io::Write;
-    let file = directories::ProjectDirs::from("dev", "mccal", "Apature").map(|d| {
+    let file = apature_core::project_dirs().map(|d| {
         let dir = d.data_dir().to_path_buf();
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("apature.log");

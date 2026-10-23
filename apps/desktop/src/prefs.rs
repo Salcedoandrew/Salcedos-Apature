@@ -268,7 +268,7 @@ impl Prefs {
     }
 
     pub fn path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("dev", "mccal", "Apature")
+        apature_core::project_dirs()
             .map(|d| d.config_dir().join("prefs.json"))
     }
 

@@ -308,7 +308,7 @@ fn body(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Command>) 
                         }
                     }
                     if ui.small_button("Reveal log").on_hover_text("apature.log: every ingest, export, send and error").clicked() {
-                        if let Some(d) = directories::ProjectDirs::from("dev", "mccal", "Apature") {
+                        if let Some(d) = apature_core::project_dirs() {
                             let _ = std::process::Command::new("open").arg("-R").arg(d.data_dir().join("apature.log")).spawn();
                         }
                     }
