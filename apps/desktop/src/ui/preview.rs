@@ -381,60 +381,47 @@ fn draw_pane(
     }
 
     // ---- overlay ----
+    // A narrow column in the top-left, one item per line, with no plate
+    // behind it so it covers as little of the photo as possible; a soft
+    // shadow keeps it readable over bright photos.
     let m = app.marks[idx];
-    let line1 = format!(
-        "{}   {} / {}",
-        app.items[idx].display_name(),
+    let mut parts = vec![format!(
+        "{} / {}",
         app.pos[idx].map(|p| p + 1).unwrap_or(idx + 1),
         app.view.len()
-    );
-    let mut line2 = Vec::new();
+    )];
     if let Some(e) = &app.exif[idx] {
-        let ex = e.exposure_line();
-        if !ex.is_empty() {
-            line2.push(ex);
-        }
+        parts.push(e.exposure_line());
     }
-    let stars = super::rating_text(m.rating);
-    if !stars.is_empty() {
-        line2.push(stars);
-    }
+    parts.push(super::rating_text(m.rating));
     if let Some(n) = app.scheme.name(m.color_class) {
-        line2.push(format!("{} {n}", m.color_class.0));
+        parts.push(format!("{} {n}", m.color_class.0));
     }
     if m.tagged {
-        line2.push("tagged".into());
+        parts.push("tagged".into());
     }
-    line2.push(zoom_label);
+    parts.push(zoom_label);
     let font1 = if compare { 11.0 } else { 12.0 };
     let font2 = if compare { 10.0 } else { 11.0 };
-    // Text sits on a soft plate so it reads over any photo.
-    let plate = Rect::from_min_size(
-        rect.left_top() + Vec2::new(S3 - 4.0, S3 - 4.0),
-        Vec2::new(
-            (line1.chars().count().max(line2.join("   ").chars().count()) as f32) * 6.6 + 16.0,
-            40.0,
-        ),
-    );
-    p.rect_filled(
-        plate.intersect(rect),
-        CornerRadius::same(4),
-        Color32::from_black_alpha(if t.dark { 110 } else { 150 }),
-    );
-    p.text(
-        rect.left_top() + Vec2::new(S3 + 2.0, S3),
-        Align2::LEFT_TOP,
-        line1,
+    let mut at = rect.left_top() + Vec2::new(S3 + 2.0, S3);
+    shadowed_text(
+        &p,
+        at,
+        app.items[idx].display_name().to_string(),
         FontId::monospace(font1),
         Color32::WHITE,
     );
-    p.text(
-        rect.left_top() + Vec2::new(S3 + 2.0, S3 + 18.0),
-        Align2::LEFT_TOP,
-        line2.join("   "),
-        FontId::monospace(font2),
-        Color32::from_white_alpha(200),
-    );
+    at.y += font1 + 6.0;
+    for line in hud_lines(&parts) {
+        shadowed_text(
+            &p,
+            at,
+            line,
+            FontId::monospace(font2),
+            Color32::from_white_alpha(220),
+        );
+        at.y += font2 + 4.0;
+    }
     if let Some(c) = t.class_color(&app.scheme, m.color_class) {
         p.rect_filled(
             Rect::from_min_size(rect.left_top(), Vec2::new(4.0, rect.height())),
@@ -458,6 +445,34 @@ fn draw_pane(
         )
     });
     resp.clicked() && compare
+}
+
+/// The overlay's lines after the file name: each " · "-joined part split
+/// onto its own line, empty parts dropped.
+fn hud_lines(parts: &[String]) -> Vec<String> {
+    parts
+        .iter()
+        .flat_map(|p| p.split(" · "))
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Text with a faint dark outline and drop shadow behind it (no plate), so
+/// it reads over light and dark photos alike.
+fn shadowed_text(p: &egui::Painter, at: Pos2, text: String, font: FontId, color: Color32) {
+    let shadow = Color32::from_black_alpha(120);
+    for d in [
+        Vec2::new(1.0, 1.0),
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(1.0, 0.0),
+        Vec2::new(0.0, -1.0),
+        Vec2::new(0.0, 1.0),
+    ] {
+        p.text(at + d, Align2::LEFT_TOP, &text, font.clone(), shadow);
+    }
+    p.text(at, Align2::LEFT_TOP, text, font, color);
 }
 
 /// Draw and drive the crop frame over the shown image. `rect` fractions are
@@ -696,6 +711,28 @@ mod tests {
 
     fn pane() -> Rect {
         Rect::from_min_size(Pos2::new(0.0, 30.0), Vec2::new(1512.0, 900.0))
+    }
+
+    #[test]
+    fn hud_stacks_one_item_per_line() {
+        let parts = vec![
+            "149 / 193".to_string(),
+            "1/200 · f/3.2 · ISO 1250 · 58mm".to_string(),
+            String::new(),
+            "fit · 2560 px preview".to_string(),
+        ];
+        assert_eq!(
+            hud_lines(&parts),
+            [
+                "149 / 193",
+                "1/200",
+                "f/3.2",
+                "ISO 1250",
+                "58mm",
+                "fit",
+                "2560 px preview"
+            ]
+        );
     }
 
     #[test]
