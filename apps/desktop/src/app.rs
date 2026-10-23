@@ -1588,7 +1588,7 @@ impl App {
         }
         self.update_manual = manual;
         self.update_checker = Some(crate::updater::Checker::spawn(
-            env!("CARGO_PKG_VERSION").to_string(),
+            crate::updater::current_version(),
             self.prefs.beta_updates,
             ctx.clone(),
         ));
@@ -1637,7 +1637,7 @@ impl App {
                         "Apature {} is available{}. You have {}.",
                         u.version,
                         if u.prerelease { " (beta)" } else { "" },
-                        env!("CARGO_PKG_VERSION")
+                        crate::updater::current_version()
                     );
                     self.toasts.retain(|t| {
                         !t.text.starts_with("Apature ") || !t.text.contains("is available")
@@ -1654,14 +1654,18 @@ impl App {
             Ok(None) => {
                 log::info!("update check: up to date");
                 if self.launch.check_updates {
-                    eprintln!("check-updates: up to date");
+                    eprintln!(
+                        "check-updates: up to date ({} from {})",
+                        crate::updater::current_version(),
+                        crate::updater::repo()
+                    );
                 }
                 if self.update_manual {
                     self.toast(
                         ui::toasts::Kind::Info,
                         format!(
                             "Apature {} is the newest version.",
-                            env!("CARGO_PKG_VERSION")
+                            crate::updater::current_version()
                         ),
                     );
                 }

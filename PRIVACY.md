@@ -15,8 +15,8 @@ your Mac, and the only network connections it makes are to the delivery targets 
 ## What leaves the Mac
 
 Once a day, when "Check for updates" is on (it is by default, and Settings › General turns it off), Apature asks
-GitHub's public releases API for the newest version. The request carries the app's own version in its user agent
-and nothing else; GitHub sees your IP address like any web request.
+GitHub's public releases API for this fork's repository (Salcedoandrew/apature) for the newest version. The request
+carries the app's own version in its user agent and nothing else; GitHub sees your IP address like any web request.
 
 Only the files you export, to the targets you configure, over the protocol you chose. The log records the file
 names and hosts of those sends; it is never uploaded. GPS you enter is written into sidecars and into exports like
