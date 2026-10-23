@@ -191,13 +191,7 @@ pub enum ExportError {
 /// `long_side` (0 = full size). Returns the JPEG bytes.
 #[cfg(target_os = "macos")]
 pub fn system_decode_raw(path: &Path, long_side: u32) -> Result<Vec<u8>, String> {
-    let tmp = std::env::temp_dir().join(format!(
-        "apature-raw-{}-{}.jpg",
-        std::process::id(),
-        path.file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
+    let tmp = std::env::temp_dir().join(raw_tmp_name(path));
     let mut cmd = std::process::Command::new("/usr/bin/sips");
     cmd.args(["-s", "format", "jpeg", "-s", "formatOptions", "100"]);
     cmd.args([
@@ -216,6 +210,21 @@ pub fn system_decode_raw(path: &Path, long_side: u32) -> Result<Vec<u8>, String>
     };
     let _ = std::fs::remove_file(&tmp);
     result
+}
+
+/// A temp name no other decode shares: parallel exports of `a/X.CR2` and
+/// `b/X.NEF` used to write (and delete) the same file.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn raw_tmp_name(path: &Path) -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "apature-raw-{}-{}-{}.jpg",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    )
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -736,5 +745,13 @@ mod tests {
             "{r:?}"
         );
         assert!(!out.exists(), "no corrupt file is left behind");
+    }
+
+    #[test]
+    fn raw_decode_temp_names_never_repeat() {
+        let a = raw_tmp_name(Path::new("/a/X.CR2"));
+        let b = raw_tmp_name(Path::new("/b/X.NEF"));
+        assert_ne!(a, b);
+        assert!(a.ends_with("-X.jpg") && b.ends_with("-X.jpg"), "{a} {b}");
     }
 }
