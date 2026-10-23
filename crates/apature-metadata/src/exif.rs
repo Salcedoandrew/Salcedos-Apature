@@ -27,7 +27,6 @@ pub struct ExifSummary {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CameraDetails {
     pub firmware: Option<String>,
-    pub frame: Option<String>,
     pub exposure_comp: Option<String>,
     pub flash_comp: Option<String>,
     pub program: Option<String>,
@@ -44,7 +43,6 @@ impl CameraDetails {
     pub fn rows(&self) -> Vec<(&'static str, String)> {
         [
             ("Firmware", &self.firmware),
-            ("Frame #", &self.frame),
             ("Exp. Comp.", &self.exposure_comp),
             ("Flash Comp.", &self.flash_comp),
             ("Program", &self.program),
@@ -65,7 +63,6 @@ impl CameraDetails {
 const SOFTWARE: u16 = 0x0131;
 const EXPOSURE_PROGRAM: u16 = 0x8822;
 const EXPOSURE_BIAS: u16 = 0x9204;
-const IMAGE_NUMBER: u16 = 0x9211;
 const COLOR_SPACE: u16 = 0xA001;
 const INTEROP_IFD: u16 = 0xA005;
 const WHITE_BALANCE: u16 = 0xA403;
@@ -213,11 +210,6 @@ pub fn canon_level(v: i16) -> Option<String> {
 /// Canon picture-style strength (ProcessingInfo), "0".."10"; out of range is n/a.
 pub fn canon_strength(v: i16) -> Option<String> {
     (0..=10).contains(&v).then(|| v.to_string())
-}
-
-/// Canon FileNumber (folder × 10000 + file) → the file's 4-digit frame, "0955".
-pub fn canon_frame(file_number: u64) -> Option<String> {
-    (file_number > 0).then(|| format!("{:04}", file_number % 10_000))
 }
 
 /// "Firmware Version 1.0.2" → "1.0.2"; other text as written.
@@ -452,7 +444,7 @@ fn is_canon(s: &ExifSummary) -> bool {
 }
 
 /// Exposure comp, program, white balance, colour space, contrast,
-/// sharpness and image number from the Exif IFD.
+/// and sharpness from the Exif IFD.
 fn read_exif_details(t: &Tiff, exif: &apature_core::tiff::Ifd, s: &mut ExifSummary) {
     let d = &mut s.details;
     let u = |tg: u16| exif.get(tg).and_then(|e| t.uint(e, 0));
@@ -475,7 +467,6 @@ fn read_exif_details(t: &Tiff, exif: &apature_core::tiff::Ifd, s: &mut ExifSumma
     d.sharpening = u(SHARPNESS)
         .and_then(|v| exif_level(v, true))
         .map(Into::into);
-    d.frame = u(IMAGE_NUMBER).map(|v| format!("{v:04}"));
     d.icc_profile = u(COLOR_SPACE).and_then(color_space).map(Into::into);
     // Uncalibrated with interop index R03 is how cameras mark Adobe RGB.
     if d.icc_profile.as_deref() == Some("Uncalibrated") {
@@ -489,7 +480,7 @@ fn read_exif_details(t: &Tiff, exif: &apature_core::tiff::Ifd, s: &mut ExifSumma
     }
 }
 
-/// Firmware, frame, focus mode, quality, white balance, flash comp (and
+/// Firmware, focus mode, quality, white balance, flash comp (and
 /// what the Exif IFD lacked) from a Canon maker-note IFD at `at`.
 fn read_canon_makernote(t: &Tiff, at: u32, s: &mut ExifSummary) {
     let Ok(mn) = t.read_ifd(at) else { return };
@@ -505,12 +496,6 @@ fn read_canon_makernote(t: &Tiff, at: u32, s: &mut ExifSummary) {
         .filter(|v| !v.is_empty())
     {
         d.firmware = Some(firmware_text(&fw));
-    }
-    if d.frame.is_none() {
-        d.frame = mn
-            .get(0x0008)
-            .and_then(|e| t.uint(e, 0))
-            .and_then(canon_frame);
     }
     // CameraSettings (0x0001): 3 quality, 7 focus mode, 13 contrast, 15 sharpness.
     if let Some(q) = short(0x0001, 3).and_then(canon_quality) {
@@ -720,8 +705,6 @@ mod tests {
         assert_eq!(canon_level(0x7fff), None);
         assert_eq!(canon_strength(0).as_deref(), Some("0"));
         assert_eq!(canon_strength(0x7fff), None);
-        assert_eq!(canon_frame(1_000_955).as_deref(), Some("0955"));
-        assert_eq!(canon_frame(0), None);
         assert_eq!(firmware_text("Firmware Version 1.0.2"), "1.0.2");
         assert_eq!(firmware_text("Ver.1.10"), "Ver.1.10");
         assert!(software_is_firmware("Ver.1.10"));

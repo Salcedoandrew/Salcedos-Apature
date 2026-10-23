@@ -9,7 +9,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
         return;
     }
     let mut cmds = Vec::new();
-    egui::TopBottomPanel::bottom("filmstrip")
+    let panel = egui::TopBottomPanel::bottom("filmstrip")
         .exact_height(FILMSTRIP_H)
         .frame(
             egui::Frame::NONE
@@ -82,19 +82,16 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                 app.request_thumb(idx, 5);
             }
         });
-    ctx.layer_painter(egui::LayerId::background()).line_segment(
-        [
-            Pos2::new(
-                0.0,
-                ctx.content_rect().bottom() - FILMSTRIP_H - super::tokens::STATUS_H,
-            ),
-            Pos2::new(
-                ctx.content_rect().right(),
-                ctx.content_rect().bottom() - FILMSTRIP_H - super::tokens::STATUS_H,
-            ),
-        ],
-        Stroke::new(1.0, t.line),
-    );
+    // Hairline along the filmstrip's own top edge, only while it is shown
+    // (a fixed-height, full-width line used to cross the side panels).
+    if let Some(panel) = panel {
+        let r = panel.response.rect;
+        ctx.layer_painter(egui::LayerId::background()).hline(
+            r.x_range(),
+            r.top(),
+            Stroke::new(1.0, t.line),
+        );
+    }
     for c in cmds {
         app.dispatch(ctx, c);
     }
