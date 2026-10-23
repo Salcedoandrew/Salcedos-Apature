@@ -215,10 +215,13 @@ impl<'a> Tiff<'a> {
         })
     }
 
+    /// Every integer of an entry. The list is built from the bytes actually
+    /// in the file, so a damaged count (up to ~4 billion) can't loop.
     pub fn uints(&self, e: &Entry) -> Vec<u64> {
-        (0..e.count as usize)
-            .filter_map(|i| self.uint(e, i))
-            .collect()
+        let n = self
+            .value_bytes(e)
+            .map_or(0, |b| b.len() / Self::type_size(e.typ));
+        (0..n).filter_map(|i| self.uint(e, i)).collect()
     }
 
     /// Read a RATIONAL/SRATIONAL as (numerator, denominator).
@@ -273,6 +276,22 @@ pub mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_damaged_count_does_not_loop() {
+        // StripOffsets claiming u32::MAX LONGs in a file of a few bytes.
+        let data = testutil::build_le(&[(273, 4, u32::MAX, 64u32.to_le_bytes())], &[1, 0, 0, 0], 64);
+        let (t, first) = Tiff::parse(&data).unwrap();
+        let ifd = t.read_ifd(first).unwrap();
+        let t0 = std::time::Instant::now();
+        assert!(t.uints(ifd.get(273).unwrap()).is_empty());
+        assert!(t0.elapsed() < std::time::Duration::from_millis(100));
+        // An honest count still reads every value.
+        let data = testutil::build_le(&[(273, 3, 3, 64u32.to_le_bytes())], &[1, 0, 2, 0, 3, 0], 64);
+        let (t, first) = Tiff::parse(&data).unwrap();
+        let ifd = t.read_ifd(first).unwrap();
+        assert_eq!(t.uints(ifd.get(273).unwrap()), [1, 2, 3]);
+    }
 
     #[test]
     fn parses_header_and_ifd() {
