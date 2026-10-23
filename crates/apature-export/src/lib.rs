@@ -269,15 +269,7 @@ fn crop_to(img: Rgb, c: edits::Crop) -> Rgb {
     Rgb::from_image(image::imageops::crop_imm(&src, x, y, w, h).to_image())
 }
 
-fn app1(sig: &[u8], body: &[u8]) -> Vec<u8> {
-    let len = 2 + sig.len() + body.len();
-    let mut v = Vec::with_capacity(len + 2);
-    v.extend_from_slice(&[0xFF, 0xE1]);
-    v.extend_from_slice(&(len as u16).to_be_bytes());
-    v.extend_from_slice(sig);
-    v.extend_from_slice(body);
-    v
-}
+pub(crate) use apature_metadata::jpeg_xmp::segment;
 
 /// Export `item` to `out` with `settings`, embedding `iptc` as XMP and IIM.
 pub fn export(
@@ -399,7 +391,7 @@ pub fn export(
         match copied {
             Some(mut block) => {
                 exif_write::patch_for_export(&mut block, width, height);
-                segs.push(app1(b"Exif\0\0", &block));
+                segs.push(segment(0xE1, "Exif", b"Exif\0\0", &block)?);
                 exif_source = ExifSource::Copied;
             }
             None => {
@@ -413,14 +405,14 @@ pub fn export(
                         .map(String::as_str),
                     iptc.copyright.as_deref(),
                 );
-                segs.push(app1(b"Exif\0\0", &block));
+                segs.push(segment(0xE1, "Exif", b"Exif\0\0", &block)?);
                 exif_source = ExifSource::Minimal;
             }
         }
     }
     if settings.write_xmp {
         let packet = iptc::apply("", iptc)?;
-        segs.push(app1(b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes()));
+        segs.push(segment(0xE1, "XMP", b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes())?);
     }
     if settings.keep_icc {
         for s in src_segs
@@ -431,7 +423,7 @@ pub fn export(
         }
     }
     if settings.write_iim && !iptc.is_empty() {
-        segs.push(iim::app13_segment(iptc));
+        segs.push(iim::app13_segment(iptc)?);
     }
 
     // ---- splice after SOI (and the encoder's APP0 when present) ----
@@ -718,5 +710,31 @@ mod tests {
             .path()
             .join("out/wide-export.apature-export.tmp")
             .exists());
+    }
+
+    #[test]
+    fn a_caption_too_long_for_one_segment_fails_instead_of_corrupting() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("long.jpg");
+        let img = Rgb {
+            width: 64,
+            height: 32,
+            data: vec![128; 64 * 32 * 3],
+        };
+        std::fs::write(&src, apature_preview::decode::encode_jpeg(&img, 85).unwrap()).unwrap();
+        let mut iptc = sample_iptc();
+        iptc.description = Some("Long caption test.".repeat(4000)); // 72 KB
+        let out = dir.path().join("out/long.jpg");
+        let r = export(&item_for(&src), &iptc, &Settings::default(), &out);
+        assert!(
+            matches!(
+                r,
+                Err(ExportError::Jpeg(
+                    apature_metadata::jpeg_xmp::JpegXmpError::SegmentTooLarge("XMP", _)
+                ))
+            ),
+            "{r:?}"
+        );
+        assert!(!out.exists(), "no corrupt file is left behind");
     }
 }

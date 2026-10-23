@@ -33,6 +33,8 @@ pub enum JpegXmpError {
     Malformed(usize),
     #[error("XMP packet is {0} bytes; more than {MAX_PACKET} needs Extended XMP, which is not supported")]
     PacketTooLarge(usize),
+    #[error("the {0} block is {1} bytes, more than one JPEG segment holds ({MAX_SEGMENT_BODY}); shorten the caption, keywords or other long fields")]
+    SegmentTooLarge(&'static str, usize),
     #[error("{0}")]
     Xmp(#[from] XmpError),
     #[error("embedded packet in {0} did not read back with the requested marks; original left untouched")]
@@ -120,6 +122,31 @@ pub fn packet(data: &[u8]) -> Result<Option<&str>, JpegXmpError> {
         }
     }
     Ok(None)
+}
+
+/// Most bytes after the marker and length that one JPEG segment can hold
+/// (the 2-byte length counts itself, so 65535 - 2).
+pub const MAX_SEGMENT_BODY: usize = 65_533;
+
+/// One marker segment: FF `marker`, length, `sig`, `body`. A body too big
+/// for the 16-bit length is an error, never a wrapped length (which would
+/// leave a corrupt file). `what` names the block in the error.
+pub fn segment(
+    marker: u8,
+    what: &'static str,
+    sig: &[u8],
+    body: &[u8],
+) -> Result<Vec<u8>, JpegXmpError> {
+    let n = sig.len() + body.len();
+    if n > MAX_SEGMENT_BODY {
+        return Err(JpegXmpError::SegmentTooLarge(what, n));
+    }
+    let mut v = Vec::with_capacity(n + 4);
+    v.extend_from_slice(&[0xFF, marker]);
+    v.extend_from_slice(&((n + 2) as u16).to_be_bytes());
+    v.extend_from_slice(sig);
+    v.extend_from_slice(body);
+    Ok(v)
 }
 
 fn build_segment(packet: &str) -> Result<Vec<u8>, JpegXmpError> {
@@ -277,6 +304,18 @@ pub fn write_marks(path: &Path, marks: &XmpMarks) -> Result<(), JpegXmpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segment_length_never_wraps() {
+        let body = vec![b'x'; MAX_SEGMENT_BODY - 4];
+        let seg = segment(0xE1, "XMP", b"sig\0", &body).unwrap();
+        assert_eq!(u16::from_be_bytes([seg[2], seg[3]]), 0xFFFF);
+        assert_eq!(seg.len(), 2 + 0xFFFF);
+        assert!(matches!(
+            segment(0xE1, "XMP", b"sig\0", &[body.as_slice(), b"y"].concat()),
+            Err(JpegXmpError::SegmentTooLarge("XMP", 65_534))
+        ));
+    }
 
     /// Structurally valid JPEG skeleton: SOI, APP0, DQT, SOF0, SOS, scan bytes, EOI.
     fn skeleton(with_exif: bool) -> Vec<u8> {

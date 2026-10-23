@@ -250,7 +250,7 @@ fn with_metadata(
         // No camera data, but the picture must still stand the right way up.
         exif_write::orientation_only(orientation)
     };
-    add.push(app1(b"Exif\0\0", &exif_block));
+    add.push(crate::segment(0xE1, "Exif", b"Exif\0\0", &exif_block).map_err(|e| e.to_string())?);
 
     let mut packet = String::new();
     if opts.copy_iptc && !fields.is_empty() {
@@ -263,7 +263,10 @@ fn with_metadata(
     }
     let write_xmp = !packet.is_empty();
     if write_xmp {
-        add.push(app1(b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes()));
+        add.push(
+            crate::segment(0xE1, "XMP", b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes())
+                .map_err(|e| e.to_string())?,
+        );
     }
     let has_icc = segs
         .iter()
@@ -273,7 +276,7 @@ fn with_metadata(
     }
     let write_iim = opts.copy_iptc && !fields.is_empty();
     if write_iim {
-        add.push(iim::app13_segment(&fields));
+        add.push(iim::app13_segment(&fields).map_err(|e| e.to_string())?);
     }
 
     let drop = |s: &apature_metadata::jpeg_xmp::Segment| -> bool {
@@ -307,15 +310,6 @@ fn with_metadata(
     Ok(out)
 }
 
-fn app1(sig: &[u8], body: &[u8]) -> Vec<u8> {
-    let len = 2 + sig.len() + body.len();
-    let mut v = Vec::with_capacity(len + 2);
-    v.extend_from_slice(&[0xFF, 0xE1]);
-    v.extend_from_slice(&(len as u16).to_be_bytes());
-    v.extend_from_slice(sig);
-    v.extend_from_slice(body);
-    v
-}
 
 fn icc_segment(profile: &[u8]) -> Vec<u8> {
     let len = 2 + 12 + 2 + profile.len();

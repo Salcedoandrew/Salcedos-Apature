@@ -110,7 +110,8 @@ pub fn datasets(iptc: &Iptc) -> Vec<u8> {
 
 /// A complete APP13 segment (marker included) holding the IIM block as
 /// Photoshop image resource 0x0404.
-pub fn app13_segment(iptc: &Iptc) -> Vec<u8> {
+/// Errors when the fields are too long for one segment.
+pub fn app13_segment(iptc: &Iptc) -> Result<Vec<u8>, crate::jpeg_xmp::JpegXmpError> {
     let payload = datasets(iptc);
     let mut irb = Vec::with_capacity(payload.len() + 16);
     irb.extend_from_slice(b"8BIM");
@@ -121,13 +122,7 @@ pub fn app13_segment(iptc: &Iptc) -> Vec<u8> {
     if payload.len() % 2 == 1 {
         irb.push(0);
     }
-    let body_len = 2 + 14 + irb.len();
-    let mut seg = Vec::with_capacity(body_len + 2);
-    seg.extend_from_slice(&[0xFF, 0xED]);
-    seg.extend_from_slice(&(body_len as u16).to_be_bytes());
-    seg.extend_from_slice(b"Photoshop 3.0\0");
-    seg.extend_from_slice(&irb);
-    seg
+    crate::jpeg_xmp::segment(0xED, "IPTC-IIM", b"Photoshop 3.0\0", &irb)
 }
 
 /// Parse datasets back into (record, dataset, bytes); for tests and readers.
@@ -187,8 +182,20 @@ mod tests {
     }
 
     #[test]
+    fn fields_too_long_for_one_segment_are_an_error() {
+        let long = "x".repeat(30_000);
+        let iptc = Iptc {
+            description: Some(long.clone()),
+            headline: Some(long.clone()),
+            title: Some(long),
+            ..Default::default()
+        };
+        assert!(app13_segment(&iptc).is_err());
+    }
+
+    #[test]
     fn round_trips_through_the_segment() {
-        let seg = app13_segment(&sample());
+        let seg = app13_segment(&sample()).unwrap();
         assert_eq!(&seg[..2], &[0xFF, 0xED]);
         let len = u16::from_be_bytes([seg[2], seg[3]]) as usize;
         assert_eq!(

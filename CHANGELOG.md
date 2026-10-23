@@ -59,6 +59,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - The Zoom section now shows when Preview opens in its own window. That window had no right-hand panel, so Info and Zoom were missing there. Preview also drops the small thumbnail at the top of the panel, so Zoom sits right under Info without scrolling.
 - Tab now shows and hides the sidebar in the separate Preview window too. That window never received the key and had no sidebar to show; now it has both, and Tab in the main window still toggles the catalog's sidebar.
 - After pressing Tab in Preview, the arrow keys change photos again straight away; before, a hidden control took the keyboard and you had to click the photo first. Tab now also shows and hides the right-hand panel (Info, Zoom, Marks) together with the sidebar, in Preview and in the catalog, as in Photo Mechanic: if either panel is showing, Tab hides both, otherwise it shows both. Preview keeps that for the session; the catalog saves it.
+- Exporting or extracting a photo whose caption, keywords or other fields are too long for one JPEG metadata block (about 64 KB) now fails with a clear message instead of writing a broken JPEG and reporting success. Normal-length captions are unaffected.
 
 ## [0.1.0] — 2026-10-21
 
