@@ -161,6 +161,67 @@ impl Remote for LocalFolder {
     }
 }
 
+/// Base64 without padding, the way ssh prints SHA256 fingerprints.
+fn base64_nopad(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let byte = |i: usize| chunk.get(i).copied().unwrap_or(0) as u32;
+        let n = (byte(0) << 16) | (byte(1) << 8) | byte(2);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(n >> 6) as usize & 63] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[n as usize & 63] as char);
+        }
+    }
+    out
+}
+
+/// Check the SFTP server's host key against ~/.ssh/known_hosts before any
+/// login. A mismatch fails, and so does an unknown host: the first trust has
+/// to come from a real ssh client recording the key, not from us accepting
+/// whatever a first connection presents.
+fn verify_host_key(sess: &ssh2::Session, target: &Target) -> Result<(), DeliverError> {
+    let addr = format!("{}:{}", target.host, target.port);
+    let err = |msg: String| DeliverError::Connect(addr.clone(), msg);
+    let (key, _) = sess
+        .host_key()
+        .ok_or_else(|| err("server presented no host key".into()))?;
+    let fingerprint = sess
+        .host_key_hash(ssh2::HashType::Sha256)
+        .map(|h| format!("SHA256:{}", base64_nopad(h)))
+        .unwrap_or_else(|| "SHA256:unknown".into());
+    let mut known = sess.known_hosts().map_err(|e| err(e.to_string()))?;
+    if let Some(home) = std::env::var_os("HOME") {
+        let file = Path::new(&home).join(".ssh").join("known_hosts");
+        if file.exists() {
+            known
+                .read_file(&file, ssh2::KnownHostFileKind::OpenSSH)
+                .map_err(|e| err(format!("reading {}: {e}", file.display())))?;
+        }
+    }
+    match known.check_port(&target.host, target.port, key) {
+        ssh2::CheckResult::Match => Ok(()),
+        ssh2::CheckResult::Mismatch => Err(err(format!(
+            "host key for {} does not match ~/.ssh/known_hosts (server key {fingerprint}); \
+             refusing to connect — if the server was replaced on purpose, update known_hosts first",
+            target.host
+        ))),
+        ssh2::CheckResult::NotFound => Err(err(format!(
+            "{} is not in ~/.ssh/known_hosts (server key {fingerprint}); \
+             connect to it once with ssh to record the key, then retry",
+            target.host
+        ))),
+        ssh2::CheckResult::Failure => Err(err(format!(
+            "could not check the host key for {} against ~/.ssh/known_hosts",
+            target.host
+        ))),
+    }
+}
+
 fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverError> {
     let addr = format!("{}:{}", target.host, target.port);
     match target.kind {
@@ -210,6 +271,7 @@ fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverErro
             sess.set_tcp_stream(tcp);
             sess.handshake()
                 .map_err(|e| DeliverError::Connect(addr.clone(), e.to_string()))?;
+            verify_host_key(&sess, target)?;
             match &target.key_file {
                 Some(key) => sess
                     .userauth_pubkey_file(
@@ -329,6 +391,44 @@ mod tests {
             "/incoming/X.JPG"
         );
         assert_eq!(remote_path("photos", Path::new("X.JPG")), "photos/X.JPG");
+    }
+
+    #[test]
+    fn folder_send_lands_files_under_final_names() {
+        let src = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let a = src.path().join("IMG_0001.JPG");
+        let b = src.path().join("IMG_0002.JPG");
+        std::fs::write(&a, vec![3u8; 10_000]).unwrap();
+        std::fs::write(&b, vec![9u8; 2_500]).unwrap();
+        let target = Target {
+            name: "folder test".into(),
+            kind: Kind::Folder,
+            host: String::new(),
+            port: Target::default_port(Kind::Folder),
+            user: String::new(),
+            dir: out.path().to_string_lossy().into_owned(),
+            key_file: None,
+        };
+        let rep = send(&target, "", &[a, b], |_| {}).unwrap();
+        assert_eq!(rep.sent, 2);
+        assert!(rep.failed.is_empty(), "failures: {:?}", rep.failed);
+        assert_eq!(rep.bytes, 12_500);
+        assert_eq!(
+            std::fs::read(out.path().join("IMG_0001.JPG")).unwrap(),
+            vec![3u8; 10_000]
+        );
+        assert_eq!(
+            std::fs::read(out.path().join("IMG_0002.JPG")).unwrap(),
+            vec![9u8; 2_500]
+        );
+        // Only the two final names: no `.part` file is left behind.
+        let mut names: Vec<String> = std::fs::read_dir(out.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["IMG_0001.JPG", "IMG_0002.JPG"]);
     }
 
     /// Runs only with a local FTP server: `APATURE_FTP_TEST=host:port:user:pass:dir`.

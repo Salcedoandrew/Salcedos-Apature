@@ -1,9 +1,10 @@
 //! Build the plan: which files, where they go, what collides.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use apature_core::{Kind, PhotoItem, ScanOptions};
+use apature_core::{Kind, PhotoItem, ScanOptions, Variant};
+use rayon::prelude::*;
 
 use crate::ledger::{fingerprint, Ledger};
 use crate::template::{expand, sanitize_component, Facts};
@@ -284,14 +285,11 @@ fn card_subfolder(source: &Path, file: &Path) -> PathBuf {
     rel
 }
 
-/// Today's civil date (UTC) for the example line when no photo date is known.
-pub fn today() -> (i32, u32, u32) {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    // Howard Hinnant's days-to-civil.
-    let z = secs.div_euclid(86_400) + 719_468;
+/// (year, month, day) for a count of days since 1970-01-01 — Howard
+/// Hinnant's days-to-civil. The one implementation in the crate: `today`
+/// and photocopy's file-time conversion both go through it.
+pub(crate) fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -301,6 +299,15 @@ pub fn today() -> (i32, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     ((if m <= 2 { y + 1 } else { y }) as i32, m, d)
+}
+
+/// Today's civil date (UTC) for the example line when no photo date is known.
+pub fn today() -> (i32, u32, u32) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    civil_from_days(secs.div_euclid(86_400))
 }
 
 /// Add one file to the plan at `folder_rel/name` under each destination,
@@ -376,33 +383,47 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
     let mut seq = opts.seq_start;
     let mut item_count = 0usize;
 
-    for (i, item) in items.iter().enumerate() {
-        if let Some(only) = &opts.only_paths {
-            if !item.variants().any(|v| only.iter().any(|p| p == &v.path)) {
-                continue;
+    // `only_paths` membership is tested per variant per photo; a set makes
+    // each test one lookup instead of a scan of the whole batch.
+    let only_set: Option<HashSet<&PathBuf>> =
+        opts.only_paths.as_ref().map(|paths| paths.iter().collect());
+    let passes_filter = |v: &Variant| match opts.filter {
+        FileFilter::All => true,
+        FileFilter::RawOnly => v.kind == Kind::Raw,
+        FileFilter::JpegOnly => v.kind == Kind::Jpeg,
+    };
+    // The EXIF read behind `facts_for` is the slow part of planning and is
+    // independent per photo, so it runs in parallel. Everything after this
+    // stays sequential and in card order: sequence numbers, collision
+    // state and skip order all depend on it. `None` marks a photo the
+    // `only_paths` check or the filter leaves out.
+    let prepped: Vec<Option<Facts>> = items
+        .par_iter()
+        .map(|item| {
+            if let Some(only) = &only_set {
+                if !item.variants().any(|v| only.contains(&v.path)) {
+                    return None;
+                }
             }
-        }
-        let variants: Vec<_> = item
-            .variants()
-            .filter(|v| match opts.filter {
-                FileFilter::All => true,
-                FileFilter::RawOnly => v.kind == Kind::Raw,
-                FileFilter::JpegOnly => v.kind == Kind::Jpeg,
-            })
-            .collect();
-        if variants.is_empty() {
+            let first = item.variants().find(|v| passes_filter(*v))?;
+            Some(facts_for(item, &first.path, opts.headline.as_deref()))
+        })
+        .collect();
+    let mut day_counts: BTreeMap<(i32, u32, u32), usize> = BTreeMap::new();
+
+    for (i, item) in items.iter().enumerate() {
+        let Some(prepped_facts) = &prepped[i] else {
             continue;
-        }
-        let mut facts0 = facts_for(item, &variants[0].path, opts.headline.as_deref());
+        };
+        let variants: Vec<_> = item.variants().filter(|v| passes_filter(*v)).collect();
+        debug_assert!(!variants.is_empty());
+        let mut facts0 = prepped_facts.clone();
         facts0.dest = opts
             .primary
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
         if let Some(d) = facts0.date {
-            match plan.days.iter_mut().find(|(k, _)| *k == d) {
-                Some((_, n)) => *n += 1,
-                None => plan.days.push((d, 1)),
-            }
+            *day_counts.entry(d).or_default() += 1;
         }
         if let Some(want) = opts.day {
             if facts0.date != Some(want) {
@@ -581,7 +602,8 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
             seq += 1;
         }
     }
-    plan.days.sort();
+    // The map iterates in day order, which is the sort `days` used to get.
+    plan.days = day_counts.into_iter().collect();
     plan.next_seq = seq;
     // Deduplicate identical collision reports.
     let mut seen = BTreeSet::new();
@@ -599,6 +621,18 @@ mod tests {
     fn card(dir: &Path) {
         for n in ["DSC_0001.NEF", "DSC_0001.JPG", "DSC_0002.NEF", "notes.txt"] {
             fs::write(dir.join(n), format!("data-{n}")).unwrap();
+        }
+    }
+
+    #[test]
+    fn civil_from_days_covers_epoch_leap_and_century_years() {
+        // Day counts checked against known Unix timestamps / 86_400.
+        for (days, want) in [
+            (0, (1970, 1, 1)),       // the epoch itself
+            (11_016, (2000, 2, 29)), // 2000 is a leap year
+            (47_541, (2100, 3, 1)),  // 2100 is not: no Feb 29 that year
+        ] {
+            assert_eq!(civil_from_days(days), want, "day {days}");
         }
     }
 

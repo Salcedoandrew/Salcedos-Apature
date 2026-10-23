@@ -5,7 +5,7 @@
 //! is touched. Language alternatives (`rdf:Alt`), ordered lists (`rdf:Seq`)
 //! and bags (`rdf:Bag`) are handled as whole elements.
 
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -344,40 +344,58 @@ fn element_re(prefix: &str, name: &str) -> Regex {
     .unwrap()
 }
 
+/// The compiled pattern for one TABLE row: the property pattern for
+/// `Kind::Simple`, the element pattern for the structured kinds. A row's
+/// pattern depends only on the row, so all of them are built once.
+struct FieldRes {
+    re: Regex,
+}
+
+static FIELD_RES: LazyLock<Vec<FieldRes>> = LazyLock::new(|| {
+    TABLE
+        .iter()
+        .map(|(_, prefix, _, name, kind)| FieldRes {
+            re: match kind {
+                Kind::Simple => Regex::new(&xmp::prop_pattern(prefix, name)).unwrap(),
+                _ => element_re(prefix, name),
+            },
+        })
+        .collect()
+});
+
 /// Read IPTC fields from sidecar or packet text.
 /// Fields present in `text` but empty: cleared on purpose (see [`apply`]).
 pub fn cleared(text: &str) -> Vec<Field> {
-    let parsed = parse(text);
+    cleared_with(text, &parse(text))
+}
+
+/// [`cleared`] with the parse of `text` already in hand, so a caller that
+/// parsed the text itself does not pay for a second parse.
+pub fn cleared_with(text: &str, parsed: &Iptc) -> Vec<Field> {
     TABLE
         .iter()
-        .filter(|(f, prefix, _, name, kind)| {
-            let present = match kind {
-                Kind::Simple => Regex::new(&xmp::prop_pattern(prefix, name))
-                    .unwrap()
-                    .is_match(text),
-                _ => element_re(prefix, name).is_match(text),
-            };
-            present
+        .zip(FIELD_RES.iter())
+        .filter(|((f, ..), res)| {
+            res.re.is_match(text)
                 && parsed
                     .get(*f)
                     .is_none_or(|v| v.iter().all(|s| s.is_empty()))
         })
-        .map(|(f, ..)| *f)
+        .map(|((f, ..), _)| *f)
         .collect()
 }
 
 pub fn parse(text: &str) -> Iptc {
     let mut out = Iptc::default();
-    for (f, prefix, _, name, kind) in TABLE {
+    for ((f, _, _, _, kind), res) in TABLE.iter().zip(FIELD_RES.iter()) {
         match kind {
             Kind::Simple => {
-                let re = Regex::new(&xmp::prop_pattern(prefix, name)).unwrap();
-                if let Some(v) = xmp::value_of(&re, text) {
+                if let Some(v) = xmp::value_of(&res.re, text) {
                     out.set(*f, vec![v]);
                 }
             }
             Kind::Alt | Kind::Seq | Kind::Bag => {
-                if let Some(m) = element_re(prefix, name).find(text) {
+                if let Some(m) = res.re.find(text) {
                     let inner = m.as_str();
                     let items: Vec<String> = li_re()
                         .captures_iter(inner)

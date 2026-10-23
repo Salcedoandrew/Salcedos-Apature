@@ -29,6 +29,20 @@ pub struct CopyReport {
 
 /// Copy `src` to `dst` with verification. Creates parent directories.
 pub fn copy_verified(src: &Path, dst: &Path) -> Result<CopyReport, IngestError> {
+    copy_impl(src, dst, true)
+}
+
+/// Copy `src` to `dst` without the verification re-read: the copy is
+/// written, flushed and synced exactly as in [`copy_verified`], but never
+/// read back, so corruption in flight would go undetected. Verification is
+/// the default everywhere in the app; this entry point is for callers who
+/// check the copy some other way (or whose destination makes a second full
+/// read the bottleneck). The report's hash is the source's.
+pub fn copy_unverified(src: &Path, dst: &Path) -> Result<CopyReport, IngestError> {
+    copy_impl(src, dst, false)
+}
+
+fn copy_impl(src: &Path, dst: &Path, verify: bool) -> Result<CopyReport, IngestError> {
     if dst.exists() {
         return Err(IngestError::DestinationExists(dst.to_path_buf()));
     }
@@ -54,9 +68,8 @@ pub fn copy_verified(src: &Path, dst: &Path) -> Result<CopyReport, IngestError> 
         output.sync_all()?;
         drop(output);
         let src_hash = hex(&hasher.finalize());
-        let dst_hash = sha256_file(&tmp)?;
-        if src_hash != dst_hash {
-            return Err(IngestError::Mismatch(src.to_path_buf()));
+        if verify {
+            check_copy(&tmp, src, &src_hash)?;
         }
         fs::rename(&tmp, dst)?;
         Ok(CopyReport {
@@ -70,6 +83,15 @@ pub fn copy_verified(src: &Path, dst: &Path) -> Result<CopyReport, IngestError> 
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// The verification step of a copy: the file written at `tmp` must hash to
+/// the source's hash, read back from disk in full.
+fn check_copy(tmp: &Path, src: &Path, src_hash: &str) -> Result<(), IngestError> {
+    if sha256_file(tmp)? != src_hash {
+        return Err(IngestError::Mismatch(src.to_path_buf()));
+    }
+    Ok(())
 }
 
 pub fn sha256_file(path: &Path) -> io::Result<String> {
@@ -122,5 +144,61 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains(".part")));
+    }
+
+    #[test]
+    fn copies_and_verifies_a_large_patterned_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0002.NEF");
+        // ~3 MiB of a deterministic pattern, so any dropped, duplicated or
+        // reordered chunk changes the bytes and the hash.
+        let data: Vec<u8> = (0..3 * 1024 * 1024 + 13)
+            .map(|i| ((i * 31 + 7) % 251) as u8)
+            .collect();
+        fs::write(&src, &data).unwrap();
+        let dst = dir.path().join("out/DSC_0002.NEF");
+        let r = copy_verified(&src, &dst).unwrap();
+        assert_eq!(r.bytes, data.len() as u64);
+        assert_eq!(fs::read(&dst).unwrap(), data);
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        assert_eq!(r.sha256, hex(&hasher.finalize()));
+        assert_eq!(r.sha256, sha256_file(&dst).unwrap());
+        assert!(src.exists(), "source must never be removed");
+    }
+
+    #[test]
+    fn a_copy_that_differs_from_the_source_is_a_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0003.NEF");
+        fs::write(&src, b"the real photo bytes").unwrap();
+        // What landed on disk is not what the source hashed to.
+        let tmp = dir.path().join(".DSC_0003.NEF.part");
+        fs::write(&tmp, b"corrupted in flight!").unwrap();
+        let src_hash = sha256_file(&src).unwrap();
+        assert!(matches!(
+            check_copy(&tmp, &src, &src_hash),
+            Err(IngestError::Mismatch(p)) if p == src
+        ));
+        // The same check passes when the copy is faithful.
+        fs::write(&tmp, b"the real photo bytes").unwrap();
+        assert!(check_copy(&tmp, &src, &src_hash).is_ok());
+    }
+
+    #[test]
+    fn unverified_copy_copies_the_same_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0004.NEF");
+        let data: Vec<u8> = (0..100_000).map(|i| ((i * 17 + 3) % 241) as u8).collect();
+        fs::write(&src, &data).unwrap();
+        let dst = dir.path().join("out/DSC_0004.NEF");
+        let r = copy_unverified(&src, &dst).unwrap();
+        assert_eq!(r.bytes, data.len() as u64);
+        assert_eq!(fs::read(&dst).unwrap(), data);
+        assert_eq!(r.sha256, sha256_file(&src).unwrap());
+        assert!(matches!(
+            copy_unverified(&src, &dst),
+            Err(IngestError::DestinationExists(_))
+        ));
     }
 }

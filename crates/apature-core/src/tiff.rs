@@ -216,9 +216,17 @@ impl<'a> Tiff<'a> {
     }
 
     pub fn uints(&self, e: &Entry) -> Vec<u64> {
-        (0..e.count as usize)
-            .filter_map(|i| self.uint(e, i))
-            .collect()
+        // The declared count comes straight from the file and can claim
+        // billions of values; iterating to it would spin for minutes on a
+        // corrupt entry. Derive the count from the bytes actually present
+        // instead: when `value_bytes` has the value, it holds exactly
+        // `count` values, and when it does not, every `uint` read fails
+        // anyway — so the result is the same, capped by the data itself.
+        let Some(bytes) = self.value_bytes(e) else {
+            return Vec::new();
+        };
+        let n = bytes.len() / Self::type_size(e.typ);
+        (0..n).filter_map(|i| self.uint(e, i)).collect()
     }
 
     /// Read a RATIONAL/SRATIONAL as (numerator, denominator).
@@ -296,6 +304,29 @@ mod tests {
             Some("Z 6_2")
         );
         assert_eq!(ifd.next, 0);
+    }
+
+    #[test]
+    fn uints_caps_work_at_the_bytes_present() {
+        // A corrupt entry declaring u32::MAX LONGs: the old loop iterated
+        // the declared count and stalled for minutes even though no value
+        // can be read. Now it returns at once with what the bytes hold.
+        let data = testutil::build_le(
+            &[
+                (tag::SUB_IFDS, 4, u32::MAX, 9999u32.to_le_bytes()),
+                (tag::STRIP_OFFSETS, 4, 2, 64u32.to_le_bytes()),
+            ],
+            &[100u8, 0, 0, 0, 200, 0, 0, 0],
+            64,
+        );
+        let (t, first) = Tiff::parse(&data).unwrap();
+        let ifd = t.read_ifd(first).unwrap();
+        assert_eq!(t.uints(ifd.get(tag::SUB_IFDS).unwrap()), Vec::<u64>::new());
+        // A sane entry still yields all of its values.
+        assert_eq!(
+            t.uints(ifd.get(tag::STRIP_OFFSETS).unwrap()),
+            vec![100, 200]
+        );
     }
 
     #[test]

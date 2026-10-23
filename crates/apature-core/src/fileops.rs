@@ -58,10 +58,14 @@ fn with_stem(path: &Path, stem: &str) -> PathBuf {
 /// Plan renaming each item to its new stem (no extension, no separators).
 pub fn plan_rename(items: &[(&PhotoItem, String)]) -> Result<RenamePlan, FileOpError> {
     let mut plan = RenamePlan::default();
-    let mut sources: HashSet<PathBuf> = HashSet::new();
+    // Lowercased path strings: on a case-insensitive disk (APFS default,
+    // ExFAT cards) a case-only rename's target *is* its source under a
+    // different spelling, and an exact comparison would report the file as
+    // colliding with itself.
+    let mut sources: HashSet<String> = HashSet::new();
     for (it, _) in items {
         for f in item_files(it) {
-            sources.insert(f);
+            sources.insert(f.to_string_lossy().to_lowercase());
         }
     }
     let mut targets: HashSet<PathBuf> = HashSet::new();
@@ -92,8 +96,9 @@ pub fn plan_rename(items: &[(&PhotoItem, String)]) -> Result<RenamePlan, FileOpE
             }
             // Case-only renames on a case-insensitive disk report the target
             // as existing; the two-phase rename below handles those, so only
-            // a target that is not also a source counts as a collision.
-            if to.exists() && !sources.contains(&to) {
+            // a target that is not also a source (ignoring letter case)
+            // counts as a collision.
+            if to.exists() && !sources.contains(&to.to_string_lossy().to_lowercase()) {
                 plan.collisions
                     .push((to.clone(), "a file with this name already exists".into()));
                 continue;
@@ -266,5 +271,66 @@ mod tests {
             plan_rename(&[(&a, "x/y".into())]),
             Err(FileOpError::BadName(_))
         ));
+    }
+
+    #[test]
+    fn case_only_rename_is_not_a_collision_with_itself() {
+        // On a case-insensitive disk (APFS, ExFAT) `dsc_0001.JPG` "exists"
+        // the moment `DSC_0001.JPG` does; the plan must treat the target as
+        // the same source, not as a file already using the name. (On this
+        // case-sensitive test filesystem the differently-cased target does
+        // not exist, so this pins the plan-level behavior: one move, no
+        // collision, and the two-phase rename carries it out.)
+        let d = tempfile::tempdir().unwrap();
+        let a = item(d.path(), "DSC_0001", &["JPG"]);
+        let plan = plan_rename(&[(&a, "dsc_0001".into())]).unwrap();
+        assert!(
+            plan.collisions.is_empty(),
+            "case-only rename collided: {:?}",
+            plan.collisions
+        );
+        assert_eq!(
+            plan.moves,
+            vec![(
+                d.path().join("DSC_0001.JPG"),
+                d.path().join("dsc_0001.JPG")
+            )]
+        );
+        assert!(plan.can_run());
+        rename(&plan).unwrap();
+        assert!(d.path().join("dsc_0001.JPG").is_file());
+        assert!(!d.path().join("DSC_0001.JPG").exists());
+    }
+
+    #[test]
+    fn trash_removes_files_and_reports_missing_paths() {
+        let d = tempfile::tempdir().unwrap();
+        let a = item(d.path(), "DSC_0001", &["NEF", "JPG"]);
+        let files = item_files(&a);
+        assert_eq!(files.len(), 2);
+        match trash(&files) {
+            Ok(()) => {
+                for f in &files {
+                    assert!(!f.exists(), "{f:?} should have been trashed");
+                }
+            }
+            Err(e) => {
+                // No working Trash in this environment: the failure must
+                // surface as an error, never as a panic or silent success.
+                assert!(
+                    matches!(e, FileOpError::Trash(_)),
+                    "unexpected error: {e:?}"
+                );
+                for f in &files {
+                    assert!(f.exists(), "{f:?} must stay put when trash fails");
+                }
+            }
+        }
+        // A path that does not exist is reported, not silently accepted.
+        let missing = d.path().join("DSC_9999.NEF");
+        assert!(
+            matches!(trash(&[missing]), Err(FileOpError::Trash(_))),
+            "trashing a missing path must report an error"
+        );
     }
 }

@@ -20,6 +20,8 @@
 pub mod extract;
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use apature_core::{Kind, PhotoItem};
 use apature_metadata::jpeg_xmp::{header_segments, is_exif_segment};
@@ -180,11 +182,21 @@ pub enum ExportError {
     Encode(image::ImageError),
     #[error("metadata: {0}")]
     Xmp(#[from] apature_metadata::xmp::XmpError),
+    #[error("metadata: {0}")]
+    Iim(#[from] apature_metadata::iim::IimError),
+    #[error("JPEG segment of {0} bytes exceeds the 65,535-byte segment limit")]
+    SegmentTooLarge(usize),
     #[error("{0}")]
     Jpeg(#[from] apature_metadata::jpeg_xmp::JpegXmpError),
     #[error("system RAW decode of {0} failed: {1}")]
     RawDecode(PathBuf, String),
 }
+
+/// Sequence for `sips` temp names: exports run in parallel (the desktop's
+/// export pool), and two RAWs sharing a stem — the same shot name in
+/// different folders — must never render into the same temp file.
+#[cfg(target_os = "macos")]
+static RAW_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Render a RAW with the macOS RAW engine (ImageIO via `sips`) to a JPEG at
 /// quality 100, matched to sRGB, optionally resampled so the long side is
@@ -192,8 +204,9 @@ pub enum ExportError {
 #[cfg(target_os = "macos")]
 pub fn system_decode_raw(path: &Path, long_side: u32) -> Result<Vec<u8>, String> {
     let tmp = std::env::temp_dir().join(format!(
-        "apature-raw-{}-{}.jpg",
+        "apature-raw-{}-{}-{}.jpg",
         std::process::id(),
+        RAW_TMP_SEQ.fetch_add(1, Ordering::Relaxed),
         path.file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
@@ -269,14 +282,38 @@ fn crop_to(img: Rgb, c: edits::Crop) -> Rgb {
     Rgb::from_image(image::imageops::crop_imm(&src, x, y, w, h).to_image())
 }
 
-fn app1(sig: &[u8], body: &[u8]) -> Vec<u8> {
+/// One APP1 segment (marker included). The length field is a u16 counting
+/// its own two bytes, so a longer segment cannot be represented at all:
+/// error instead of wrapping the length and silently corrupting the JPEG
+/// (same policy as `apature_metadata::jpeg_xmp`'s MAX_PACKET check).
+pub(crate) fn app1(sig: &[u8], body: &[u8]) -> Result<Vec<u8>, ExportError> {
     let len = 2 + sig.len() + body.len();
+    if len > u16::MAX as usize {
+        return Err(ExportError::SegmentTooLarge(len));
+    }
     let mut v = Vec::with_capacity(len + 2);
     v.extend_from_slice(&[0xFF, 0xE1]);
     v.extend_from_slice(&(len as u16).to_be_bytes());
     v.extend_from_slice(sig);
     v.extend_from_slice(body);
-    v
+    Ok(v)
+}
+
+/// `encoded` with `segs` spliced in right after SOI and the encoder's
+/// APP0 (JFIF header) when it comes first.
+pub(crate) fn splice_after_app0(encoded: &[u8], segs: &[Vec<u8>]) -> Vec<u8> {
+    let mut ins = 2;
+    if encoded.len() > 4 && encoded[2] == 0xFF && encoded[3] == 0xE0 {
+        let len = u16::from_be_bytes([encoded[4], encoded[5]]) as usize;
+        ins = 2 + 2 + len;
+    }
+    let mut file = Vec::with_capacity(encoded.len() + segs.iter().map(Vec::len).sum::<usize>());
+    file.extend_from_slice(&encoded[..ins]);
+    for s in segs {
+        file.extend_from_slice(s);
+    }
+    file.extend_from_slice(&encoded[ins..]);
+    file
 }
 
 /// Export `item` to `out` with `settings`, embedding `iptc` as XMP and IIM.
@@ -324,7 +361,12 @@ pub fn export(
             Some(((n as f32) / keep).ceil() as u32)
         }
     };
+    // The RAW's own orientation, read from the bytes already in memory;
+    // a system decode replaces `data` with the render, whose summary
+    // alone can't always supply it (see `file_orientation` below).
+    let mut raw_orientation = 1;
     if !is_jpeg && settings.raw == RawPixels::SystemDecode {
+        raw_orientation = exif::from_bytes(&data).map(|s| s.orientation).unwrap_or(1);
         match system_decode_raw(&src_path, target.unwrap_or(0)) {
             Ok(rendered) => {
                 data = rendered;
@@ -345,11 +387,10 @@ pub fn export(
             .ok_or_else(|| ExportError::NoPixels(src_path.clone()))?;
         best.bytes(&data)
     };
-    let summary = if pixels == PixelSource::SystemRawDecode {
-        exif::from_bytes(&data).unwrap_or_default()
-    } else {
-        exif::read(&src_path).unwrap_or_else(|_| exif::from_bytes(&data).unwrap_or_default())
-    };
+    // Parse the summary from the bytes already loaded: `exif::read` would
+    // map the file and run this same parser over it, a second full read
+    // of a file `data` already holds (the source, or the system render).
+    let summary = exif::from_bytes(&data).unwrap_or_default();
     let mut img =
         decode_jpeg(jpeg_bytes, target).map_err(|e| ExportError::Decode(src_path.clone(), e))?;
     // The crop is in the stored frame, so it comes before the rotation. A
@@ -357,10 +398,12 @@ pub fn export(
     // it back to the RAW's stored frame first so crop and turn mean the same
     // thing for every pixel source.
     let file_orientation = if pixels == PixelSource::SystemRawDecode {
-        let raw = exif::read(&src_path).map(|e| e.orientation).unwrap_or(1);
         if edits.is_edited() {
-            img = rotate(rotate(img, summary.orientation), edits::inverse(raw));
-            raw
+            img = rotate(
+                rotate(img, summary.orientation),
+                edits::inverse(raw_orientation),
+            );
+            raw_orientation
         } else {
             summary.orientation
         }
@@ -399,7 +442,7 @@ pub fn export(
         match copied {
             Some(mut block) => {
                 exif_write::patch_for_export(&mut block, width, height);
-                segs.push(app1(b"Exif\0\0", &block));
+                segs.push(app1(b"Exif\0\0", &block)?);
                 exif_source = ExifSource::Copied;
             }
             None => {
@@ -413,14 +456,14 @@ pub fn export(
                         .map(String::as_str),
                     iptc.copyright.as_deref(),
                 );
-                segs.push(app1(b"Exif\0\0", &block));
+                segs.push(app1(b"Exif\0\0", &block)?);
                 exif_source = ExifSource::Minimal;
             }
         }
     }
     if settings.write_xmp {
         let packet = iptc::apply("", iptc)?;
-        segs.push(app1(b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes()));
+        segs.push(app1(b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes())?);
     }
     if settings.keep_icc {
         for s in src_segs
@@ -431,21 +474,11 @@ pub fn export(
         }
     }
     if settings.write_iim && !iptc.is_empty() {
-        segs.push(iim::app13_segment(iptc));
+        segs.push(iim::app13_segment(iptc)?);
     }
 
     // ---- splice after SOI (and the encoder's APP0 when present) ----
-    let mut ins = 2;
-    if encoded.len() > 4 && encoded[2] == 0xFF && encoded[3] == 0xE0 {
-        let len = u16::from_be_bytes([encoded[4], encoded[5]]) as usize;
-        ins = 2 + 2 + len;
-    }
-    let mut file = Vec::with_capacity(encoded.len() + segs.iter().map(Vec::len).sum::<usize>());
-    file.extend_from_slice(&encoded[..ins]);
-    for s in &segs {
-        file.extend_from_slice(s);
-    }
-    file.extend_from_slice(&encoded[ins..]);
+    let file = splice_after_app0(&encoded, &segs);
 
     // ---- atomic write ----
     if let Some(parent) = out.parent() {
@@ -514,6 +547,30 @@ mod tests {
             },
             secondary: Vec::new(),
         }
+    }
+
+    /// Test-local IIM dataset walker: unpack the Photoshop resource in
+    /// an APP13 payload and walk its datasets (the production read-back
+    /// pair in apature-metadata was deleted as dead code).
+    fn iim_sets(payload: &[u8]) -> Vec<(u8, u8, Vec<u8>)> {
+        let p = payload.strip_prefix(b"Photoshop 3.0\0").unwrap();
+        assert_eq!(&p[..4], b"8BIM");
+        assert_eq!(u16::from_be_bytes([p[4], p[5]]), 0x0404);
+        let name_len = p[6] as usize;
+        let name_total = (1 + name_len + 1) & !1; // Pascal string padded to even
+        let len_at = 6 + name_total;
+        let len = u32::from_be_bytes(p[len_at..len_at + 4].try_into().unwrap()) as usize;
+        let mut d = &p[len_at + 4..len_at + 4 + len];
+        let mut out = Vec::new();
+        while d.len() >= 5 && d[0] == 0x1C {
+            let n = u16::from_be_bytes([d[3], d[4]]) as usize;
+            if d.len() < 5 + n {
+                break;
+            }
+            out.push((d[1], d[2], d[5..5 + n].to_vec()));
+            d = &d[5 + n..];
+        }
+        out
     }
 
     fn sample_iptc() -> Iptc {
@@ -624,6 +681,25 @@ mod tests {
     }
 
     #[test]
+    fn oversized_xmp_packet_errors_instead_of_wrapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("big.jpg");
+        half_and_half(&src);
+        // A 70 KB caption makes the XMP APP1 pass the 65,535-byte segment
+        // limit; the export must fail, not write a wrapped length.
+        let big = Iptc {
+            description: Some("x".repeat(70_000)),
+            ..Default::default()
+        };
+        let out = dir.path().join("big-out.jpg");
+        assert!(matches!(
+            export(&item_for(&src), &big, &Settings::default(), &out),
+            Err(ExportError::SegmentTooLarge(_))
+        ));
+        assert!(!out.exists(), "no wrapped file was written");
+    }
+
+    #[test]
     fn a_tight_crop_still_reaches_the_long_side() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("DSC_0002.jpg");
@@ -702,7 +778,7 @@ mod tests {
             Some("A caption. Photog/Example Press")
         );
         let app13 = segs.iter().find(|s| s.marker == 0xED).unwrap();
-        let sets = iim::parse(iim::from_app13(app13.payload(&bytes)).unwrap());
+        let sets = iim_sets(app13.payload(&bytes));
         assert!(sets
             .iter()
             .any(|(r, s, v)| *r == 2 && *s == 110 && v == b"Example Press"));

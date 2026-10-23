@@ -9,8 +9,10 @@ pub mod fileops;
 pub mod folder;
 pub mod item;
 pub mod marks;
+pub mod paths;
 pub mod tiff;
 
 pub use folder::{scan, ScanOptions};
 pub use item::{Kind, PhotoItem, Variant};
 pub use marks::{ColorClass, ColorClassScheme, Marks, Rating};
+pub use paths::project_dirs;

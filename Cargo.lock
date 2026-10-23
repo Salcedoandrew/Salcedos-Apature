@@ -267,7 +267,6 @@ dependencies = [
  "apature-metadata",
  "apature-preview",
  "clap",
- "directories",
  "rayon",
  "serde_json",
 ]
@@ -276,6 +275,7 @@ dependencies = [
 name = "apature-core"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "log",
  "serde",
  "tempfile",
@@ -306,6 +306,7 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "rayon",
  "serde",
  "tempfile",
  "thiserror 2.0.21",
@@ -317,12 +318,12 @@ version = "0.1.0"
 dependencies = [
  "apature-core",
  "apature-metadata",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
- "walkdir",
 ]
 
 [[package]]
@@ -330,7 +331,6 @@ name = "apature-metadata"
 version = "0.1.0"
 dependencies = [
  "apature-core",
- "log",
  "memmap2",
  "regex",
  "serde",
@@ -345,7 +345,6 @@ dependencies = [
  "apature-core",
  "image",
  "jpeg-decoder",
- "log",
  "memmap2",
  "tempfile",
  "thiserror 2.0.21",

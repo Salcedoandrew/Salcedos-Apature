@@ -10,7 +10,6 @@ apature-core.workspace = true
 thiserror.workspace = true
 regex.workspace = true
 memmap2.workspace = true
-log.workspace = true
 serde.workspace = true
 
 [dev-dependencies]

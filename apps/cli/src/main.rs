@@ -456,7 +456,7 @@ fn main() -> Result<()> {
 
 fn cache_dir() -> Result<PathBuf> {
     let dirs =
-        directories::ProjectDirs::from("dev", "mccal", "Apature").context("no home directory")?;
+        apature_core::project_dirs().context("no home directory")?;
     Ok(dirs.cache_dir().join("thumbs"))
 }
 
@@ -654,17 +654,39 @@ fn bench(
 }
 
 /// Resolve a file to its item so a pair gets both the sidecar and the JPEG.
+///
+/// The scan behind this runs once per directory per run: the batch commands
+/// (rotate, crop, pad, caption) resolve every file through here, and
+/// re-scanning the folder for each file made them quadratic in folder size.
 fn item_for(file: &Path) -> Result<apature_core::PhotoItem> {
+    use std::collections::hash_map::Entry;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
     let dir = file.parent().context("file has no parent directory")?;
     let stem = file
         .file_stem()
         .context("file has no stem")?
         .to_string_lossy()
         .to_lowercase();
-    let items = apature_core::scan(dir, &ScanOptions::default())?;
-    items
-        .into_iter()
-        .find(|it| it.stem.to_lowercase() == stem)
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, HashMap<String, apature_core::PhotoItem>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    let map = match cache.entry(dir.to_path_buf()) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(e) => {
+            let items = apature_core::scan(dir, &ScanOptions::default())?;
+            let mut map = HashMap::with_capacity(items.len());
+            for it in items {
+                // First item with a stem wins, as the old linear find did.
+                map.entry(it.stem.to_lowercase()).or_insert(it);
+            }
+            e.insert(map)
+        }
+    };
+    map.get(&stem)
+        .cloned()
         .with_context(|| format!("{} is not a photo in {}", file.display(), dir.display()))
 }
 
@@ -693,7 +715,7 @@ fn ingest(
         ),
         None => None,
     };
-    let ledger_path = directories::ProjectDirs::from("dev", "mccal", "Apature")
+    let ledger_path = apature_core::project_dirs()
         .context("no home directory")?
         .data_dir()
         .join("ingested.json");
