@@ -4,6 +4,8 @@ use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::commands::{Command, Workspace};
+use crate::platform::keymap::{self, Accel};
+use crate::prefs::ShortcutLayout;
 
 pub struct MenuBar {
     menu: Menu,
@@ -15,30 +17,93 @@ pub struct MenuBar {
     inspector: CheckMenuItem,
     filmstrip: CheckMenuItem,
     class_items: Vec<MenuItem>,
+    /// Edit › Select by Color Class, titled with the scheme's names.
+    select_class_items: Vec<MenuItem>,
+    pub layout: ShortcutLayout,
 }
 
-fn item(cmd: Command, text: &str, acc: Option<Accelerator>) -> MenuItem {
-    MenuItem::with_id(cmd.menu_id(), text, true, acc)
-}
-
-fn acc(mods: Modifiers, code: Code) -> Option<Accelerator> {
-    Some(Accelerator::new(mods, code))
+/// A table key as a muda accelerator; None for a key the menu cannot show.
+fn to_muda(k: Accel) -> Option<Accelerator> {
+    let mut m = Modifiers::empty();
+    for (bit, md) in [
+        (keymap::CMD, Modifiers::META),
+        (keymap::SHIFT, Modifiers::SHIFT),
+        (keymap::ALT, Modifiers::ALT),
+        (keymap::CTRL, Modifiers::CONTROL),
+    ] {
+        if k.mods & bit != 0 {
+            m |= md;
+        }
+    }
+    let code = match k.key {
+        "A" => Code::KeyA,
+        "B" => Code::KeyB,
+        "C" => Code::KeyC,
+        "D" => Code::KeyD,
+        "E" => Code::KeyE,
+        "F" => Code::KeyF,
+        "G" => Code::KeyG,
+        "H" => Code::KeyH,
+        "I" => Code::KeyI,
+        "K" => Code::KeyK,
+        "L" => Code::KeyL,
+        "M" => Code::KeyM,
+        "N" => Code::KeyN,
+        "O" => Code::KeyO,
+        "Q" => Code::KeyQ,
+        "R" => Code::KeyR,
+        "S" => Code::KeyS,
+        "T" => Code::KeyT,
+        "V" => Code::KeyV,
+        "W" => Code::KeyW,
+        "X" => Code::KeyX,
+        "Y" => Code::KeyY,
+        "Z" => Code::KeyZ,
+        "0" => Code::Digit0,
+        "1" => Code::Digit1,
+        "2" => Code::Digit2,
+        "3" => Code::Digit3,
+        "4" => Code::Digit4,
+        "5" => Code::Digit5,
+        "6" => Code::Digit6,
+        "7" => Code::Digit7,
+        "8" => Code::Digit8,
+        "9" => Code::Digit9,
+        "[" => Code::BracketLeft,
+        "]" => Code::BracketRight,
+        "," => Code::Comma,
+        "=" => Code::Equal,
+        "-" => Code::Minus,
+        "Backspace" => Code::Backspace,
+        "F5" => Code::F5,
+        _ => return None,
+    };
+    Some(Accelerator::new(m, code))
 }
 
 impl MenuBar {
-    pub fn install() -> muda::Result<Self> {
+    /// Build the menu for a layout. Every key comes from `keymap`, so a
+    /// layout change rebuilds the menu rather than editing keys in place
+    /// (muda cannot take a key away from an item on macOS).
+    pub fn install(layout: ShortcutLayout) -> muda::Result<Self> {
+        let pm = layout == ShortcutLayout::PhotoMechanic;
+        let k = |title: &str| keymap::key(layout, title).and_then(to_muda);
+        // An item whose table title is its menu title.
+        let item =
+            |cmd: Command, title: &str| MenuItem::with_id(cmd.menu_id(), title, true, k(title));
         let menu = Menu::new();
-        let cmd = Modifiers::META;
-        let cmd_shift = Modifiers::META | Modifiers::SHIFT;
-        let cmd_alt = Modifiers::META | Modifiers::ALT;
-        let ctrl_cmd = Modifiers::META | Modifiers::CONTROL;
 
         let app = Submenu::new("Apature", true);
         app.append_items(&[
-            &item(Command::OpenAbout, "About Apature", None),
-            &item(Command::CheckUpdates, "Check for Updates…", None),
+            &MenuItem::with_id(Command::OpenAbout.menu_id(), "About Apature", true, None),
+            &MenuItem::with_id(
+                Command::CheckUpdates.menu_id(),
+                "Check for Updates…",
+                true,
+                None,
+            ),
             &PredefinedMenuItem::separator(),
-            &item(Command::OpenSettings, "Settings…", acc(cmd, Code::Comma)),
+            &item(Command::OpenSettings, "Settings…"),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::hide(None),
             &PredefinedMenuItem::hide_others(None),
@@ -47,165 +112,170 @@ impl MenuBar {
             &PredefinedMenuItem::quit(None),
         ])?;
 
+        // Photo Mechanic gives ⌘M to Rename and ⌘W to the tab, so Close
+        // Window (⌘⇧W) and Minimize (no key) are Apature's own items there;
+        // classic keeps the system ones.
+        let close_window: Box<dyn muda::IsMenuItem> = if pm {
+            Box::new(item(Command::CloseWindow, "Close Window"))
+        } else {
+            Box::new(PredefinedMenuItem::close_window(Some("Close Window")))
+        };
+        let minimize: Box<dyn muda::IsMenuItem> = if pm {
+            Box::new(item(Command::MinimizeWindow, "Minimize"))
+        } else {
+            Box::new(PredefinedMenuItem::minimize(None))
+        };
+
         let file = Submenu::new("File", true);
         file.append_items(&[
-            &item(
-                Command::PickFolder,
-                "Open Folder in New Tab…",
-                acc(cmd, Code::KeyO),
+            &item(Command::PickFolder, "Open Folder in New Tab…"),
+            &item(Command::PickFolder, "New Tab…"),
+            &item(Command::CloseTab, "Close Tab"),
+            &item(Command::AddFavorite, "Add Folder to Favorites"),
+            &PredefinedMenuItem::separator(),
+            &item(Command::LoadAssignment, "Load Assignment…"),
+            &item(Command::LoadCodes, "Load Code Replacements…"),
+            &PredefinedMenuItem::separator(),
+            &item(Command::IngestStart, "Ingest…"),
+            &item(Command::ExportStart, "Export…"),
+            &PredefinedMenuItem::separator(),
+            &item(Command::RenamePhotos, "Rename Photos…"),
+            &item(Command::CopyPhotos, "Copy Photos…"),
+            &item(Command::MoveToTrash, "Move to Trash"),
+            &PredefinedMenuItem::separator(),
+            &item(Command::RevealInFinder, "Reveal in Finder"),
+            &PredefinedMenuItem::separator(),
+            &item(Command::DeliverLast, "Send Last Export…"),
+            &item(Command::DeliverResendFailed, "Resend Failed Files"),
+            &item(Command::LiveToggle, "Live Ingest"),
+            &PredefinedMenuItem::separator(),
+            close_window.as_ref(),
+        ])?;
+
+        use crate::select_by::SelectBy;
+        let by = |b: SelectBy, title: &str| item(Command::SelectBy(b), title);
+        // An item titled for the menu, keyed by its table name.
+        let by_named = |b: SelectBy, title: &str, name: &str| {
+            MenuItem::with_id(Command::SelectBy(b).menu_id(), title, true, k(name))
+        };
+        let by_rating = Submenu::new("Select by Rating", true);
+        for r in (1..=5u8).rev() {
+            by_rating.append(&by_named(
+                SelectBy::Rating(r),
+                &format!(
+                    "{} {}",
+                    "★".repeat(r as usize),
+                    if r == 1 { "Star" } else { "Stars" }
+                ),
+                keymap::SELECT_RATING[r as usize],
+            ))?;
+        }
+        by_rating.append(&PredefinedMenuItem::separator())?;
+        for r in (2..=4u8).rev() {
+            by_rating.append(&by(
+                SelectBy::RatingAtLeast(r),
+                &format!("At Least {}", "★".repeat(r as usize)),
+            ))?;
+        }
+        by_rating.append_items(&[
+            &by_named(
+                SelectBy::RatingAtLeast(1),
+                "Any Star Rating",
+                keymap::SELECT_RATING[6],
             ),
-            &item(Command::PickFolder, "New Tab…", acc(cmd, Code::KeyT)),
-            &item(Command::CloseTab, "Close Tab", acc(cmd, Code::KeyW)),
-            &item(Command::AddFavorite, "Add Folder to Favorites", None),
-            &PredefinedMenuItem::separator(),
-            &item(Command::LoadAssignment, "Load Assignment…", None),
-            &item(Command::LoadCodes, "Load Code Replacements…", None),
-            &PredefinedMenuItem::separator(),
-            &item(Command::IngestStart, "Ingest…", acc(cmd_shift, Code::KeyI)),
-            &item(Command::ExportStart, "Export…", acc(cmd, Code::KeyE)),
-            &PredefinedMenuItem::separator(),
-            &item(
-                Command::RenamePhotos,
-                "Rename Photos…",
-                acc(cmd_shift, Code::KeyR),
+            &by_named(
+                SelectBy::Rating(0),
+                "No Star Rating",
+                keymap::SELECT_RATING[0],
             ),
-            &item(
-                Command::MoveToTrash,
-                "Move to Trash",
-                acc(cmd, Code::Backspace),
+        ])?;
+        let by_class = Submenu::new("Select by Color Class", true);
+        let mut select_class_items = Vec::new();
+        for (i, n) in apature_core::ColorClassScheme::default()
+            .names
+            .iter()
+            .enumerate()
+        {
+            let it = by_named(
+                SelectBy::Class(i as u8 + 1),
+                &format!("{} {n}", i + 1),
+                keymap::SELECT_CLASS[i + 1],
+            );
+            by_class.append(&it)?;
+            select_class_items.push(it);
+        }
+        by_class.append_items(&[
+            &PredefinedMenuItem::separator(),
+            &by_named(
+                SelectBy::AnyClass,
+                "Any Color Class",
+                keymap::SELECT_CLASS[9],
             ),
-            &PredefinedMenuItem::separator(),
-            &item(
-                Command::RevealInFinder,
-                "Reveal in Finder",
-                acc(cmd, Code::KeyR),
+            &by_named(
+                SelectBy::Class(0),
+                "No Color Class",
+                keymap::SELECT_CLASS[0],
             ),
-            &PredefinedMenuItem::separator(),
-            &item(Command::DeliverLast, "Send Last Export…", None),
-            &item(Command::DeliverResendFailed, "Resend Failed Files", None),
-            &item(Command::LiveToggle, "Live Ingest", None),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::close_window(Some("Close Window")),
         ])?;
 
         let edit = Submenu::new("Edit", true);
         edit.append_items(&[
-            &item(Command::Undo, "Undo", acc(cmd, Code::KeyZ)),
-            &item(Command::Redo, "Redo", acc(cmd_shift, Code::KeyZ)),
+            &item(Command::Undo, "Undo"),
+            &item(Command::Redo, "Redo"),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::cut(None),
             &PredefinedMenuItem::copy(None),
             &PredefinedMenuItem::paste(None),
             &PredefinedMenuItem::separator(),
-            &item(
-                Command::CopyMetadata,
-                "Copy Metadata",
-                acc(cmd_alt, Code::KeyC),
-            ),
-            &item(
-                Command::PasteMetadata,
-                "Paste Metadata",
-                acc(cmd_alt, Code::KeyV),
-            ),
+            &item(Command::CopyMetadata, "Copy Metadata"),
+            &item(Command::PasteMetadata, "Paste Metadata"),
             &PredefinedMenuItem::separator(),
-            &item(Command::SelectAll, "Select All", acc(cmd, Code::KeyA)),
-            &item(
-                Command::SelectNone,
-                "Deselect All",
-                acc(cmd_shift, Code::KeyA),
-            ),
+            &item(Command::SelectAll, "Select All"),
+            &item(Command::SelectNone, "Deselect All"),
+            &PredefinedMenuItem::separator(),
+            &by(SelectBy::Tagged, "Select Tagged"),
+            &by(SelectBy::Untagged, "Select Untagged"),
+            &by_rating,
+            &by_class,
+            &by(SelectBy::Cropped, "Select Cropped"),
+            &by(SelectBy::Pairs, "Select RAW+JPEG Pairs"),
         ])?;
 
-        let sidebar = CheckMenuItem::with_id(
-            Command::ToggleSidebar.menu_id(),
-            "Show Sidebar",
-            true,
-            true,
-            acc(ctrl_cmd, Code::KeyS),
-        );
-        let inspector = CheckMenuItem::with_id(
-            Command::ToggleInspector.menu_id(),
-            "Show Inspector",
-            true,
-            true,
-            acc(cmd_alt, Code::KeyI),
-        );
-        let filmstrip = CheckMenuItem::with_id(
-            Command::ToggleFilmstrip.menu_id(),
-            "Show Filmstrip",
-            true,
-            false,
-            acc(Modifiers::SHIFT, Code::KeyF),
-        );
+        let check = |cmd: Command, title: &str, on: bool| {
+            CheckMenuItem::with_id(cmd.menu_id(), title, true, on, k(title))
+        };
+        let sidebar = check(Command::ToggleSidebar, "Show Sidebar", true);
+        let inspector = check(Command::ToggleInspector, "Show Inspector", true);
+        let filmstrip = check(Command::ToggleFilmstrip, "Show Filmstrip", false);
         let sort = Submenu::new("Sort By", true);
         for so in crate::filter::Sort::ALL {
-            sort.append(&item(Command::SetSort(so), &capitalize(so.label()), None))?;
+            sort.append(&item(Command::SetSort(so), &capitalize(so.label())))?;
         }
         sort.append_items(&[
             &PredefinedMenuItem::separator(),
-            &item(Command::ToggleSortReversed, "Reverse Order", None),
+            &item(Command::ToggleSortReversed, "Reverse Order"),
         ])?;
         let view = Submenu::new("View", true);
         view.append_items(&[
-            &item(
-                Command::SetWorkspace(Workspace::Sheet),
-                "Contact Sheet",
-                acc(cmd_shift, Code::Digit1),
-            ),
-            &item(
-                Command::SetWorkspace(Workspace::Preview),
-                "Preview",
-                acc(cmd_shift, Code::Digit2),
-            ),
-            &item(
-                Command::SetWorkspace(Workspace::Caption),
-                "Caption",
-                acc(cmd_shift, Code::Digit3),
-            ),
-            &item(
-                Command::SetWorkspace(Workspace::Ingest),
-                "Ingest",
-                acc(cmd_shift, Code::Digit4),
-            ),
-            &item(
-                Command::SetWorkspace(Workspace::Export),
-                "Export",
-                acc(cmd_shift, Code::Digit5),
-            ),
+            &item(Command::SetWorkspace(Workspace::Sheet), "Contact Sheet"),
+            &item(Command::SetWorkspace(Workspace::Preview), "Preview"),
+            &item(Command::SetWorkspace(Workspace::Caption), "Caption"),
+            &item(Command::SetWorkspace(Workspace::Ingest), "Ingest"),
+            &item(Command::SetWorkspace(Workspace::Export), "Export"),
             &PredefinedMenuItem::separator(),
             &sidebar,
             &inspector,
             &filmstrip,
-            &item(
-                Command::RefreshFolder,
-                "Refresh Folder",
-                acc(Modifiers::META, Code::KeyR),
-            ),
+            &item(Command::RefreshFolder, "Refresh Folder"),
             &PredefinedMenuItem::separator(),
             &sort,
-            &item(
-                Command::ClearFilter(None),
-                "Clear Filters",
-                acc(cmd_alt, Code::KeyF),
-            ),
+            &item(Command::ClearFilter(None), "Clear Filters"),
             &PredefinedMenuItem::separator(),
-            &item(Command::ZoomIn, "Larger Thumbnails", acc(cmd, Code::Equal)),
-            &item(
-                Command::ZoomOut,
-                "Smaller Thumbnails",
-                acc(cmd, Code::Minus),
-            ),
+            &item(Command::ZoomIn, "Larger Thumbnails"),
+            &item(Command::ZoomOut, "Smaller Thumbnails"),
             &PredefinedMenuItem::separator(),
-            &item(
-                Command::ToggleZoom,
-                "Zoom 1:1 / Fit",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyZ)),
-            ),
-            &item(
-                Command::ToggleCompare,
-                "Compare Selected",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyC)),
-            ),
+            &item(Command::ToggleZoom, "Zoom 1:1 / Fit"),
+            &item(Command::ToggleCompare, "Compare Selected"),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::fullscreen(None),
         ])?;
@@ -214,146 +284,102 @@ impl MenuBar {
         let names = apature_core::ColorClassScheme::default().names;
         let mut class_items = Vec::new();
         for (i, n) in names.iter().enumerate() {
-            let code = [
-                Code::Digit1,
-                Code::Digit2,
-                Code::Digit3,
-                Code::Digit4,
-                Code::Digit5,
-                Code::Digit6,
-                Code::Digit7,
-                Code::Digit8,
-            ][i];
-            let it = item(
-                Command::SetClass(i as u8 + 1),
-                &format!("{} {n}", i + 1),
-                Some(Accelerator::new(Modifiers::empty(), code)),
+            let it = MenuItem::with_id(
+                Command::SetClass(i as u8 + 1).menu_id(),
+                format!("{} {n}", i + 1),
+                true,
+                k(keymap::CLASS[i + 1]),
             );
             class.append(&it)?;
             class_items.push(it);
         }
         class.append_items(&[
             &PredefinedMenuItem::separator(),
-            &item(
-                Command::SetClass(0),
+            &MenuItem::with_id(
+                Command::SetClass(0).menu_id(),
                 "None",
-                Some(Accelerator::new(Modifiers::empty(), Code::Digit0)),
+                true,
+                k(keymap::CLASS[0]),
             ),
         ])?;
         let rating = Submenu::new("Rating", true);
         for r in (1..=5).rev() {
-            let code = [
-                Code::Digit0,
-                Code::Digit1,
-                Code::Digit2,
-                Code::Digit3,
-                Code::Digit4,
-                Code::Digit5,
-            ][r as usize];
-            rating.append(&item(
-                Command::SetRating(r),
-                &format!(
+            rating.append(&MenuItem::with_id(
+                Command::SetRating(r).menu_id(),
+                format!(
                     "{} {}",
                     "★".repeat(r as usize),
                     if r == 1 { "Star" } else { "Stars" }
                 ),
-                acc(cmd, code),
+                true,
+                k(keymap::RATING[r as usize]),
             ))?;
         }
         rating.append_items(&[
             &PredefinedMenuItem::separator(),
-            &item(Command::SetRating(0), "Unrated", acc(cmd, Code::Digit0)),
-            &item(
-                Command::SetRating(-1),
-                "Reject",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyX)),
+            &MenuItem::with_id(
+                Command::SetRating(0).menu_id(),
+                "Unrated",
+                true,
+                k(keymap::RATING[0]),
             ),
+            &item(Command::SetRating(-1), "Reject"),
         ])?;
         let image = Submenu::new("Image", true);
-        let advance = CheckMenuItem::with_id(
-            Command::ToggleAdvanceAfterMark.menu_id(),
+        let advance = check(
+            Command::ToggleAdvanceAfterMark,
             "Advance After Marking",
             true,
-            true,
-            None,
         );
         image.append_items(&[
             &class,
             &rating,
             &PredefinedMenuItem::separator(),
-            &item(
-                Command::ToggleTag,
-                "Toggle Tag",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyT)),
-            ),
+            &item(Command::ToggleTag, "Toggle Tag"),
             &PredefinedMenuItem::separator(),
-            &item(
-                Command::Rotate(false),
-                "Rotate Left",
-                acc(cmd, Code::BracketLeft),
-            ),
-            &item(
-                Command::Rotate(true),
-                "Rotate Right",
-                acc(cmd, Code::BracketRight),
-            ),
+            &item(Command::Rotate(false), "Rotate Left"),
+            &item(Command::Rotate(true), "Rotate Right"),
             &PredefinedMenuItem::separator(),
             &item(
                 Command::ApplyStationery,
                 "Apply Assignment Pad to Selection",
-                None,
             ),
-            &item(Command::SaveCaption, "Save Caption", None),
+            &item(Command::SaveCaption, "Save Caption"),
             &PredefinedMenuItem::separator(),
-            &item(
-                Command::CropToggle,
-                "Crop…",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyK)),
-            ),
-            &item(Command::CropClear, "Remove Crop", None),
-            &item(
-                Command::ToggleLoupe,
-                "Loupe",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyL)),
-            ),
-            &item(
-                Command::CyclePreviewBoost,
-                "Brighten Preview (view only)",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyB)),
-            ),
-            &item(
-                Command::ToggleStack,
-                "Expand or Collapse Burst",
-                Some(Accelerator::new(Modifiers::empty(), Code::KeyS)),
-            ),
+            &item(Command::CropToggle, "Crop…"),
+            &item(Command::CropClear, "Remove Crop"),
+            &item(Command::ToggleLoupe, "Loupe"),
+            &item(Command::CyclePreviewBoost, "Brighten Preview (view only)"),
+            &item(Command::ToggleStack, "Expand or Collapse Burst"),
             &PredefinedMenuItem::separator(),
             &advance,
         ])?;
 
+        // Photo Mechanic keeps its batch tools in a Tools menu before Window.
+        let tools = Submenu::new("Tools", true);
+        tools.append_items(&[&item(
+            Command::ExtractPreviews,
+            "Extract JPEG Previews from RAW Photos…",
+        )])?;
+
         let window = Submenu::new("Window", true);
         window.append_items(&[
-            &PredefinedMenuItem::minimize(None),
+            minimize.as_ref(),
             &PredefinedMenuItem::maximize(None),
             &PredefinedMenuItem::separator(),
-            &item(
-                Command::NextTab,
-                "Show Next Tab",
-                acc(cmd_shift, Code::BracketRight),
-            ),
-            &item(
-                Command::PrevTab,
-                "Show Previous Tab",
-                acc(cmd_shift, Code::BracketLeft),
-            ),
+            &item(Command::NextTab, "Show Next Tab"),
+            &item(Command::PrevTab, "Show Previous Tab"),
         ])?;
         let help = Submenu::new("Help", true);
         help.append_items(&[
-            &item(Command::OpenShortcuts, "Keyboard Shortcuts", None),
-            &item(Command::RevealLog, "Reveal Log in Finder", None),
-            &item(Command::OpenRepo, "Apature on GitHub", None),
+            &item(Command::OpenShortcuts, "Keyboard Shortcuts"),
+            &item(Command::RevealLog, "Reveal Log in Finder"),
+            &item(Command::OpenRepo, "Apature on GitHub"),
+            &PredefinedMenuItem::separator(),
+            &item(Command::ReportBug, "Report a Bug…"),
         ])?;
 
-        menu.append_items(&[&app, &file, &edit, &view, &image, &window, &help])?;
+        menu.append_items(&[&app, &file, &edit, &view, &image, &tools, &window, &help])?;
         Ok(MenuBar {
             menu,
             window,
@@ -364,6 +390,8 @@ impl MenuBar {
             filmstrip,
             advance,
             class_items,
+            select_class_items,
+            layout,
         })
     }
 
@@ -379,8 +407,15 @@ impl MenuBar {
         self.installed = true;
     }
 
+    pub fn installed(&self) -> bool {
+        self.installed
+    }
+
     pub fn set_class_names(&self, names: &[String; 8]) {
         for (i, it) in self.class_items.iter().enumerate() {
+            it.set_text(format!("{} {}", i + 1, names[i]));
+        }
+        for (i, it) in self.select_class_items.iter().enumerate() {
             it.set_text(format!("{} {}", i + 1, names[i]));
         }
     }
@@ -400,6 +435,22 @@ impl MenuBar {
         self.inspector.set_checked(inspector);
         self.filmstrip.set_checked(filmstrip);
         self.advance.set_checked(advance);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_table_key_has_a_menu_key() {
+        for layout in [ShortcutLayout::PhotoMechanic, ShortcutLayout::Classic] {
+            for (title, k) in keymap::menu_keys(layout) {
+                if let Some(k) = k {
+                    assert!(to_muda(k).is_some(), "{title}: {k:?}");
+                }
+            }
+        }
     }
 }
 

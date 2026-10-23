@@ -4,6 +4,7 @@
 
 use crate::commands::Command;
 
+pub mod keymap;
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -15,10 +16,13 @@ pub struct Platform {
 }
 
 impl Platform {
-    pub fn new() -> Self {
+    /// The menu bar is built for the saved shortcut layout from the start.
+    pub fn new(layout: crate::prefs::ShortcutLayout) -> Self {
+        #[cfg(not(target_os = "macos"))]
+        let _ = layout;
         Platform {
             #[cfg(target_os = "macos")]
-            menu: macos::MenuBar::install()
+            menu: macos::MenuBar::install(layout)
                 .map_err(|e| log::warn!("native menu unavailable: {e}"))
                 .ok(),
             #[cfg(target_os = "macos")]
@@ -85,6 +89,31 @@ impl Platform {
         }
         #[cfg(not(target_os = "macos"))]
         let _ = (sidebar, inspector, filmstrip, advance);
+    }
+
+    /// Rebuild the menu bar when the shortcut layout changed. True when it
+    /// did, so the caller can put the checkmarks and class names back.
+    pub fn set_shortcuts(&mut self, layout: crate::prefs::ShortcutLayout) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(old) = &self.menu {
+            if old.layout == layout {
+                return false;
+            }
+            let installed = old.installed();
+            match macos::MenuBar::install(layout) {
+                Ok(mut m) => {
+                    if installed {
+                        m.install_if_needed();
+                    }
+                    self.menu = Some(m);
+                    return true;
+                }
+                Err(e) => log::warn!("menu rebuild failed: {e}"),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = layout;
+        false
     }
 
     pub fn set_class_names(&self, names: &[String; 8]) {

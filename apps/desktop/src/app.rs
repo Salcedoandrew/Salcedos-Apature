@@ -26,7 +26,7 @@ use crate::deliver_job::{DeliverJobs, Msg as DMsg, Status as DStatus};
 use crate::filter::{self, Filter};
 use crate::ingest_job::{FileStatus, IngestJobs, Msg, Running};
 use crate::platform::Platform;
-use crate::prefs::Prefs;
+use crate::prefs::{Prefs, ShortcutLayout};
 use crate::selection::{Mods, Selection};
 use crate::ui::caption::{Draft, DraftFields};
 use crate::ui::{self, tokens::Theme};
@@ -37,7 +37,44 @@ use crate::Launch;
 const THUMB_PX: u32 = 320;
 const PREFETCH_ROWS: usize = 3;
 const KEEP_ROWS: usize = 12;
-const PREVIEW_LRU: usize = 6;
+const PREVIEW_LRU: usize = 8;
+
+/// Positions to preload around `pos` in a view of `len`, most urgent
+/// first: two ahead in the direction of travel, one behind, a third ahead.
+pub fn prefetch_plan(pos: usize, len: usize, dir: isize) -> Vec<usize> {
+    let d = if dir < 0 { -1 } else { 1 };
+    [d, 2 * d, -d, 3 * d]
+        .iter()
+        .filter_map(|&k| {
+            let p = pos as isize + k;
+            (p >= 0 && (p as usize) < len).then_some(p as usize)
+        })
+        .collect()
+}
+
+/// Which cached previews to drop, oldest first, so at most `max_n` stay and
+/// their bytes fit in `budget`. Photos in `keep` (on screen, preloading)
+/// are never dropped, even when that leaves the cache over budget.
+pub fn preview_evictions(
+    lru: &VecDeque<usize>,
+    bytes: impl Fn(usize) -> usize,
+    keep: &[usize],
+    max_n: usize,
+    budget: usize,
+) -> Vec<usize> {
+    let mut left: Vec<usize> = lru.iter().copied().collect();
+    let mut total: usize = left.iter().map(|&i| bytes(i)).sum();
+    let mut out = Vec::new();
+    while left.len() > max_n || total > budget {
+        let Some(p) = left.iter().position(|i| !keep.contains(i)) else {
+            break;
+        };
+        let i = left.remove(p);
+        total -= bytes(i);
+        out.push(i);
+    }
+    out
+}
 
 /// Everything that belongs to one open folder. The active tab's state lives
 /// directly in `App` (so the UI code reads `app.items` etc.); inactive tabs
@@ -50,6 +87,9 @@ pub struct TabState {
     pub exif: Vec<Option<ExifSummary>>,
     pub thumbs: Vec<Option<TextureHandle>>,
     pub thumb_err: Vec<Option<String>>,
+    /// Upright size of the largest image each photo can show, from the
+    /// first decode of it (see `worker::Done::native`).
+    pub native: Vec<Option<[u32; 2]>>,
     /// Preview textures: (texture, long side in px, is the full resolution).
     pub previews: HashMap<usize, (TextureHandle, u32, bool)>,
     pub preview_lru: VecDeque<usize>,
@@ -138,6 +178,10 @@ pub struct PreviewView {
     /// One magnification for 1:1 and the loupe: 1.0 = one image pixel per
     /// screen pixel, up to 4.0. ⌘-scroll or ⌘= / ⌘- change it.
     pub zoom: f32,
+    /// Last view position drawn and the direction of travel (+1 / -1),
+    /// for preloading ahead.
+    pub last_pos: Option<usize>,
+    pub dir: isize,
 }
 
 /// Crop ratios as width/height of the *displayed* frame; None = free.
@@ -209,11 +253,46 @@ impl Default for PreviewView {
             zoom_from: None,
             last_rect: None,
             compare: None,
+            last_pos: None,
+            dir: 1,
         }
     }
 }
 
 /// Rename Photos dialog state.
+/// Copy Photos… (File menu): the photos, the choices and the live plan.
+/// Extract JPEG Previews: the photos it will work on.
+pub struct ExtractDialog {
+    pub targets: Vec<usize>,
+    /// How many of them have a RAW.
+    pub raws: usize,
+}
+
+pub struct CopyDialog {
+    pub targets: Vec<usize>,
+    pub opts: apature_ingest::CopyOptions,
+    /// Write the assignment pad into the copies' XMP sidecars.
+    pub apply_pad: bool,
+    pub plan: Option<apature_ingest::CopyPlan>,
+    pub error: Option<String>,
+}
+
+/// Help › Report a Bug… (see `bug_report`).
+pub struct BugDialog {
+    pub report: crate::bug_report::BugReport,
+    pub include_info: bool,
+    /// Gathered when the dialog opens; shown read-only and sent only when
+    /// `include_info` is on.
+    pub info: crate::bug_report::SystemInfo,
+    /// What the last Submit or Copy did.
+    pub notice: Option<String>,
+    /// ⌘A reached the menu bar (Edit › Select All) while the dialog was
+    /// open: select the focused field's text, not every photo.
+    pub select_all: bool,
+    /// Put the cursor in Title on the first frame.
+    pub focus_title: bool,
+}
+
 pub struct RenameDialog {
     pub template: String,
     pub seq_start: u32,
@@ -350,6 +429,19 @@ const NUM_KEYS: [Key; 9] = [
     Key::Num8,
 ];
 
+/// The number keys pressed this frame as rating (0–5) or colour class (0–8) commands.
+fn number_commands(i: &egui::InputState, rates: bool, out: &mut Vec<Command>) {
+    for (n, k) in NUM_KEYS.iter().enumerate() {
+        if i.key_pressed(*k) {
+            if !rates {
+                out.push(Command::SetClass(n as u8));
+            } else if n <= 5 {
+                out.push(Command::SetRating(n as i8));
+            }
+        }
+    }
+}
+
 pub struct App {
     pub folder: Option<PathBuf>,
     pub items: Vec<PhotoItem>,
@@ -358,6 +450,9 @@ pub struct App {
     pub exif: Vec<Option<ExifSummary>>,
     pub thumbs: Vec<Option<TextureHandle>>,
     pub thumb_err: Vec<Option<String>>,
+    /// Upright size of the largest image each photo can show, from the
+    /// first decode of it (see `worker::Done::native`).
+    pub native: Vec<Option<[u32; 2]>>,
     /// Preview textures: (texture, long side in px, is the full resolution).
     pub previews: HashMap<usize, (TextureHandle, u32, bool)>,
     preview_lru: VecDeque<usize>,
@@ -393,6 +488,11 @@ pub struct App {
     pub volumes: Vec<(String, PathBuf)>,
     /// Icon class per mounted volume, filled once per mount.
     pub volume_kinds: HashMap<PathBuf, crate::platform::VolumeKind>,
+    /// Device id of each mounted volume, so the folder tree notices a drive
+    /// mounting over a mount point it had already read (same path).
+    pub volume_devs: HashMap<PathBuf, u64>,
+    /// The sidebar's folder tree (lazily read subfolders, expanded rows).
+    pub tree: crate::folder_tree::FolderTree,
     /// The open folder's volume vanished (name), until it comes back or the tab closes.
     pub folder_unplugged: Option<String>,
     /// Notices above the status bar (see ui/toasts.rs); at most four.
@@ -417,6 +517,25 @@ pub struct App {
     pub meta_clip: Option<(Marks, apature_metadata::Iptc)>,
     /// Items awaiting confirmation to go to the Trash.
     pub trash_dialog: Option<Vec<usize>>,
+    pub copy_dialog: Option<CopyDialog>,
+    /// Help › Report a Bug…. While it is open, menu keys never reach the
+    /// photos (see `update`).
+    pub bug_dialog: Option<BugDialog>,
+    /// The copy in progress (or just finished), shown by the dialog or the status line.
+    pub copy_running: Option<crate::copy_job::CopyRunning>,
+    /// Open the destination as a contact sheet when the running copy ends.
+    copy_open_after: bool,
+    copy_jobs: crate::copy_job::CopyJobs,
+    pub extract_dialog: Option<ExtractDialog>,
+    pub extract_running: Option<crate::extract_job::ExtractRunning>,
+    extract_jobs: crate::extract_job::ExtractJobs,
+    /// One action per keypress across the menu and the key handler.
+    key_once: crate::keyonce::KeyOnce,
+    /// Writes marks on its own thread (see `mark_writer`).
+    mark_writer: crate::mark_writer::MarkWriter,
+    /// The newest single-photo mark and its status line, finished with the
+    /// file count once the write lands.
+    mark_status: Option<(u64, String)>,
     ingest_jobs: IngestJobs,
     /// Files currently being dragged over the window, for the drop overlay.
     pub drag_hover: usize,
@@ -488,7 +607,11 @@ impl App {
         prefs
             .favorites
             .retain(|p| p.exists() || p.starts_with("/Volumes"));
-        let platform = Platform::new();
+        prefs
+            .tree_expanded
+            .retain(|p| p.is_dir() || p.starts_with("/Volumes"));
+        let tree = crate::folder_tree::FolderTree::new(prefs.tree_expanded.clone());
+        let platform = Platform::new(prefs.shortcut_layout);
         let mut app = App {
             folder: None,
             items: Vec::new(),
@@ -497,6 +620,7 @@ impl App {
             exif: Vec::new(),
             thumbs: Vec::new(),
             thumb_err: Vec::new(),
+            native: Vec::new(),
             previews: HashMap::new(),
             preview_lru: VecDeque::new(),
             pool,
@@ -523,6 +647,8 @@ impl App {
             prefs_saved_at: Instant::now(),
             volumes: Vec::new(),
             volume_kinds: HashMap::new(),
+            volume_devs: HashMap::new(),
+            tree,
             folder_unplugged: None,
             toasts: Vec::new(),
             preview_boost: 0,
@@ -542,6 +668,17 @@ impl App {
             rename_dialog: None,
             meta_clip: None,
             trash_dialog: None,
+            copy_dialog: None,
+            bug_dialog: None,
+            copy_running: None,
+            copy_open_after: false,
+            copy_jobs: crate::copy_job::CopyJobs::new(cc.egui_ctx.clone()),
+            extract_dialog: None,
+            extract_running: None,
+            extract_jobs: crate::extract_job::ExtractJobs::new(cc.egui_ctx.clone()),
+            key_once: Default::default(),
+            mark_writer: Default::default(),
+            mark_status: None,
             export_jobs: crate::export_job::ExportJobs::new(cc.egui_ctx.clone()),
             deliver_jobs: DeliverJobs::new(cc.egui_ctx.clone()),
             ingest_jobs: IngestJobs::new(cc.egui_ctx.clone(), ledger_path),
@@ -708,6 +845,40 @@ impl App {
             }
             app.rename_recompute();
         }
+        if launch.sidebar_shot {
+            // Screenshot of the folder tree (scratch HOME, see main.rs): the
+            // open folder's grandparent as a favorite, the tree focused.
+            if app.prefs.favorites.is_empty() {
+                if let Some(f) = app
+                    .folder
+                    .as_ref()
+                    .and_then(|f| f.parent())
+                    .and_then(|f| f.parent())
+                {
+                    app.prefs.favorites.push(f.to_path_buf());
+                }
+            }
+            cc.egui_ctx
+                .memory_mut(|m| m.request_focus(ui::sidebar::tree_id()));
+        }
+        if launch.extract_dialog && !app.view.is_empty() {
+            app.open_extract_dialog();
+        }
+        if launch.copy_dialog && !app.view.is_empty() {
+            app.selection.all(&app.view.clone());
+            app.open_copy_dialog();
+        }
+        if launch.bug_dialog {
+            app.open_bug_dialog();
+            if let Some(d) = app.bug_dialog.as_mut() {
+                d.report = crate::bug_report::BugReport {
+                    title: "Crop guides vanish after rotating a photo".into(),
+                    happened: "After rotating a NEF with ] the crop guides (G) no longer draw.".into(),
+                    steps: "1. Open a folder of NEFs\n2. Press ] on a photo\n3. Press K, then G".into(),
+                    expected: "The rule-of-thirds guides over the crop.".into(),
+                };
+            }
+        }
         if launch.trash_dialog && !app.view.is_empty() {
             let picks: Vec<usize> = app.view.iter().take(2).copied().collect();
             app.trash_dialog = Some(picks);
@@ -843,6 +1014,352 @@ impl App {
                     d.error = Some(e.to_string());
                 }
             }
+        }
+    }
+
+    // ----- Select by, Copy Photos -------------------------------------------
+
+    /// Edit › Select Tagged / by Rating / by Color Class / Cropped / Pairs:
+    /// replace the selection with the matching visible photos.
+    fn select_by(&mut self, by: crate::select_by::SelectBy) {
+        let items = &self.items;
+        let picks = crate::select_by::pick(by, &self.view, &self.marks, items, |i| {
+            edits::read(&items[i].sidecar_path())
+                .ok()
+                .and_then(|e| e.crop)
+                .is_some_and(|c| !c.is_full())
+        });
+        let what = by.describe(&self.scheme.names);
+        if picks.is_empty() {
+            self.status = format!("No {what} photos in this tab");
+            return;
+        }
+        self.selection.all(&picks);
+        if !self.selection.contains(self.cursor) {
+            self.cursor = picks[0];
+            self.scroll_to_cursor = true;
+        }
+        self.status = format!(
+            "Selected {} {what} photo{}",
+            picks.len(),
+            if picks.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    /// Help › Report a Bug…; an open dialog keeps what was typed.
+    pub fn open_bug_dialog(&mut self) {
+        if self.bug_dialog.is_some() {
+            return;
+        }
+        let focused = self.items.get(self.cursor).map(|i| i.path().to_path_buf());
+        self.bug_dialog = Some(BugDialog {
+            report: Default::default(),
+            include_info: true,
+            info: crate::bug_report::SystemInfo::collect(self.prefs.shortcut_layout, focused.as_deref()),
+            notice: None,
+            select_all: false,
+            focus_title: true,
+        });
+    }
+
+    pub fn open_copy_dialog(&mut self) {
+        if self.copy_running.as_ref().is_some_and(|r| r.done.is_none()) {
+            // A copy is running: show its progress again.
+            self.copy_dialog.get_or_insert(CopyDialog {
+                targets: Vec::new(),
+                opts: self.prefs.copy.clone(),
+                apply_pad: false,
+                plan: None,
+                error: None,
+            });
+            return;
+        }
+        self.copy_running = None;
+        if self.items.is_empty() {
+            return;
+        }
+        let mut targets = self.selection.targets(self.cursor);
+        targets.sort_by_key(|&i| self.pos[i].unwrap_or(usize::MAX));
+        let mut opts = self.prefs.copy.clone();
+        opts.headline = self.assignment.as_ref().map(|a| a.slug.clone());
+        self.copy_dialog = Some(CopyDialog {
+            targets,
+            opts,
+            apply_pad: false,
+            plan: None,
+            error: None,
+        });
+        self.copy_recompute();
+    }
+
+    /// Extract JPEG Previews from RAW Photos…: the selected photos, or every
+    /// photo in the tab when none is selected.
+    pub fn open_extract_dialog(&mut self) {
+        if self
+            .extract_running
+            .as_ref()
+            .is_some_and(|r| r.done.is_none())
+        {
+            self.extract_dialog.get_or_insert(ExtractDialog {
+                targets: Vec::new(),
+                raws: 0,
+            });
+            return;
+        }
+        self.extract_running = None;
+        if self.view.is_empty() {
+            return;
+        }
+        let mut targets: Vec<usize> = self
+            .view
+            .iter()
+            .copied()
+            .filter(|&i| self.selection.contains(i))
+            .collect();
+        if targets.is_empty() {
+            targets = self.view.clone();
+        }
+        let raws = targets
+            .iter()
+            .filter(|&&i| apature_export::extract::raw_of(&self.items[i]).is_some())
+            .count();
+        self.extract_dialog = Some(ExtractDialog { targets, raws });
+    }
+
+    fn extract_start(&mut self) {
+        let Some(d) = self.extract_dialog.as_ref() else {
+            return;
+        };
+        if d.targets.is_empty() {
+            return;
+        }
+        let opts = self.prefs.extract;
+        let dest = if opts.to_source {
+            None
+        } else {
+            let mut dlg = rfd::FileDialog::new().set_title("Extract JPEG Previews To");
+            if let Some(f) = &self.folder {
+                dlg = dlg.set_directory(f);
+            }
+            match dlg.pick_folder() {
+                Some(dir) => Some(dir),
+                None => return,
+            }
+        };
+        let photos: Vec<PhotoItem> = d.targets.iter().map(|&i| self.items[i].clone()).collect();
+        self.prefs_dirty = true;
+        self.extract_running =
+            Some(
+                self.extract_jobs
+                    .start(photos, dest, opts, self.scheme.clone()),
+            );
+    }
+
+    fn drain_extract(&mut self) {
+        while let Some(msg) = self.extract_jobs.try_recv() {
+            let Some(r) = self.extract_running.as_mut() else {
+                continue;
+            };
+            match msg {
+                crate::extract_job::ExtractMsg::Progress(p) => {
+                    if self.extract_dialog.is_none() && r.done.is_none() {
+                        self.status = format!("Extracting previews: {} of {}…", p.done, p.total);
+                    }
+                    r.progress = Some(p);
+                }
+                crate::extract_job::ExtractMsg::Done(o) => {
+                    let n = o.extracted.len();
+                    let mut text = format!(
+                        "Extracted {n} JPEG preview{}",
+                        if n == 1 { "" } else { "s" }
+                    );
+                    if !o.skipped.is_empty() {
+                        text += &format!(" · {} skipped", o.skipped.len());
+                    }
+                    if o.cancelled {
+                        text += " · cancelled";
+                    }
+                    let into_open = self.folder.as_ref().is_some_and(|f| {
+                        o.extracted
+                            .iter()
+                            .any(|(_, j)| j.parent() == Some(f.as_path()))
+                    });
+                    r.done = Some(o);
+                    self.status = text.clone();
+                    if self.extract_dialog.is_none() {
+                        self.toast(ui::toasts::Kind::Info, text);
+                    }
+                    if into_open {
+                        self.refresh_folder();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Close the dialog; a running copy carries on and reports in the status line.
+    fn close_copy_dialog(&mut self) {
+        self.copy_dialog = None;
+        if self.copy_running.as_ref().is_some_and(|r| r.done.is_some()) {
+            self.copy_running = None;
+        }
+    }
+
+    pub fn copy_recompute(&mut self) {
+        let Some(d) = self.copy_dialog.as_ref() else {
+            return;
+        };
+        let needs_folder = matches!(
+            d.opts.dest_mode,
+            apature_ingest::DestMode::ThisFolder | apature_ingest::DestMode::AlwaysPick
+        );
+        if needs_folder && d.opts.dest.as_os_str().is_empty() {
+            if let Some(d) = self.copy_dialog.as_mut() {
+                d.plan = None;
+                d.error = None;
+            }
+            return;
+        }
+        let refs: Vec<&PhotoItem> = d.targets.iter().map(|&i| &self.items[i]).collect();
+        let result = apature_ingest::plan_copy(&refs, &d.opts);
+        if let Some(d) = self.copy_dialog.as_mut() {
+            match result {
+                Ok(p) => {
+                    d.plan = Some(p);
+                    d.error = None;
+                }
+                Err(e) => {
+                    d.plan = None;
+                    d.error = Some(e.to_string());
+                }
+            }
+        }
+    }
+
+    fn copy_choose_dest(&mut self) {
+        let Some(d) = self.copy_dialog.as_ref() else {
+            return;
+        };
+        let mut dlg = rfd::FileDialog::new().set_title("Copy Photos To");
+        if d.opts.dest.is_dir() {
+            dlg = dlg.set_directory(&d.opts.dest);
+        }
+        if let Some(dir) = dlg.pick_folder() {
+            if let Some(d) = self.copy_dialog.as_mut() {
+                d.opts.dest = dir;
+                if d.opts.dest_mode != apature_ingest::DestMode::AlwaysPick {
+                    d.opts.dest_mode = apature_ingest::DestMode::ThisFolder;
+                }
+            }
+            self.copy_recompute();
+        }
+    }
+
+    fn copy_start(&mut self) {
+        let Some(d) = self.copy_dialog.as_ref() else {
+            return;
+        };
+        if d.opts.dest_mode == apature_ingest::DestMode::AlwaysPick {
+            // Always pick destination: ask now, then plan against the pick.
+            let mut dlg = rfd::FileDialog::new().set_title("Copy Photos To");
+            if d.opts.dest.is_dir() {
+                dlg = dlg.set_directory(&d.opts.dest);
+            }
+            let Some(dir) = dlg.pick_folder() else {
+                return;
+            };
+            if let Some(d) = self.copy_dialog.as_mut() {
+                d.opts.dest = dir;
+            }
+            self.copy_recompute();
+        }
+        let Some(d) = self.copy_dialog.as_ref() else {
+            return;
+        };
+        let Some(plan) = d.plan.clone().filter(|p| !p.entries.is_empty()) else {
+            return;
+        };
+        let pad = if d.apply_pad {
+            self.assignment.as_ref().map(|a| a.iptc())
+        } else {
+            None
+        };
+        let mut keep = d.opts.clone();
+        keep.headline = None;
+        // Where the first photo goes (its own folder in the per-original modes).
+        let dest = d
+            .targets
+            .first()
+            .and_then(|&i| apature_ingest::dest_base(&d.opts, &self.items[i]))
+            .unwrap_or_else(|| keep.dest.clone());
+        self.copy_open_after = keep.open_after;
+        self.prefs.copy = keep;
+        self.prefs_dirty = true;
+        self.copy_running = Some(self.copy_jobs.start(plan, pad, dest));
+    }
+
+    fn drain_copy(&mut self) {
+        let mut open_after: Option<PathBuf> = None;
+        while let Some(msg) = self.copy_jobs.try_recv() {
+            let Some(r) = self.copy_running.as_mut() else {
+                continue;
+            };
+            match msg {
+                crate::copy_job::CopyMsg::Progress(p) => {
+                    if self.copy_dialog.is_none() && r.done.is_none() {
+                        self.status = format!(
+                            "Copying photos: {} of {} files…",
+                            p.files_done, p.files_total
+                        );
+                    }
+                    r.progress = Some(p);
+                }
+                crate::copy_job::CopyMsg::Done(o) => {
+                    let files = o.copied.len();
+                    let text = if o.cancelled {
+                        format!(
+                            "Copy cancelled after {files} file{}",
+                            if files == 1 { "" } else { "s" }
+                        )
+                    } else if o.failed.is_empty() {
+                        format!(
+                            "Copied {} photo{} ({files} files) to {}",
+                            r.photos,
+                            if r.photos == 1 { "" } else { "s" },
+                            r.dest.display()
+                        )
+                    } else {
+                        format!("Copied {files} files; {} failed", o.failed.len())
+                    };
+                    let kind = if o.failed.is_empty() {
+                        ui::toasts::Kind::Info
+                    } else {
+                        ui::toasts::Kind::Error
+                    };
+                    let into_open = self.folder.as_ref().is_some_and(|f| {
+                        r.dest.starts_with(f) || o.copied.iter().any(|(_, d)| d.starts_with(f))
+                    });
+                    if self.copy_open_after && !o.cancelled {
+                        // Open as a Contact Sheet: the folder the first photo landed in.
+                        open_after = o
+                            .copied
+                            .first()
+                            .and_then(|(_, d)| d.parent().map(Path::to_path_buf));
+                    }
+                    r.done = Some(o);
+                    self.status = text.clone();
+                    if self.copy_dialog.is_none() {
+                        self.toast(kind, text);
+                    }
+                    if into_open {
+                        self.refresh_folder();
+                    }
+                }
+            }
+        }
+        if let Some(dir) = open_after {
+            self.close_copy_dialog();
+            self.open_folder(&dir);
         }
     }
 
@@ -1071,7 +1588,7 @@ impl App {
         }
         self.update_manual = manual;
         self.update_checker = Some(crate::updater::Checker::spawn(
-            env!("CARGO_PKG_VERSION").to_string(),
+            crate::updater::current_version(),
             self.prefs.beta_updates,
             ctx.clone(),
         ));
@@ -1120,7 +1637,7 @@ impl App {
                         "Apature {} is available{}. You have {}.",
                         u.version,
                         if u.prerelease { " (beta)" } else { "" },
-                        env!("CARGO_PKG_VERSION")
+                        crate::updater::current_version()
                     );
                     self.toasts.retain(|t| {
                         !t.text.starts_with("Apature ") || !t.text.contains("is available")
@@ -1137,14 +1654,18 @@ impl App {
             Ok(None) => {
                 log::info!("update check: up to date");
                 if self.launch.check_updates {
-                    eprintln!("check-updates: up to date");
+                    eprintln!(
+                        "check-updates: up to date ({} from {})",
+                        crate::updater::current_version(),
+                        crate::updater::repo()
+                    );
                 }
                 if self.update_manual {
                     self.toast(
                         ui::toasts::Kind::Info,
                         format!(
                             "Apature {} is the newest version.",
-                            env!("CARGO_PKG_VERSION")
+                            crate::updater::current_version()
                         ),
                     );
                 }
@@ -1361,7 +1882,8 @@ impl App {
                     None
                 };
                 self.ingest.plan = Some(plan.clone());
-                self.ingest.running = Some(self.ingest_jobs.start(plan, pad));
+                self.ingest.running =
+                    Some(self.ingest_jobs.start(plan, pad, self.prefs.jpeg_marks()));
             }
             Ok(plan) => {
                 // Already in the ledger (or filtered out): forget them.
@@ -1590,6 +2112,7 @@ impl App {
     /// through the undo stack; IPTC is written in place (not undoable, the
     /// status says how many files).
     fn paste_metadata(&mut self) {
+        self.flush_marks();
         let Some((m, iptc)) = self.meta_clip.clone() else {
             self.status = "Nothing copied yet (⌥⌘C copies the focused photo's metadata)".into();
             return;
@@ -1599,7 +2122,7 @@ impl App {
         let mut files = 0;
         let mut failed = 0;
         for &i in &targets {
-            match items::write_iptc(&self.items[i], &iptc) {
+            match items::write_iptc(&self.items[i], &iptc, self.prefs.jpeg_marks()) {
                 Ok(w) => files += w.len(),
                 Err(_) => failed += 1,
             }
@@ -1638,7 +2161,7 @@ impl App {
                 pad = Some(p);
             }
         }
-        self.ingest.running = Some(self.ingest_jobs.start(plan, pad));
+        self.ingest.running = Some(self.ingest_jobs.start(plan, pad, self.prefs.jpeg_marks()));
         self.status = "Ingesting…".into();
     }
 
@@ -1764,6 +2287,7 @@ impl App {
 
     /// Write the draft's changed fields. Returns true when something was written.
     fn save_caption(&mut self, announce: bool) -> bool {
+        self.flush_marks();
         let Some(draft) = self.caption_draft.as_ref() else {
             return false;
         };
@@ -1772,7 +2296,7 @@ impl App {
         }
         let changes = draft.fields.changes_from(&draft.original);
         let idx = draft.idx;
-        match items::write_iptc(&self.items[idx], &changes) {
+        match items::write_iptc(&self.items[idx], &changes, self.prefs.jpeg_marks()) {
             Ok(w) => {
                 self.remember_caption_history(&changes);
                 if let Some(d) = self.caption_draft.as_mut() {
@@ -1837,6 +2361,7 @@ impl App {
     /// in the draft go to every selected photo; untouched fields stay as each
     /// photo had them.
     fn save_caption_to_selection(&mut self) {
+        self.flush_marks();
         let Some(draft) = self.caption_draft.as_ref() else {
             return;
         };
@@ -1848,7 +2373,7 @@ impl App {
         let mut written = 0usize;
         let mut failed: Option<String> = None;
         for &i in &targets {
-            match items::write_iptc(&self.items[i], &changes) {
+            match items::write_iptc(&self.items[i], &changes, self.prefs.jpeg_marks()) {
                 Ok(_) => written += 1,
                 Err(e) => failed = Some(e.to_string()),
             }
@@ -1996,6 +2521,7 @@ impl App {
 
     /// Store (or remove) the crop in the sidecar; previews re-render.
     fn write_crop(&mut self, idx: usize, crop: Option<edits::Crop>) {
+        self.flush_marks();
         let sidecar = self.items[idx].sidecar_path();
         let change = edits::Change {
             crop: Some(crop),
@@ -2022,6 +2548,7 @@ impl App {
     }
 
     fn apply_stationery(&mut self) {
+        self.flush_marks();
         let Some(pad) = self.assignment.as_ref().map(|a| a.iptc()) else {
             return;
         };
@@ -2029,7 +2556,7 @@ impl App {
         let mut written = 0;
         let mut failed = None;
         for &i in &targets {
-            match items::write_iptc(&self.items[i], &pad) {
+            match items::write_iptc(&self.items[i], &pad, self.prefs.jpeg_marks()) {
                 Ok(w) => written += w.len(),
                 Err(e) => failed = Some(e.to_string()),
             }
@@ -2091,6 +2618,10 @@ impl App {
         }
         v.sort();
         let present: Vec<PathBuf> = v.iter().map(|(_, p)| p.clone()).collect();
+        self.volume_devs = present
+            .iter()
+            .map(|p| (p.clone(), crate::folder_tree::device_of(p)))
+            .collect();
         self.volume_kinds
             .retain(|p, _| present.contains(p) || p.join("DCIM").is_dir());
         self.volumes = v;
@@ -2100,6 +2631,7 @@ impl App {
     /// files (by path), so new arrivals from an ingest slot in without
     /// disturbing a cull in progress.
     pub fn refresh_folder(&mut self) {
+        self.flush_marks();
         let Some(dir) = self.folder.clone() else {
             return;
         };
@@ -2162,9 +2694,20 @@ impl App {
         }
     }
 
+    /// The tab showing `dir`, if any: the same path, or another path to the
+    /// same folder (a symlink such as /Volumes/Macintosh HD/…, different
+    /// letter case on a case-insensitive disk).
+    fn tab_for(&self, dir: &Path) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|t| t.folder == dir)
+            .or_else(|| self.tabs.iter().position(|t| same_folder(&t.folder, dir)))
+    }
+
     /// Open `dir` in a new tab, or switch to it if it is already open.
     pub fn open_folder(&mut self, dir: &Path) {
-        if let Some(i) = self.tabs.iter().position(|t| t.folder == dir) {
+        self.flush_marks();
+        if let Some(i) = self.tab_for(dir) {
             self.switch_tab(i);
             return;
         }
@@ -2185,6 +2728,33 @@ impl App {
         self.remember_tabs();
     }
 
+    /// Show `dir` in the current tab (the folder tree's single click),
+    /// replacing what the tab showed. A folder already open in another tab
+    /// switches to that tab instead; with no tabs it opens one.
+    pub fn open_folder_here(&mut self, dir: &Path) {
+        if let Some(i) = self.tab_for(dir) {
+            self.switch_tab(i);
+            return;
+        }
+        if self.tabs.is_empty() {
+            self.open_folder(dir);
+            return;
+        }
+        // Check first: a failed load would close the tab instead.
+        if let Err(e) = std::fs::read_dir(dir) {
+            self.status = format!("Could not open {}: {e}", dir.display());
+            self.status_since = Some(Instant::now());
+            return;
+        }
+        self.save_caption(false);
+        let cur = self.active;
+        self.tabs[cur].folder = dir.to_path_buf();
+        self.tabs[cur].state = None;
+        self.load_folder(dir);
+        self.sheet_fade_since = Some(Instant::now());
+        self.remember_tabs();
+    }
+
     fn remember_tabs(&mut self) {
         self.prefs.open_tabs = self.tabs.iter().map(|t| t.folder.clone()).collect();
         self.prefs.active_tab = self.active;
@@ -2202,6 +2772,7 @@ impl App {
             exif: std::mem::take(&mut self.exif),
             thumbs: std::mem::take(&mut self.thumbs),
             thumb_err: std::mem::take(&mut self.thumb_err),
+            native: std::mem::take(&mut self.native),
             previews: std::mem::take(&mut self.previews),
             preview_lru: std::mem::take(&mut self.preview_lru),
             generation: std::mem::replace(&mut self.generation, self.next_generation),
@@ -2229,6 +2800,7 @@ impl App {
         self.exif = t.exif;
         self.thumbs = t.thumbs;
         self.thumb_err = t.thumb_err;
+        self.native = t.native;
         self.previews = t.previews;
         self.preview_lru = t.preview_lru;
         self.generation = t.generation;
@@ -2249,6 +2821,7 @@ impl App {
     }
 
     pub fn switch_tab(&mut self, i: usize) {
+        self.flush_marks();
         if i >= self.tabs.len() || i == self.active {
             return;
         }
@@ -2310,6 +2883,7 @@ impl App {
                 self.next_generation += 1;
                 self.generation = self.next_generation;
                 let scheme = self.scheme.clone();
+                let jpeg_policy = self.prefs.jpeg_marks();
                 // Marks, conflicts and EXIF for every item up front: all three are
                 // cheap (sidecars are tiny, EXIF is a few page faults via mmap) and
                 // sorting by capture time needs them before the first frame.
@@ -2319,7 +2893,7 @@ impl App {
                         let src = items::read(it);
                         let m = src.effective(it, &scheme);
                         let c = src
-                            .conflicts()
+                            .conflicts(jpeg_policy)
                             .into_iter()
                             .map(|(p, c)| {
                                 format!(
@@ -2344,6 +2918,7 @@ impl App {
                 self.exif = read.into_iter().map(|(_, _, e)| e).collect();
                 self.thumbs = vec![None; n];
                 self.thumb_err = vec![None; n];
+                self.native = vec![None; n];
                 self.previews.clear();
                 self.preview_lru.clear();
                 self.selection.clear();
@@ -2370,6 +2945,12 @@ impl App {
                 if self.tabs.get(self.active).is_some_and(|t| t.folder == dir) {
                     self.tabs.remove(self.active);
                     self.active = self.active.min(self.tabs.len().saturating_sub(1));
+                    // Back to the tab that was showing: bring its parked
+                    // state back, or the next folder opened would park this
+                    // empty one over it (a blank tab that can't be reopened).
+                    if let Some(st) = self.tabs.get_mut(self.active).and_then(|t| t.state.take()) {
+                        self.put_tab(st);
+                    }
                 }
             }
         }
@@ -2418,8 +2999,11 @@ impl App {
             let saved = self.workspace;
             self.workspace = Workspace::Preview;
             let cmds = self.keyboard_commands(ctx);
+            let now = std::time::Instant::now();
             for c in cmds {
-                self.dispatch(ctx, c);
+                if self.key_once.admit(&c, crate::keyonce::Source::Keys, now) {
+                    self.dispatch(ctx, c);
+                }
             }
             let exited = self.workspace != Workspace::Preview
                 || ctx.input(|i| i.viewport().close_requested());
@@ -2501,7 +3085,12 @@ impl App {
         if self.workspace != Workspace::Preview {
             self.enter_preview();
         }
-        self.status = format!("Comparing {} photos · C to stop", set.len());
+        let key = if self.prefs.shortcut_layout == ShortcutLayout::PhotoMechanic {
+            "V"
+        } else {
+            "C"
+        };
+        self.status = format!("Comparing {} photos · {key} to stop", set.len());
         self.pv.compare = Some(set);
     }
 
@@ -2606,7 +3195,12 @@ impl App {
     fn drain_results(&mut self, ctx: &egui::Context) {
         let mut n = 0;
         while let Some(done) = self.pool.try_recv() {
-            if done.generation != self.generation || done.idx >= self.items.len() {
+            // Results are keyed by folder generation and file path, not just
+            // the slot: a late decode is dropped, never shown in place of the
+            // photo now at that slot. Nothing here touches the focus or the
+            // selection.
+            let item_path = self.items.get(done.idx).map(|it| it.primary.path.as_path());
+            if !done.belongs_to(self.generation, item_path) {
                 continue;
             }
             if let (Some(e), None) = (done.exif, &self.exif[done.idx]) {
@@ -2614,6 +3208,9 @@ impl App {
             }
             match done.result {
                 Ok(rgb) => {
+                    if let (Some(n), Some(slot)) = (done.native, self.native.get_mut(done.idx)) {
+                        *slot = Some(n);
+                    }
                     let gain = if done.kind == JobKind::Preview {
                         self.preview_boost
                     } else {
@@ -2661,28 +3258,39 @@ impl App {
     /// its neighbours or the compare set.
     fn evict_previews(&mut self) {
         const PREVIEW_BUDGET: usize = 768 << 20;
-        loop {
-            let total: usize = self
-                .previews
-                .values()
-                .map(|(t, ..)| {
-                    let [w, h] = t.size();
-                    w * h * 4
-                })
-                .sum();
-            if self.preview_lru.len() <= PREVIEW_LRU && total <= PREVIEW_BUDGET {
-                break;
-            }
-            let keep = |i: usize| {
-                (i + 1 >= self.cursor && i <= self.cursor + 1)
-                    || self.pv.compare.as_ref().is_some_and(|c| c.contains(&i))
-            };
-            let Some(p) = self.preview_lru.iter().position(|&i| !keep(i)) else {
-                break;
-            };
-            let idx = self.preview_lru.remove(p).unwrap();
+        // The focused photo and what is preloading around it in view order
+        // (where the arrow keys go next), not in file order.
+        let mut keep = self.preview_wanted();
+        if let Some(c) = &self.pv.compare {
+            keep.extend(c.iter().copied());
+        }
+        let bytes = |i: usize| {
+            self.previews.get(&i).map_or(0, |(t, ..)| {
+                let [w, h] = t.size();
+                w * h * 4
+            })
+        };
+        let drop = preview_evictions(&self.preview_lru, bytes, &keep, PREVIEW_LRU, PREVIEW_BUDGET);
+        for idx in drop {
+            self.preview_lru.retain(|&i| i != idx);
             self.previews.remove(&idx);
         }
+    }
+
+    /// Photos to preload in Preview, most urgent first (see `prefetch_plan`),
+    /// in the direction the user last moved.
+    pub fn prefetch_targets(&self) -> Vec<usize> {
+        prefetch_plan(self.cursor_pos(), self.view.len(), self.pv.dir)
+            .into_iter()
+            .filter_map(|p| self.view.get(p).copied())
+            .collect()
+    }
+
+    /// The focused photo followed by its prefetch targets.
+    pub fn preview_wanted(&self) -> Vec<usize> {
+        let mut v = vec![self.cursor];
+        v.extend(self.prefetch_targets());
+        v
     }
 
     pub fn request_thumb(&self, idx: usize, prio: u32) {
@@ -2816,6 +3424,7 @@ impl App {
     /// sidecar; the files themselves are never touched. Turning the other way
     /// undoes it.
     fn rotate(&mut self, cw: bool) {
+        self.flush_marks();
         use apature_metadata::edits;
         if self.items.is_empty() {
             return;
@@ -2857,6 +3466,7 @@ impl App {
                     // Re-render this photo with the new orientation.
                     self.thumbs[i] = None;
                     self.thumb_err[i] = None;
+                    self.native[i] = None;
                     self.previews.remove(&i);
                     self.preview_lru.retain(|&p| p != i);
                 }
@@ -2873,44 +3483,75 @@ impl App {
         };
     }
 
+    /// Set marks in memory and queue the file writes; never waits for disk.
+    /// The view keeps its order (and the scroll its place) even when sorted
+    /// or filtered by marks: the photo stays put until the next re-sort.
     fn apply_marks(&mut self, apply: &[(usize, Marks)]) {
-        let mut written = 0;
-        let mut failed = None;
+        let policy = self.prefs.jpeg_marks();
+        let mut last = 0;
         for &(i, m) in apply {
             self.marks[i] = m;
-            match items::write(&self.items[i], &m, &self.scheme) {
-                Ok(w) => {
-                    written += w.len();
-                    self.conflicts[i].clear();
-                }
-                Err(e) => failed = Some(e.to_string()),
-            }
+            last = self
+                .mark_writer
+                .submit(self.items[i].clone(), m, self.scheme.clone(), policy);
         }
-        self.status = match failed {
-            Some(e) => format!("Could not write marks: {e}"),
-            None if apply.len() == 1 => {
-                let (i, m) = apply[0];
-                format!(
-                    "{}: {} · {} · {} → {} file{}",
-                    self.items[i].display_name(),
-                    ui::rating_text(m.rating),
-                    self.scheme.name(m.color_class).unwrap_or("no class"),
-                    if m.tagged { "tagged" } else { "untagged" },
-                    written,
-                    if written == 1 { "" } else { "s" }
-                )
-            }
-            None => format!("{} photos marked → {written} files written", apply.len()),
-        };
-        // Marks may change what the filter shows and the sort order.
-        if self.filter.is_active()
-            || matches!(
-                self.prefs.sort,
-                filter::Sort::Rating | filter::Sort::ColorClass
+        self.status = if apply.len() == 1 {
+            let (i, m) = apply[0];
+            format!(
+                "{}: {} · {} · {}",
+                self.items[i].display_name(),
+                ui::rating_text(m.rating),
+                self.scheme.name(m.color_class).unwrap_or("no class"),
+                if m.tagged { "tagged" } else { "untagged" },
             )
-        {
-            self.rebuild_view();
+        } else {
+            format!("{} photos marked", apply.len())
+        };
+        self.mark_status = Some((last, self.status.clone()));
+        // No `rebuild_view` here, even when sorted or filtered by marks:
+        // re-sorting moved the photo away under the user (the sheet
+        // scrolled after it; Preview landed at the end with nowhere to go).
+    }
+
+    /// Take in finished mark writes: clear conflicts, report failures.
+    fn poll_mark_writes(&mut self) {
+        for d in self.mark_writer.poll() {
+            let idx = self.items.iter().position(|it| it.path() == d.path);
+            match d.result {
+                Ok(n) => {
+                    if let Some(i) = idx {
+                        if let Some(c) = self.conflicts.get_mut(i) {
+                            c.clear();
+                        }
+                    }
+                    if let Some((seq, text)) = &self.mark_status {
+                        if *seq == d.seq && self.status == *text {
+                            self.status =
+                                format!("{text} → {n} file{}", if n == 1 { "" } else { "s" });
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("marks for {}: {e}", d.path.display());
+                    self.status = format!("Could not write marks: {e}");
+                    self.status_since = Some(Instant::now());
+                }
+            }
         }
+    }
+
+    /// Wait for queued mark writes before anything else touches sidecars
+    /// (captions, crops, turns, a rescan, copies), so none of them races a
+    /// pending write. Instant when nothing is queued.
+    pub fn flush_marks(&mut self) {
+        if self.mark_writer.pending() > 0
+            && !self
+                .mark_writer
+                .wait_idle(std::time::Duration::from_secs(30))
+        {
+            log::warn!("mark writes still pending after 30 s");
+        }
+        self.poll_mark_writes();
     }
 
     // ----- navigation --------------------------------------------------------
@@ -3081,8 +3722,19 @@ impl App {
     // ----- commands ----------------------------------------------------------
 
     pub fn dispatch(&mut self, ctx: &egui::Context, cmd: Command) {
+        if !cmd.leaves_files_alone() {
+            self.flush_marks();
+        }
         match cmd {
             Command::OpenFolder(p) => self.open_folder(&p),
+            Command::OpenFolderHere(p) => self.open_folder_here(&p),
+            Command::RevealFolder(p) => Platform::reveal(&p),
+            Command::AddFavoritePath(p) => {
+                if !self.prefs.favorites.contains(&p) {
+                    self.prefs.favorites.push(p);
+                    self.prefs_dirty = true;
+                }
+            }
             Command::PickFolder => self.pick_folder(),
             Command::AddFavorite => {
                 if let Some(f) = self.folder.clone() {
@@ -3151,6 +3803,42 @@ impl App {
             Command::End => self.focus_to_pos(self.view.len().saturating_sub(1), Mods::default()),
             Command::SelectAll => self.selection.all(&self.view),
             Command::SelectNone => self.selection.clear(),
+            Command::SelectBy(by) => self.select_by(by),
+            Command::CopyPhotos => self.open_copy_dialog(),
+            Command::CopyChooseDest => self.copy_choose_dest(),
+            Command::CopyStart => self.copy_start(),
+            Command::ExtractPreviews => self.open_extract_dialog(),
+            Command::ExtractStart => self.extract_start(),
+            Command::ExtractCancel => {
+                if let Some(r) = &self.extract_running {
+                    r.cancel();
+                }
+            }
+            Command::ExtractReveal => {
+                if let Some(first) = self
+                    .extract_running
+                    .as_ref()
+                    .and_then(|r| r.done.as_ref())
+                    .and_then(|o| o.extracted.first())
+                {
+                    crate::platform::Platform::reveal(&first.1);
+                }
+            }
+            Command::CopyCancel => {
+                if let Some(r) = &self.copy_running {
+                    r.cancel();
+                }
+            }
+            Command::CopyReveal => {
+                if let Some(first) = self
+                    .copy_running
+                    .as_ref()
+                    .and_then(|r| r.done.as_ref())
+                    .and_then(|o| o.copied.first())
+                {
+                    crate::platform::Platform::reveal(&first.1);
+                }
+            }
             Command::Undo => {
                 if let Some((label, apply)) = self.undo.undo() {
                     self.apply_marks(&apply);
@@ -3499,6 +4187,7 @@ impl App {
                 }
             }
             Command::OpenAbout => self.about_open = true,
+            Command::ReportBug => self.open_bug_dialog(),
             Command::CheckUpdates => self.start_update_check(ctx, true),
             Command::OpenUpdate => {
                 if let Some(u) = &self.update_available {
@@ -3512,11 +4201,25 @@ impl App {
             }
             Command::TrashConfirm => self.trash_confirm(),
             Command::CloseDialog => {
+                self.bug_dialog = None;
                 self.rename_dialog = None;
                 self.trash_dialog = None;
+                self.close_copy_dialog();
+                self.extract_dialog = None;
+                if self
+                    .extract_running
+                    .as_ref()
+                    .is_some_and(|r| r.done.is_some())
+                {
+                    self.extract_running = None;
+                }
             }
             Command::ToggleCompare => self.toggle_compare(),
             Command::IngestStart => self.ingest_start(),
+            Command::CloseWindow => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Command::MinimizeWindow => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true))
+            }
             Command::OpenShortcuts => {
                 self.settings_open = true;
                 self.settings_page = ui::settings::Page::Shortcuts;
@@ -3530,8 +4233,9 @@ impl App {
                 }
             }
             Command::OpenRepo => {
+                // This edition's repository; About links the original.
                 let _ = std::process::Command::new("open")
-                    .arg("https://github.com/McCal-Codes/apature")
+                    .arg(crate::credits::FORK_URL)
                     .spawn();
             }
             Command::ShowMainWindow => {
@@ -3644,8 +4348,14 @@ impl App {
             }
             Command::Rotate(cw) => self.rotate(cw),
             Command::Escape => {
-                if self.pv.crop.is_some() {
+                if self.bug_dialog.is_some() {
+                    self.bug_dialog = None;
+                } else if self.pv.crop.is_some() {
                     self.dispatch_later = Some(Command::CropCancel);
+                } else if self.copy_dialog.is_some() {
+                    self.close_copy_dialog();
+                } else if self.extract_dialog.is_some() {
+                    self.dispatch_later = Some(Command::CloseDialog);
                 } else if self.rename_dialog.is_some() || self.trash_dialog.is_some() {
                     self.rename_dialog = None;
                     self.trash_dialog = None;
@@ -3662,6 +4372,13 @@ impl App {
                     self.scroll_to_cursor = true;
                 } else if self.selection.len() > 1 {
                     self.selection.only(self.cursor);
+                }
+            }
+            Command::ClosePreview => {
+                if self.workspace == Workspace::Preview && self.pv.crop.is_none() {
+                    self.pv.compare = None;
+                    self.workspace = Workspace::Sheet;
+                    self.scroll_to_cursor = true;
                 }
             }
             Command::Activate => {
@@ -3681,29 +4398,62 @@ impl App {
 
     /// Keyboard → commands. Command-modified keys are the native menu's job
     /// when a menu exists, except ⌘-arrows (move focus, keep selection).
+    /// Bare keys are always this handler's job (see `keyonce`), and nothing
+    /// fires while a text field has focus.
     fn keyboard_commands(&self, ctx: &egui::Context) -> Vec<Command> {
         let mut out = Vec::new();
-        if ctx.wants_keyboard_input() {
+        let has_menu = self.platform.has_menu();
+        // The sidebar's folder tree holds focus without taking text: culling
+        // keys still work, only the arrows and Return go to the tree.
+        let tree = ui::sidebar::tree_has_focus(ctx);
+        if !crate::keyonce::handler_takes(has_menu, ctx.wants_keyboard_input() && !tree, false) {
             return out;
         }
-        if self.rename_dialog.is_some() || self.trash_dialog.is_some() {
+        if self.bug_dialog.is_some()
+            || self.rename_dialog.is_some()
+            || self.trash_dialog.is_some()
+            || self.copy_dialog.is_some()
+            || self.extract_dialog.is_some()
+        {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
                 out.push(Command::Escape);
             }
             return out;
         }
         ctx.input(|i| {
-            let cmd = i.modifiers.command;
-            let shift = i.modifiers.shift;
-            let alt = i.modifiers.alt;
-            let has_menu = self.platform.has_menu();
+            // The modifiers held for this frame's key presses: a quick ⌥C can
+            // release ⌥ within the same frame, leaving `i.modifiers` empty.
+            let mods = i.events.iter().fold(i.modifiers, |m, e| match e {
+                egui::Event::Key {
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => m | *modifiers,
+                _ => m,
+            });
+            let cmd = mods.command;
+            let shift = mods.shift;
+            let alt = mods.alt;
             let cols = self.cols.max(1) as isize;
             let in_preview = self.workspace == Workspace::Preview;
-            let pressed = |k: Key| i.key_pressed(k);
+            let pm = self.prefs.shortcut_layout == ShortcutLayout::PhotoMechanic;
+            let bare_rates = self.prefs.number_keys == crate::prefs::NumberKeys::Rating;
             let mv = |delta: isize| Command::MoveFocus {
                 delta,
                 shift,
                 command: cmd,
+            };
+            let pressed = |k: Key| {
+                i.key_pressed(k)
+                    && !(tree
+                        && matches!(
+                            k,
+                            Key::ArrowLeft
+                                | Key::ArrowRight
+                                | Key::ArrowUp
+                                | Key::ArrowDown
+                                | Key::Enter
+                        ))
             };
             if pressed(Key::ArrowLeft) {
                 out.push(mv(-1));
@@ -3717,11 +4467,33 @@ impl App {
             if pressed(Key::ArrowDown) {
                 out.push(mv(if in_preview { 1 } else { cols }));
             }
+            // Photo Mechanic keys no menu item carries: [ and ] rotate, M
+            // renames, I opens the caption (its Info window).
+            if pm && !cmd && !alt && !shift && !mods.ctrl {
+                if pressed(Key::OpenBracket) {
+                    out.push(Command::Rotate(false));
+                }
+                if pressed(Key::CloseBracket) {
+                    out.push(Command::Rotate(true));
+                }
+                if pressed(Key::M) {
+                    out.push(Command::RenamePhotos);
+                }
+                if pressed(Key::I) {
+                    out.push(Command::SetWorkspace(Workspace::Caption));
+                }
+            }
             if cmd {
-                if has_menu {
+                if !crate::keyonce::handler_takes(has_menu, false, true) {
                     return;
                 }
-                if pressed(Key::O) || pressed(Key::T) {
+                if !shift && pressed(Key::Y) {
+                    out.push(Command::CopyPhotos);
+                }
+                if pm && !shift && pressed(Key::T) {
+                    out.push(Command::SelectBy(crate::select_by::SelectBy::Tagged));
+                }
+                if pressed(Key::O) || pressed(if pm { Key::N } else { Key::T }) {
                     out.push(Command::PickFolder);
                 }
                 if pressed(Key::W) {
@@ -3733,7 +4505,12 @@ impl App {
                 if alt && pressed(Key::V) {
                     out.push(Command::PasteMetadata);
                 }
-                if pressed(Key::R) && shift {
+                let rename = if pm {
+                    pressed(Key::M)
+                } else {
+                    pressed(Key::R) && shift
+                };
+                if rename {
                     out.push(Command::RenamePhotos);
                 }
                 if pressed(Key::Backspace) {
@@ -3749,16 +4526,19 @@ impl App {
                     out.push(Command::Rotate(true));
                 }
                 if pressed(Key::A) {
-                    out.push(if shift {
+                    out.push(if shift && !pm {
                         Command::SelectNone
                     } else {
                         Command::SelectAll
                     });
                 }
+                if pm && pressed(Key::D) {
+                    out.push(Command::SelectNone);
+                }
                 if pressed(Key::Z) {
                     out.push(if shift { Command::Redo } else { Command::Undo });
                 }
-                if pressed(Key::R) && !shift {
+                if pressed(Key::R) && !shift && !pm {
                     out.push(Command::RefreshFolder);
                 }
                 if pressed(Key::Equals) || pressed(Key::Plus) {
@@ -3767,19 +4547,9 @@ impl App {
                 if pressed(Key::Minus) {
                     out.push(Command::ZoomOut);
                 }
-                // ⌘ + number: the opposite of what the bare keys do.
-                let cmd_rates = self.prefs.number_keys == crate::prefs::NumberKeys::ColorClass;
-                for (n, k) in NUM_KEYS.iter().enumerate() {
-                    if pressed(*k) {
-                        if cmd_rates {
-                            if n <= 5 {
-                                out.push(Command::SetRating(n as i8));
-                            }
-                        } else {
-                            out.push(Command::SetClass(n as u8));
-                        }
-                    }
-                }
+                // ⌘ + number: the colour class in Photo Mechanic's layout,
+                // otherwise the opposite of what the bare keys do.
+                number_commands(i, !pm && !bare_rates, &mut out);
                 return;
             }
             if pressed(Key::PageUp) {
@@ -3807,19 +4577,16 @@ impl App {
             if pressed(Key::Escape) {
                 out.push(Command::Escape);
             }
-            if !has_menu {
-                let bare_rates = self.prefs.number_keys == crate::prefs::NumberKeys::Rating;
-                for (n, k) in NUM_KEYS.iter().enumerate() {
-                    if pressed(*k) {
-                        if bare_rates {
-                            if n <= 5 {
-                                out.push(Command::SetRating(n as i8));
-                            }
-                        } else {
-                            out.push(Command::SetClass(n as u8));
-                        }
-                    }
-                }
+            // ⌥C removes the crop (Photo Mechanic layout), in the crop tool.
+            if pm && alt && !shift && !mods.ctrl && pressed(Key::C) {
+                out.push(Command::CropClear);
+            }
+            // Bare keys. The menus show most of them, but macOS gives the
+            // menu bar only ⌘/⌃ key equivalents, so this handler dispatches
+            // them on every platform; `KeyOnce` drops any menu echo. With a
+            // native menu, ⌃ and ⌥ combinations belong to the menu.
+            if !has_menu || (!mods.ctrl && !alt) {
+                number_commands(i, bare_rates, &mut out);
                 if pressed(Key::T) {
                     out.push(Command::ToggleTag);
                 }
@@ -3838,7 +4605,10 @@ impl App {
                 if in_preview && pressed(Key::L) && !shift {
                     out.push(Command::ToggleLoupe);
                 }
-                if in_preview && pressed(Key::K) && !shift {
+                if pm && pressed(Key::F5) {
+                    out.push(Command::RefreshFolder);
+                }
+                if in_preview && pressed(if pm { Key::C } else { Key::K }) && !shift {
                     out.push(Command::CropToggle);
                 }
                 if in_preview && self.pv.crop.is_some() {
@@ -3852,10 +4622,20 @@ impl App {
                         out.push(Command::CropClear);
                     }
                 }
+                // G closes Preview (the crop tool keeps G for its guides).
+                if pressed(Key::G)
+                    && crate::platform::keymap::g_closes_preview(
+                        in_preview,
+                        self.pv.crop.is_some(),
+                        shift,
+                    )
+                {
+                    out.push(Command::ClosePreview);
+                }
                 if pressed(Key::Z) && !shift {
                     out.push(Command::ToggleZoom);
                 }
-                if pressed(Key::C) && !shift {
+                if pressed(if pm { Key::V } else { Key::C }) && !shift {
                     out.push(Command::ToggleCompare);
                 }
             }
@@ -3955,6 +4735,10 @@ impl eframe::App for App {
             };
             self.stats.frame_ms_max = self.stats.frame_ms_max.max(dt_ms);
         }
+        self.poll_mark_writes();
+        if self.mark_writer.pending() > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         if self.applied_appearance != Some(self.prefs.appearance) {
             ctx.set_theme(match self.prefs.appearance {
                 crate::prefs::Appearance::System => egui::ThemePreference::System,
@@ -4033,14 +4817,38 @@ impl eframe::App for App {
 
         self.drain_results(ctx);
         self.drain_ingest();
+        self.drain_copy();
+        self.drain_extract();
         self.drain_export();
         self.drain_deliver();
         self.handle_drops(ctx);
+        if self.platform.set_shortcuts(self.prefs.shortcut_layout) {
+            self.sync_menu();
+            self.platform.set_class_names(&self.scheme.names);
+        }
+        let now = std::time::Instant::now();
         for c in self.platform.drain_menu() {
-            self.dispatch(ctx, c);
+            // The bug report's fields take typing: a ⌘ key the menu bar
+            // caught must not mark, select or move photos behind it. ⌘A
+            // selects the field's text; only window items still work.
+            if let Some(d) = self.bug_dialog.as_mut() {
+                match c {
+                    Command::SelectAll => d.select_all = true,
+                    Command::CloseWindow
+                    | Command::MinimizeWindow
+                    | Command::ShowMainWindow => self.dispatch(ctx, c),
+                    _ => {}
+                }
+                continue;
+            }
+            if self.key_once.admit(&c, crate::keyonce::Source::Menu, now) {
+                self.dispatch(ctx, c);
+            }
         }
         for c in self.keyboard_commands(ctx) {
-            self.dispatch(ctx, c);
+            if self.key_once.admit(&c, crate::keyonce::Source::Keys, now) {
+                self.dispatch(ctx, c);
+            }
         }
 
         if self.workspace == Workspace::Caption {
@@ -4150,7 +4958,10 @@ impl eframe::App for App {
         );
 
         self.draw_drop_overlay(ctx, &t);
-        if self.prefs_dirty && self.prefs_saved_at.elapsed().as_secs_f32() > 1.0 {
+        if self.prefs_dirty
+            && !self.launch.sidebar_shot
+            && self.prefs_saved_at.elapsed().as_secs_f32() > 1.0
+        {
             self.prefs.save();
             self.prefs_dirty = false;
             self.prefs_saved_at = Instant::now();
@@ -4159,7 +4970,25 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        // Also runs on quit: every queued mark reaches disk first.
+        self.flush_marks();
+        if self.launch.sidebar_shot {
+            // Screenshot instance: never write prefs.
+            return;
+        }
         self.prefs.save();
+    }
+}
+
+/// Two paths to the same folder: equal, or equal once symlinks and letter
+/// case are resolved by the file system.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
     }
 }
 
@@ -4178,6 +5007,35 @@ fn upload(ctx: &egui::Context, name: &str, rgb: &Rgb, gain_stops: u8) -> Texture
         ColorImage::from_rgb([rgb.width as usize, rgb.height as usize], &boosted)
     };
     ctx.load_texture(name, img, TextureOptions::LINEAR)
+}
+
+#[cfg(test)]
+mod prefetch_tests {
+    use super::*;
+
+    #[test]
+    fn prefetch_goes_ahead_in_the_direction_of_travel() {
+        assert_eq!(prefetch_plan(10, 100, 1), vec![11, 12, 9, 13]);
+        assert_eq!(prefetch_plan(10, 100, -1), vec![9, 8, 11, 7]);
+        // Clipped at the ends of the view.
+        assert_eq!(prefetch_plan(0, 100, -1), vec![1]);
+        assert_eq!(prefetch_plan(98, 100, 1), vec![99, 97]);
+        assert!(prefetch_plan(0, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn eviction_drops_oldest_but_keeps_wanted() {
+        let lru: VecDeque<usize> = (0..10).collect();
+        // Count limit only: drop the two oldest not kept.
+        let out = preview_evictions(&lru, |_| 1, &[0, 9], 8, usize::MAX);
+        assert_eq!(out, vec![1, 2]);
+        // Byte budget: 10 previews of 100 bytes, budget 350, keep 7..=9.
+        let out = preview_evictions(&lru, |_| 100, &[7, 8, 9], 8, 350);
+        assert_eq!(out, vec![0, 1, 2, 3, 4, 5, 6]);
+        // Everything wanted: nothing goes, even over budget.
+        let lru: VecDeque<usize> = (0..3).collect();
+        assert!(preview_evictions(&lru, |_| 100, &[0, 1, 2], 1, 10).is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -4201,6 +5059,24 @@ mod crop_tests {
         // A frame turned right (6): the displayed top edge is the stored left edge.
         let s = crop_display_to_stored([0.0, 0.0, 1.0, 0.5], 6);
         assert!((s[0] - 0.0).abs() < 1e-6 && (s[2] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn same_folder_sees_through_symlinks() {
+        let d = std::env::temp_dir().join(format!("apature-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Work Drive/2026")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(d.join("Work Drive"), d.join("alias")).unwrap();
+        assert!(same_folder(&d.join("Work Drive"), &d.join("Work Drive/")));
+        #[cfg(unix)]
+        assert!(same_folder(&d.join("Work Drive"), &d.join("alias")));
+        assert!(!same_folder(
+            &d.join("Work Drive"),
+            &d.join("Work Drive/2026")
+        ));
+        assert!(!same_folder(&d.join("gone"), &d.join("Work Drive")));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

@@ -52,6 +52,8 @@ pub enum Command {
     },
     SelectAll,
     SelectNone,
+    /// Edit › Select Tagged, by Rating, by Color Class… over the visible photos.
+    SelectBy(crate::select_by::SelectBy),
     Undo,
     Redo,
     SetFilter(crate::filter::Filter),
@@ -80,6 +82,9 @@ pub enum Command {
     LiveToggle,
     /// Bring the main window to the front (menu bar extra).
     ShowMainWindow,
+    /// Window menu items of the Photo Mechanic layout (⌘⇧W; Minimize has no key).
+    CloseWindow,
+    MinimizeWindow,
     /// Help menu: Settings > Shortcuts, the log, the repository.
     OpenShortcuts,
     OpenAbout,
@@ -88,6 +93,8 @@ pub enum Command {
     OpenUpdate,
     RevealLog,
     OpenRepo,
+    /// Help › Report a Bug…: the bug report dialog.
+    ReportBug,
     /// Copy the focused photo's marks and IPTC; paste onto the selection.
     CopyMetadata,
     PasteMetadata,
@@ -102,6 +109,20 @@ pub enum Command {
     RenameApply,
     MoveToTrash,
     TrashConfirm,
+    /// Copy Photos…: open the dialog, choose the folder, start, cancel,
+    /// show the copies in Finder.
+    CopyPhotos,
+    CopyChooseDest,
+    CopyStart,
+    CopyCancel,
+    CopyReveal,
+    /// Tools › Extract JPEG Previews from RAW Photos…: open the dialog,
+    /// start (asking for a folder unless Extract to source folder), cancel,
+    /// show the JPEGs in Finder.
+    ExtractPreviews,
+    ExtractStart,
+    ExtractCancel,
+    ExtractReveal,
     CloseDialog,
     /// Preview: compare the selection side by side.
     ToggleCompare,
@@ -114,6 +135,12 @@ pub enum Command {
     PickFolder,
     AddFavorite,
     RemoveFavorite(PathBuf),
+    /// Folder tree: show this folder in the current tab.
+    OpenFolderHere(PathBuf),
+    /// Folder tree: reveal this folder in Finder.
+    RevealFolder(PathBuf),
+    /// Folder tree: add this folder to Favorites.
+    AddFavoritePath(PathBuf),
     RevealInFinder,
     ToggleSidebar,
     ToggleInspector,
@@ -153,10 +180,54 @@ pub enum Command {
     /// A quarter turn, losslessly, in the sidecar (`true` = clockwise).
     Rotate(bool),
     Escape,
+    /// Leave Preview for the contact sheet, the photo still focused and
+    /// scrolled into view (bare G in Preview, outside the crop tool).
+    ClosePreview,
     Activate,
 }
 
 impl Command {
+    /// Marking, moving and view commands, which never read or write a
+    /// sidecar on the UI thread; anything else waits for queued mark writes
+    /// first (see `App::flush_marks`).
+    pub fn leaves_files_alone(&self) -> bool {
+        matches!(
+            self,
+            Command::MoveFocus { .. }
+                | Command::Move(_)
+                | Command::MovePage(_)
+                | Command::Home
+                | Command::End
+                | Command::Click { .. }
+                | Command::SetRating(_)
+                | Command::SetClass(_)
+                | Command::ToggleTag
+                | Command::Undo
+                | Command::Redo
+                | Command::SelectAll
+                | Command::SelectNone
+                | Command::SelectBy(_)
+                | Command::SetFilter(_)
+                | Command::ClearFilter(_)
+                | Command::SetSort(_)
+                | Command::ToggleSortReversed
+                | Command::ToggleAdvanceAfterMark
+                | Command::ZoomIn
+                | Command::ZoomOut
+                | Command::ToggleZoom
+                | Command::ToggleLoupe
+                | Command::ToggleCompare
+                | Command::ToggleStack
+                | Command::ToggleSidebar
+                | Command::ToggleInspector
+                | Command::ToggleFilmstrip
+                | Command::CyclePreviewBoost
+                | Command::Activate
+                | Command::Escape
+                | Command::ClosePreview
+        )
+    }
+
     /// Menu identifiers are strings so the native menu can round-trip them.
     pub fn menu_id(&self) -> String {
         match self {
@@ -182,6 +253,9 @@ impl Command {
             Command::SetWorkspace(w) => format!("view.workspace.{}", w.label().to_lowercase()),
             Command::SelectAll => "edit.selectall".into(),
             Command::SelectNone => "edit.selectnone".into(),
+            Command::SelectBy(by) => by.menu_id(),
+            Command::CopyPhotos => "file.copyphotos".into(),
+            Command::ExtractPreviews => "tools.extractpreviews".into(),
             Command::Undo => "edit.undo".into(),
             Command::Redo => "edit.redo".into(),
             Command::ClearFilter(None) => "view.clearfilter".into(),
@@ -213,11 +287,15 @@ impl Command {
             Command::Rotate(true) => "image.rotate.cw".into(),
             Command::Rotate(false) => "image.rotate.ccw".into(),
             Command::ShowMainWindow => "app.show".into(),
+            Command::CloseWindow => "window.close".into(),
+            Command::MinimizeWindow => "window.minimize".into(),
+            Command::LiveToggle => "ingest.live".into(),
             Command::OpenShortcuts => "help.shortcuts".into(),
             Command::OpenAbout => "app.about".into(),
             Command::CheckUpdates => "app.updates".into(),
             Command::RevealLog => "help.log".into(),
             Command::OpenRepo => "help.repo".into(),
+            Command::ReportBug => "help.reportbug".into(),
             other => format!("other.{other:?}"),
         }
     }
@@ -236,11 +314,14 @@ impl Command {
             "view.loupe" => Command::ToggleLoupe,
             "ingest.live" => Command::LiveToggle,
             "app.show" => Command::ShowMainWindow,
+            "window.close" => Command::CloseWindow,
+            "window.minimize" => Command::MinimizeWindow,
             "help.shortcuts" => Command::OpenShortcuts,
             "app.about" => Command::OpenAbout,
             "app.updates" => Command::CheckUpdates,
             "help.log" => Command::RevealLog,
             "help.repo" => Command::OpenRepo,
+            "help.reportbug" => Command::ReportBug,
             "view.stack" => Command::ToggleStack,
             "image.crop.clear" => Command::CropClear,
             "file.deliver" => Command::DeliverLast,
@@ -267,6 +348,8 @@ impl Command {
             "file.export" => Command::SetWorkspace(Workspace::Export),
             "file.rename" => Command::RenamePhotos,
             "file.trash" => Command::MoveToTrash,
+            "file.copyphotos" => Command::CopyPhotos,
+            "tools.extractpreviews" => Command::ExtractPreviews,
             "view.workspace.export" => Command::SetWorkspace(Workspace::Export),
             "file.closetab" => Command::CloseTab,
             "window.nexttab" => Command::NextTab,
@@ -290,10 +373,46 @@ impl Command {
                     Command::SetRating(r.parse().ok()?)
                 } else if let Some(c) = id.strip_prefix("image.class.") {
                     Command::SetClass(c.parse().ok()?)
+                } else if id.starts_with("edit.select.") {
+                    Command::SelectBy(crate::select_by::SelectBy::from_menu_id(id)?)
                 } else {
                     return None;
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marking_and_moving_never_wait_for_mark_writes() {
+        for c in [
+            Command::SetRating(5),
+            Command::SetClass(2),
+            Command::ToggleTag,
+            Command::Move(1),
+            Command::MoveFocus {
+                delta: 1,
+                shift: false,
+                command: false,
+            },
+            Command::Undo,
+        ] {
+            assert!(c.leaves_files_alone(), "{c:?}");
+        }
+        // These read or copy sidecars, so queued marks land first.
+        for c in [
+            Command::SaveCaption,
+            Command::CopyStart,
+            Command::ExportStart,
+            Command::RefreshFolder,
+            Command::Rotate(true),
+            Command::CropApply,
+        ] {
+            assert!(!c.leaves_files_alone(), "{c:?}");
+        }
     }
 }

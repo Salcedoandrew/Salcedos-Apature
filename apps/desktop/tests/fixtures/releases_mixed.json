@@ -1,0 +1,164 @@
+[
+  {
+    "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/9",
+    "html_url": "https://github.com/Salcedoandrew/apature/releases/tag/v0.2.0",
+    "id": 9,
+    "tag_name": "v0.2.0",
+    "target_commitish": "select-copy",
+    "name": "Apature v0.2.0",
+    "draft": true,
+    "prerelease": false,
+    "created_at": "2026-10-20T12:00:00Z",
+    "published_at": null,
+    "body": "Notes for v0.2.0",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/assets/90",
+        "id": 90,
+        "name": "Apature-0.2.0-universal.dmg",
+        "content_type": "application/x-apple-diskimage",
+        "state": "uploaded",
+        "size": 1000,
+        "browser_download_url": "https://github.com/Salcedoandrew/apature/releases/download/v0.2.0/Apature-0.2.0-universal.dmg"
+      }
+    ]
+  },
+  {
+    "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/8",
+    "html_url": "https://github.com/Salcedoandrew/apature/releases/tag/nightly",
+    "id": 8,
+    "tag_name": "nightly",
+    "target_commitish": "select-copy",
+    "name": "Apature nightly",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-10-20T12:00:00Z",
+    "published_at": "2026-10-20T12:00:00Z",
+    "body": "Notes for nightly",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/assets/80",
+        "id": 80,
+        "name": "Apature-nightly.dmg",
+        "content_type": "application/x-apple-diskimage",
+        "state": "uploaded",
+        "size": 1000,
+        "browser_download_url": "https://github.com/Salcedoandrew/apature/releases/download/nightly/Apature-nightly.dmg"
+      }
+    ]
+  },
+  {
+    "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/7",
+    "html_url": "https://github.com/Salcedoandrew/apature/releases/tag/v0.1.0-test.99",
+    "id": 7,
+    "tag_name": "v0.1.0-test.99",
+    "target_commitish": "select-copy",
+    "name": "Apature v0.1.0-test.99",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-10-20T12:00:00Z",
+    "published_at": "2026-10-20T12:00:00Z",
+    "body": "Notes for v0.1.0-test.99",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/assets/70",
+        "id": 70,
+        "name": "Apature-0.1.0-test-99-universal.dmg",
+        "content_type": "application/x-apple-diskimage",
+        "state": "uploaded",
+        "size": 1000,
+        "browser_download_url": "https://github.com/Salcedoandrew/apature/releases/download/v0.1.0-test.99/Apature-0.1.0-test-99-universal.dmg"
+      }
+    ]
+  },
+  {
+    "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/6",
+    "html_url": "https://github.com/Salcedoandrew/apature/releases/tag/v0.1.0-test.160",
+    "id": 6,
+    "tag_name": "v0.1.0-test.160",
+    "target_commitish": "select-copy",
+    "name": "Apature v0.1.0-test.160",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-10-20T12:00:00Z",
+    "published_at": "2026-10-20T12:00:00Z",
+    "body": "Notes for v0.1.0-test.160",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/assets/60",
+        "id": 60,
+        "name": "Apature-0.1.0-test-160-press-kit.zip",
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 1000,
+        "browser_download_url": "https://github.com/Salcedoandrew/apature/releases/download/v0.1.0-test.160/Apature-0.1.0-test-160-press-kit.zip"
+      },
+      {
+        "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/assets/61",
+        "id": 61,
+        "name": "Apature-0.1.0-test-160-arm64.dmg",
+        "content_type": "application/x-apple-diskimage",
+        "state": "uploaded",
+        "size": 1001,
+        "browser_download_url": "https://github.com/Salcedoandrew/apature/releases/download/v0.1.0-test.160/Apature-0.1.0-test-160-arm64.dmg"
+      },
+      {
+        "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/assets/62",
+        "id": 62,
+        "name": "Apature-0.1.0-test-160-universal.dmg",
+        "content_type": "application/x-apple-diskimage",
+        "state": "uploaded",
+        "size": 1002,
+        "browser_download_url": "https://github.com/Salcedoandrew/apature/releases/download/v0.1.0-test.160/Apature-0.1.0-test-160-universal.dmg"
+      }
+    ]
+  },
+  {
+    "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/5",
+    "html_url": "https://github.com/Salcedoandrew/apature/releases/tag/v0.1.0-test.159",
+    "id": 5,
+    "tag_name": "v0.1.0-test.159",
+    "target_commitish": "select-copy",
+    "name": "Apature v0.1.0-test.159",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-10-20T12:00:00Z",
+    "published_at": "2026-10-20T12:00:00Z",
+    "body": "Notes for v0.1.0-test.159",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/assets/50",
+        "id": 50,
+        "name": "Apature-0.1.0-test-159-universal.dmg",
+        "content_type": "application/x-apple-diskimage",
+        "state": "uploaded",
+        "size": 1000,
+        "browser_download_url": "https://github.com/Salcedoandrew/apature/releases/download/v0.1.0-test.159/Apature-0.1.0-test-159-universal.dmg"
+      }
+    ]
+  },
+  {
+    "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/4",
+    "html_url": "https://github.com/Salcedoandrew/apature/releases/tag/v0.0.9",
+    "id": 4,
+    "tag_name": "v0.0.9",
+    "target_commitish": "select-copy",
+    "name": "Apature v0.0.9",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-20T12:00:00Z",
+    "published_at": "2026-10-20T12:00:00Z",
+    "body": "Notes for v0.0.9",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/assets/40",
+        "id": 40,
+        "name": "Apature-0.0.9.dmg",
+        "content_type": "application/x-apple-diskimage",
+        "state": "uploaded",
+        "size": 1000,
+        "browser_download_url": "https://github.com/Salcedoandrew/apature/releases/download/v0.0.9/Apature-0.0.9.dmg"
+      }
+    ]
+  }
+]

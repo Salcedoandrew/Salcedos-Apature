@@ -108,6 +108,9 @@ pub struct Prefs {
     pub sort: crate::filter::Sort,
     pub sort_reversed: bool,
     pub advance_after_mark: bool,
+    /// Also write marks and captions inside JPEG files (Photo Mechanic's
+    /// embed habit). Off: JPEGs are never rewritten; marks go to a sidecar.
+    pub embed_jpeg_marks: bool,
     /// Group frames shot within a second of the previous one behind one
     /// thumbnail (bursts); S expands or collapses the focused stack.
     pub stack_bursts: bool,
@@ -116,6 +119,9 @@ pub struct Prefs {
     pub preview_in_window: bool,
     /// What the bare 1–8 keys set: colour class (Photo Mechanic) or star rating.
     pub number_keys: NumberKeys,
+    /// Photo Mechanic's macOS keys (the default, also for prefs saved before
+    /// this existed) or Apature's original set.
+    pub shortcut_layout: ShortcutLayout,
     pub assignment_file: Option<PathBuf>,
     pub codes_file: Option<PathBuf>,
     pub ingest: Option<apature_ingest::Options>,
@@ -168,8 +174,15 @@ pub struct Prefs {
     pub send_after_export: Option<String>,
     /// Last template used in Rename Photos.
     pub rename_template: String,
+    /// Copy Photos… choices: destination, naming, partners, sidecars,
+    /// collisions, date subfolders.
+    pub copy: apature_ingest::CopyOptions,
+    /// Extract JPEG Previews from RAW Photos… checkboxes.
+    pub extract: apature_export::extract::ExtractOptions,
     /// Eject the card after an ingest where every file verified.
     pub eject_after_ingest: bool,
+    /// Folders open in the sidebar's folder tree.
+    pub tree_expanded: Vec<std::path::PathBuf>,
 }
 
 impl Default for Prefs {
@@ -187,9 +200,11 @@ impl Default for Prefs {
             sort: crate::filter::Sort::Name,
             sort_reversed: false,
             advance_after_mark: true,
+            embed_jpeg_marks: false,
             stack_bursts: false,
             preview_in_window: false,
             number_keys: NumberKeys::Rating,
+            shortcut_layout: ShortcutLayout::PhotoMechanic,
             assignment_file: None,
             codes_file: None,
             ingest: None,
@@ -219,7 +234,15 @@ impl Default for Prefs {
             delivery: Vec::new(),
             send_after_export: None,
             rename_template: String::new(),
+            copy: apature_ingest::CopyOptions {
+                seq_start: 1,
+                partners: true,
+                sidecars: true,
+                ..Default::default()
+            },
             eject_after_ingest: false,
+            tree_expanded: Vec::new(),
+            extract: Default::default(),
         }
     }
 }
@@ -235,6 +258,15 @@ pub fn default_ingest_options() -> apature_ingest::Options {
 }
 
 impl Prefs {
+    /// Where marks for JPEG files go, from the "Write marks into JPEG files" setting.
+    pub fn jpeg_marks(&self) -> apature_metadata::items::JpegMarks {
+        if self.embed_jpeg_marks {
+            apature_metadata::items::JpegMarks::Embed
+        } else {
+            apature_metadata::items::JpegMarks::Sidecar
+        }
+    }
+
     pub fn path() -> Option<PathBuf> {
         directories::ProjectDirs::from("dev", "mccal", "Apature")
             .map(|d| d.config_dir().join("prefs.json"))
@@ -352,6 +384,16 @@ pub enum NumberKeys {
     Rating,
     /// 1–8 set the colour class, 0 clears it; ⌘0–⌘5 set the rating (Photo Mechanic).
     ColorClass,
+}
+
+/// Which keys drive the menus: Photo Mechanic's macOS shortcuts or Apature's own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShortcutLayout {
+    /// ⌘1–⌘8 colour class, ⌃1–⌃5 rating, ⌘G ingest, ⌘M rename, ⌘D deselect, C crop.
+    #[default]
+    PhotoMechanic,
+    /// Apature's original keys: ⌘⇧I ingest, ⌘⇧R rename, ⌘⇧A deselect, K crop.
+    Classic,
 }
 
 impl Prefs {
@@ -492,6 +534,15 @@ mod load_tests {
             PREFS_VERSION + 5,
             "the newer version number is kept so save() can refuse to downgrade"
         );
+    }
+
+    #[test]
+    fn file_without_a_layout_gets_photo_mechanic_keys() {
+        let (p, _) = Prefs::parse(r#"{"version":1,"number_keys":"ColorClass"}"#).unwrap();
+        assert_eq!(p.shortcut_layout, ShortcutLayout::PhotoMechanic);
+        assert_eq!(p.number_keys, NumberKeys::ColorClass);
+        let (p, _) = Prefs::parse(r#"{"version":1,"shortcut_layout":"Classic"}"#).unwrap();
+        assert_eq!(p.shortcut_layout, ShortcutLayout::Classic);
     }
 
     #[test]

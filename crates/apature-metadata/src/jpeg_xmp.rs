@@ -170,6 +170,28 @@ fn fresh_packet(marks: &XmpMarks) -> Result<String, XmpError> {
     Ok(p)
 }
 
+/// Give the rewritten file at `tmp` the modified, accessed and (macOS)
+/// created dates of the JPEG it replaces, so embedding marks does not make a
+/// photo look new to Finder, backups or date sorting.
+fn keep_dates(original: &Path, tmp: &Path) -> std::io::Result<()> {
+    let m = fs::metadata(original)?;
+    #[allow(unused_mut)]
+    let mut times = fs::FileTimes::new()
+        .set_modified(m.modified()?)
+        .set_accessed(m.accessed()?);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::FileTimesExt;
+        if let Ok(c) = m.created() {
+            times = times.set_created(c);
+        }
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .open(tmp)?
+        .set_times(times)
+}
+
 /// Generic packet edit on the JPEG at `path`: `edit` receives the existing
 /// packet (or an empty padded one), `verify` checks the packet read back from
 /// the bytes about to be written. Atomic temp → fsync → rename.
@@ -206,6 +228,7 @@ pub fn write_with(
     let result = (|| {
         fs::write(&tmp, &out)?;
         fs::File::open(&tmp)?.sync_all()?;
+        keep_dates(path, &tmp)?;
         fs::rename(&tmp, path)
     })();
     if result.is_err() {
@@ -241,6 +264,7 @@ pub fn write_marks(path: &Path, marks: &XmpMarks) -> Result<(), JpegXmpError> {
     let result = (|| {
         fs::write(&tmp, &out)?;
         fs::File::open(&tmp)?.sync_all()?;
+        keep_dates(path, &tmp)?;
         fs::rename(&tmp, path)
     })();
     if result.is_err() {

@@ -17,6 +17,8 @@
 //! matched to sRGB) instead of its embedded preview. Slower, full quality,
 //! macOS only; other platforms fall back to the preview and say so.
 
+pub mod extract;
+
 use std::path::{Path, PathBuf};
 
 use apature_core::{Kind, PhotoItem};

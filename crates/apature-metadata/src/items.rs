@@ -1,10 +1,15 @@
-//! One policy for where an item's marks live, matching what Photo Mechanic
-//! and Lightroom do:
+//! One policy for where an item's marks and captions live:
 //!
 //! * a RAW's marks live in its `.xmp` sidecar;
-//! * a JPEG's marks live inside the JPEG;
-//! * a RAW+JPEG pair gets **both**, so either app sees the same thing
-//!   whichever file it treats as primary.
+//! * by default ([`JpegMarks::Sidecar`]) a JPEG's marks live in a sidecar
+//!   too (`name.xmp`, or the RAW's sidecar for a RAW+JPEG pair), so marking
+//!   never rewrites an image file;
+//! * with [`JpegMarks::Embed`] (opt-in) they also go inside each JPEG, the
+//!   way Photo Mechanic embeds them, keeping the file's dates.
+//!
+//! Reading merges field by field and the sidecar wins: marks embedded by an
+//! earlier version (or another app) still show until the sidecar says
+//! otherwise.
 
 use std::path::PathBuf;
 
@@ -28,6 +33,17 @@ pub enum ItemError {
     },
 }
 
+/// Where marks and captions for JPEG files are written.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JpegMarks {
+    /// In the XMP sidecar only; JPEG files are never rewritten.
+    #[default]
+    Sidecar,
+    /// Also inside each JPEG (dates kept); an existing sidecar is updated
+    /// too so it never goes stale.
+    Embed,
+}
+
 /// Everything readable about an item's marks, before any precedence is applied.
 #[derive(Debug, Default, Clone)]
 pub struct MarkSources {
@@ -37,28 +53,46 @@ pub struct MarkSources {
 }
 
 impl MarkSources {
-    /// Precedence: for an item with a RAW, the sidecar; otherwise the first
-    /// JPEG packet; otherwise unmarked. Unreadable sources count as absent.
-    pub fn effective(&self, item: &PhotoItem, scheme: &ColorClassScheme) -> Marks {
-        let has_raw = item.variants().any(|v| v.kind == Kind::Raw);
-        let chosen = if has_raw {
-            self.sidecar
-                .as_ref()
-                .or_else(|| self.embedded.first().map(|(_, m)| m))
-        } else {
-            self.embedded
-                .first()
-                .map(|(_, m)| m)
-                .or(self.sidecar.as_ref())
+    /// Precedence, field by field: the sidecar, then the first JPEG packet,
+    /// then unmarked. Colour class and label travel together. Unreadable
+    /// sources count as absent.
+    pub fn effective(&self, _item: &PhotoItem, scheme: &ColorClassScheme) -> Marks {
+        let emb = self.embedded.first().map(|(_, m)| m);
+        let merged = match (&self.sidecar, emb) {
+            (None, None) => return Marks::default(),
+            (Some(s), None) => s.clone(),
+            (None, Some(e)) => e.clone(),
+            (Some(s), Some(e)) => {
+                let side_class = s.color_class.is_some() || s.label.is_some();
+                XmpMarks {
+                    rating: s.rating.or(e.rating),
+                    label: if side_class {
+                        s.label.clone()
+                    } else {
+                        e.label.clone()
+                    },
+                    color_class: if side_class {
+                        s.color_class
+                    } else {
+                        e.color_class
+                    },
+                    tagged: s.tagged.or(e.tagged),
+                }
+            }
         };
-        chosen.map(|m| m.to_marks(scheme)).unwrap_or_default()
+        merged.to_marks(scheme)
     }
 
-    /// Disagreements between the sidecar and any embedded packet.
-    pub fn conflicts(&self) -> Vec<(PathBuf, Conflict)> {
+    /// Disagreements between the sidecar and any embedded packet. Only in
+    /// [`JpegMarks::Embed`] mode, where both are meant to agree; by default
+    /// the sidecar is the record and older embedded marks are just history.
+    pub fn conflicts(&self, policy: JpegMarks) -> Vec<(PathBuf, Conflict)> {
         let Some(side) = &self.sidecar else {
             return Vec::new();
         };
+        if policy == JpegMarks::Sidecar {
+            return Vec::new();
+        }
         self.embedded
             .iter()
             .flat_map(|(p, emb)| {
@@ -92,23 +126,35 @@ pub fn read_marks(item: &PhotoItem, scheme: &ColorClassScheme) -> Marks {
     read(item).effective(item, scheme)
 }
 
-/// Write marks everywhere they belong. Returns the paths written. Stops at
-/// the first failure; paths written before it stay written (each write is
-/// itself atomic), and the error names the file.
+/// True when `policy` sends this item's writes to its sidecar: always, except
+/// a JPEG-only item in [`JpegMarks::Embed`] mode with no sidecar yet.
+fn uses_sidecar(item: &PhotoItem, policy: JpegMarks) -> bool {
+    policy == JpegMarks::Sidecar
+        || item.variants().any(|v| v.kind == Kind::Raw)
+        || item.sidecar_path().is_file()
+}
+
+/// Write marks everywhere `policy` says they belong. Returns the paths
+/// written. Stops at the first failure; paths written before it stay written
+/// (each write is itself atomic), and the error names the file.
 pub fn write(
     item: &PhotoItem,
     marks: &Marks,
     scheme: &ColorClassScheme,
+    policy: JpegMarks,
 ) -> Result<Vec<PathBuf>, ItemError> {
     let xm = XmpMarks::from_marks(marks, scheme);
     let mut written = Vec::new();
-    if item.variants().any(|v| v.kind == Kind::Raw) {
+    if uses_sidecar(item, policy) {
         let p = item.sidecar_path();
         xmp::write_marks(&p, &xm).map_err(|source| ItemError::Sidecar {
             path: p.clone(),
             source,
         })?;
         written.push(p);
+    }
+    if policy == JpegMarks::Sidecar {
+        return Ok(written);
     }
     for v in item.variants().filter(|v| v.kind == Kind::Jpeg) {
         jpeg_xmp::write_marks(&v.path, &xm).map_err(|source| ItemError::Jpeg {
@@ -120,15 +166,11 @@ pub fn write(
     Ok(written)
 }
 
-/// Read IPTC for an item: the sidecar when a RAW exists, else the first JPEG
-/// packet. Returns an empty `Iptc` when nothing is there.
+/// Read IPTC for an item: the first JPEG packet with the sidecar's fields
+/// laid over it (the sidecar wins field by field). Empty when nothing is
+/// there.
 pub fn read_iptc(item: &PhotoItem) -> Iptc {
-    let has_raw = item.variants().any(|v| v.kind == Kind::Raw);
-    let from_sidecar = || {
-        std::fs::read_to_string(item.sidecar_path())
-            .ok()
-            .map(|t| iptc::parse(&t))
-    };
+    let side_text = std::fs::read_to_string(item.sidecar_path()).ok();
     let from_jpeg = || {
         item.variants()
             .filter(|v| v.kind == Kind::Jpeg)
@@ -137,18 +179,28 @@ pub fn read_iptc(item: &PhotoItem) -> Iptc {
                 jpeg_xmp::packet(&data).ok().flatten().map(iptc::parse)
             })
     };
-    if has_raw {
-        from_sidecar().or_else(from_jpeg)
-    } else {
-        from_jpeg().or_else(from_sidecar)
+    match (from_jpeg(), side_text) {
+        (Some(j), Some(t)) => {
+            // Sidecar fields win, including ones cleared on purpose.
+            let mut m = j.overlay(&iptc::parse(&t));
+            for f in iptc::cleared(&t) {
+                m.clear(f);
+            }
+            m
+        }
+        (_, Some(t)) => iptc::parse(&t),
+        (j, None) => j.unwrap_or_default(),
     }
-    .unwrap_or_default()
 }
 
-/// Write IPTC everywhere marks go (sidecar for a RAW, packet for each JPEG).
-pub fn write_iptc(item: &PhotoItem, fields: &Iptc) -> Result<Vec<PathBuf>, ItemError> {
+/// Write IPTC everywhere marks go under `policy`.
+pub fn write_iptc(
+    item: &PhotoItem,
+    fields: &Iptc,
+    policy: JpegMarks,
+) -> Result<Vec<PathBuf>, ItemError> {
     let mut written = Vec::new();
-    if item.variants().any(|v| v.kind == Kind::Raw) {
+    if uses_sidecar(item, policy) {
         let p = item.sidecar_path();
         xmp::write_sidecar_with(
             &p,
@@ -160,6 +212,9 @@ pub fn write_iptc(item: &PhotoItem, fields: &Iptc) -> Result<Vec<PathBuf>, ItemE
             source,
         })?;
         written.push(p);
+    }
+    if policy == JpegMarks::Sidecar {
+        return Ok(written);
     }
     for v in item.variants().filter(|v| v.kind == Kind::Jpeg) {
         jpeg_xmp::write_with(
@@ -205,18 +260,18 @@ mod tests {
             tagged: true,
         };
 
-        let written = write(&items[0], &marks, &scheme).unwrap();
+        let written = write(&items[0], &marks, &scheme, JpegMarks::Embed).unwrap();
         assert_eq!(written.len(), 2);
         assert!(written[0].ends_with("DSC_0001.XMP"));
         assert!(written[1].ends_with("DSC_0001.JPG"));
         let src = read(&items[0]);
         assert_eq!(src.sidecar.as_ref().unwrap().rating, Some(3));
         assert_eq!(src.embedded.len(), 1);
-        assert!(src.conflicts().is_empty());
+        assert!(src.conflicts(JpegMarks::Embed).is_empty());
         assert_eq!(src.effective(&items[0], &scheme), marks);
 
         // JPEG-only item: embedded only, no sidecar created.
-        let written = write(&items[1], &marks, &scheme).unwrap();
+        let written = write(&items[1], &marks, &scheme, JpegMarks::Embed).unwrap();
         assert_eq!(written, vec![dir.path().join("DSC_0002.JPG")]);
         assert!(!dir.path().join("DSC_0002.xmp").exists());
         assert_eq!(read_marks(&items[1], &scheme), marks);
@@ -227,7 +282,7 @@ mod tests {
             keywords: Some(vec!["k1".into(), "k2".into()]),
             ..Default::default()
         };
-        let w = write_iptc(&items[0], &fields).unwrap();
+        let w = write_iptc(&items[0], &fields, JpegMarks::Embed).unwrap();
         assert_eq!(w.len(), 2);
         let back = read_iptc(&items[0]);
         assert_eq!(back.description.as_deref(), Some("A caption"));
@@ -251,7 +306,209 @@ mod tests {
         .unwrap();
         let src = read(&items[0]);
         assert_eq!(src.effective(&items[0], &scheme).rating, Rating(5));
-        assert_eq!(src.conflicts().len(), 1);
-        assert_eq!(src.conflicts()[0].1.field, "rating");
+        assert_eq!(src.conflicts(JpegMarks::Embed).len(), 1);
+        assert_eq!(src.conflicts(JpegMarks::Embed)[0].1.field, "rating");
+    }
+
+    /// Set a fixed, old modified date so "unchanged" can't pass by luck.
+    fn age(path: &std::path::Path) -> std::time::SystemTime {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        t
+    }
+
+    fn snapshot(path: &std::path::Path) -> (Vec<u8>, std::time::SystemTime) {
+        (
+            fs::read(path).unwrap(),
+            fs::metadata(path).unwrap().modified().unwrap(),
+        )
+    }
+
+    #[test]
+    fn marking_a_jpeg_by_default_leaves_it_untouched_and_uses_a_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpg = dir.path().join("DSC_0002.JPG");
+        let nef = dir.path().join("DSC_0001.NEF");
+        let pair_jpg = dir.path().join("DSC_0001.JPG");
+        fs::write(&nef, b"not a real nef").unwrap();
+        fs::write(&pair_jpg, jpeg_skeleton()).unwrap();
+        fs::write(&jpg, jpeg_skeleton()).unwrap();
+        age(&jpg);
+        age(&pair_jpg);
+        let before = (snapshot(&jpg), snapshot(&pair_jpg));
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        let scheme = ColorClassScheme::default();
+        let marks = Marks {
+            rating: Rating(4),
+            color_class: ColorClass(3),
+            tagged: true,
+        };
+        let pad = Iptc {
+            headline: Some("Opening day".into()),
+            ..Default::default()
+        };
+        for it in &items {
+            write(it, &marks, &scheme, JpegMarks::default()).unwrap();
+            write_iptc(it, &pad, JpegMarks::default()).unwrap();
+        }
+        assert_eq!(
+            (snapshot(&jpg), snapshot(&pair_jpg)),
+            before,
+            "JPEG bytes and dates unchanged"
+        );
+        // The standalone JPEG got its own sidecar; the pair used the RAW's.
+        assert!(dir.path().join("DSC_0002.XMP").is_file());
+        assert!(dir.path().join("DSC_0001.XMP").is_file());
+        for it in &items {
+            assert_eq!(read_marks(it, &scheme), marks, "round trip");
+            assert_eq!(read_iptc(it).headline.as_deref(), Some("Opening day"));
+            assert!(read(it).embedded.is_empty());
+        }
+    }
+
+    #[test]
+    fn sidecar_wins_over_embedded_field_by_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpg = dir.path().join("IMG_1.jpg");
+        fs::write(&jpg, jpeg_skeleton()).unwrap();
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        let scheme = ColorClassScheme::default();
+        // Marks an earlier version embedded: they still show.
+        jpeg_xmp::write_marks(
+            &jpg,
+            &XmpMarks {
+                rating: Some(2),
+                tagged: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(read_marks(&items[0], &scheme).rating, Rating(2));
+        // A sidecar with only a rating (say from another app) wins for the
+        // rating; the embedded tag still shows.
+        xmp::write_marks(
+            &dir.path().join("IMG_1.xmp"),
+            &XmpMarks {
+                rating: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let m = read_marks(&items[0], &scheme);
+        assert_eq!((m.rating, m.tagged), (Rating(5), true));
+    }
+
+    #[test]
+    fn embedding_is_opt_in_and_keeps_the_dates() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpg = dir.path().join("IMG_2.JPG");
+        fs::write(&jpg, jpeg_skeleton()).unwrap();
+        let old = age(&jpg);
+        let created = fs::metadata(&jpg).unwrap().created().ok();
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        let scheme = ColorClassScheme::default();
+        let marks = Marks {
+            rating: Rating(3),
+            ..Default::default()
+        };
+        let w = write(&items[0], &marks, &scheme, JpegMarks::Embed).unwrap();
+        assert_eq!(w, vec![jpg.clone()], "no sidecar is invented in embed mode");
+        assert_ne!(fs::read(&jpg).unwrap(), jpeg_skeleton(), "marks went in");
+        let m = fs::metadata(&jpg).unwrap();
+        assert_eq!(m.modified().unwrap(), old);
+        if let (Some(c), Ok(now)) = (created, m.created()) {
+            assert_eq!(now, c);
+        }
+        assert_eq!(read_marks(&items[0], &scheme), marks);
+    }
+
+    #[test]
+    fn clearing_embedded_caption_stays_cleared_and_jpeg_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpg = dir.path().join("IMG_3.JPG");
+        let nef = dir.path().join("DSC_7.NEF");
+        let pair = dir.path().join("DSC_7.JPG");
+        fs::write(&nef, b"not a real nef").unwrap();
+        // Captions another app (or an older Apature) embedded in the JPEGs.
+        let old = Iptc {
+            headline: Some("Old headline".into()),
+            description: Some("Old caption".into()),
+            keywords: Some(vec!["a".into(), "b".into()]),
+            copyright: Some("© Kept".into()),
+            ..Default::default()
+        };
+        for p in [&jpg, &pair] {
+            fs::write(p, jpeg_skeleton()).unwrap();
+            jpeg_xmp::write_with(p, |t| iptc::apply(t, &old), |_| true).unwrap();
+        }
+        let before = (fs::read(&jpg).unwrap(), fs::read(&pair).unwrap());
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        assert_eq!(items.len(), 2);
+        for it in &items {
+            assert_eq!(read_iptc(it).description.as_deref(), Some("Old caption"));
+        }
+        // The user clears caption, headline and keywords (what the Caption
+        // workspace sends: empty values).
+        let clear = Iptc {
+            headline: Some(String::new()),
+            description: Some(String::new()),
+            keywords: Some(Vec::new()),
+            ..Default::default()
+        };
+        for it in &items {
+            write_iptc(it, &clear, JpegMarks::Sidecar).unwrap();
+        }
+        // Reopen the folder: still cleared, untouched fields still embedded.
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        for it in &items {
+            let back = read_iptc(it);
+            assert_eq!(back.description, None, "{}", it.display_name());
+            assert_eq!(back.headline, None);
+            assert!(back.keywords.unwrap_or_default().is_empty());
+            assert_eq!(back.copyright.as_deref(), Some("© Kept"));
+        }
+        assert_eq!((fs::read(&jpg).unwrap(), fs::read(&pair).unwrap()), before);
+        // Typing a new caption later replaces the explicit clear.
+        let again = Iptc {
+            description: Some("New caption".into()),
+            ..Default::default()
+        };
+        write_iptc(&items[0], &again, JpegMarks::Sidecar).unwrap();
+        assert_eq!(
+            read_iptc(&items[0]).description.as_deref(),
+            Some("New caption")
+        );
+    }
+
+    #[test]
+    fn no_conflict_marker_by_default_when_the_sidecar_has_moved_on() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("DSC_1.NEF"), b"nef").unwrap();
+        let jpg = dir.path().join("DSC_1.JPG");
+        fs::write(&jpg, jpeg_skeleton()).unwrap();
+        jpeg_xmp::write_marks(
+            &jpg,
+            &XmpMarks {
+                rating: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        let scheme = ColorClassScheme::default();
+        let marks = Marks {
+            rating: Rating(5),
+            ..Default::default()
+        };
+        write(&items[0], &marks, &scheme, JpegMarks::Sidecar).unwrap();
+        let src = read(&items[0]);
+        assert_eq!(src.effective(&items[0], &scheme).rating, Rating(5));
+        assert!(src.conflicts(JpegMarks::Sidecar).is_empty());
+        assert_eq!(src.conflicts(JpegMarks::Embed).len(), 1);
     }
 }

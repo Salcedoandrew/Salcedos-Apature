@@ -304,7 +304,9 @@ dependencies = [
  "apature-metadata",
  "apature-preview",
  "image",
+ "libc",
  "log",
+ "serde",
  "tempfile",
  "thiserror 2.0.21",
 ]

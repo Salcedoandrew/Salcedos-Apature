@@ -62,7 +62,7 @@ Events.
 | Tokens for Apature Dark and Light, following the system appearance; egui widgets restyled through them | implemented, **verified** in screenshots |
 | Native menu bar (Apature, File, Edit, View, Image, Window, Help) with accelerators; ⌘ shortcuts owned by the menu | implemented, **verified** via System Events (`Apple, File, Edit, View, Image, Window, Help`; View and Image items listed) |
 | Toolbar 48 pt: sidebar toggle, workspace switcher (Caption/Ingest disabled with the milestone named), Filter and Sort disabled with reasons, size slider, decode counter, inspector toggle | implemented, verified in screenshots |
-| Source-list sidebar: Favorites (add/remove), Recent (10), Drives & cards (/Volumes), Collections placeholder; 26 pt rows; resizable 200–320 with memory | implemented, verified in screenshots |
+| Source-list sidebar: Favorites (add/remove), Recent (10), Folders tree (Home and each volume; favorites expand too; lazy background reads; click opens here, double-click a new tab), Collections placeholder; 26 pt rows; resizable 200–320 with memory | implemented, verified in screenshots (`--sidebar-shot`) |
 | Contact sheet: virtual grid, letterboxed cells, class bar, chip, stars, tag, pair badge, focus ring, ellipsised filenames; cells carry accessibility names | implemented, verified in screenshots; **VoiceOver not yet tested** |
 | Inspector: sharp preview on top with honest size label, Capture / Marks (editable) / Caption (M4) / Files sections, resizable 280–420 with memory | implemented, verified (preview arrives at 1024 px in ~19 ms) |
 | Filmstrip 88 pt (⇧F), Preview workspace with overlay and ±1 prefetch, status bar 28 pt | implemented, run manually |

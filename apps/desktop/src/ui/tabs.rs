@@ -112,9 +112,13 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                     }
                     let _ = S4;
                 }
-                let plus = ui
-                    .add(egui::Button::new("+").frame(false))
-                    .on_hover_text("Open a folder in a new tab (⌘T)");
+                let plus = ui.add(egui::Button::new("+").frame(false)).on_hover_text(
+                    if app.prefs.shortcut_layout == crate::prefs::ShortcutLayout::PhotoMechanic {
+                        "Open a folder in a new tab (⌘N)"
+                    } else {
+                        "Open a folder in a new tab (⌘T)"
+                    },
+                );
                 if plus.clicked() {
                     cmds.push(Command::PickFolder);
                 }

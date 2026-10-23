@@ -129,8 +129,21 @@ pub fn minimal(
     artist: Option<&str>,
     copyright: Option<&str>,
 ) -> Vec<u8> {
+    minimal_oriented(s, width, height, artist, copyright, 1)
+}
+
+/// [`minimal`] for pixels that are not upright (a RAW's embedded preview):
+/// Orientation says how to turn them.
+pub fn minimal_oriented(
+    s: &ExifSummary,
+    width: u32,
+    height: u32,
+    artist: Option<&str>,
+    copyright: Option<&str>,
+    orientation: u16,
+) -> Vec<u8> {
     let mut ifd0 = vec![
-        short(tag::ORIENTATION, 1),
+        short(tag::ORIENTATION, orientation.clamp(1, 8)),
         ascii(0x0131, "Apature"),
         short(0x0213, 1), // YCbCrPositioning centered
         rational(0x011A, 72, 1),
@@ -195,6 +208,48 @@ pub fn minimal(
 /// Orientation becomes 1 and the Exif IFD's PixelX/YDimension the new size
 /// (only when those tags exist; nothing is added). Returns false when the
 /// block could not be parsed, in which case it is left untouched.
+/// A TIFF block holding only IFD0's Orientation.
+pub fn orientation_only(orientation: u16) -> Vec<u8> {
+    let mut buf = b"II\x2A\x00\x08\x00\x00\x00".to_vec();
+    write_ifd(
+        &mut buf,
+        vec![short(tag::ORIENTATION, orientation.clamp(1, 8))],
+        0,
+    );
+    buf
+}
+
+/// Set IFD0's Orientation in a copied block in place. False when the block
+/// can't be parsed or has no one-value SHORT Orientation to set.
+pub fn set_orientation(block: &mut [u8], orientation: u16) -> bool {
+    let little = block.starts_with(b"II");
+    let pos = {
+        let Ok((t, first)) = Tiff::parse(block) else {
+            return false;
+        };
+        let Ok(ifd0) = t.read_ifd(first) else {
+            return false;
+        };
+        match ifd0.get(tag::ORIENTATION) {
+            Some(e) if e.typ == T_SHORT && e.count == 1 => e.pos,
+            _ => return false,
+        }
+    };
+    let o = orientation.clamp(1, 8);
+    let b = if little {
+        o.to_le_bytes()
+    } else {
+        o.to_be_bytes()
+    };
+    match block.get_mut(pos..pos + 2) {
+        Some(s) => {
+            s.copy_from_slice(&b);
+            true
+        }
+        None => false,
+    }
+}
+
 pub fn patch_for_export(block: &mut [u8], width: u32, height: u32) -> bool {
     let little = block.starts_with(b"II");
     let mut writes: Vec<(usize, u16, u32)> = Vec::new();

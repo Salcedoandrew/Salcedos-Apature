@@ -1,4 +1,6 @@
-//! Apature desktop. `apature [folder] [--theme dark|light] [--screenshot out.png [--frames N]]`
+//! Apature desktop. `apature [folder] [--theme dark|light] [--screenshot out.png [--frames N]] [--copy-dialog] [--about-dialog]`
+//! (hidden: `--sidebar-shot` screenshots the folder tree from a scratch HOME;
+//! `--bug-dialog` opens Help › Report a Bug… filled with an example)
 //! `--ingest-run --ingest-source <card> --ingest-dest <dir>` ingests headlessly and reports;
 //! `--export-run --export-dest <dir>` does the same for export.
 //!
@@ -6,13 +8,21 @@
 //! appearances without a bundled app or screen-recording permission.
 
 mod app;
+mod bug_report;
 mod commands;
+mod copy_job;
+mod credits;
 mod deliver_job;
 mod export_job;
+mod extract_job;
 mod filter;
+mod folder_tree;
 mod ingest_job;
+mod keyonce;
+mod mark_writer;
 mod platform;
 mod prefs;
+mod select_by;
 mod selection;
 mod ui;
 mod undo;
@@ -63,6 +73,12 @@ pub struct Launch {
     /// Open the Rename / Trash dialog at start (screenshots).
     pub rename_dialog: bool,
     pub trash_dialog: bool,
+    pub copy_dialog: bool,
+    /// Hidden: open Help › Report a Bug… with an example report (screenshots).
+    pub bug_dialog: bool,
+    pub extract_dialog: bool,
+    /// Hidden: screenshot the sidebar's folder tree (child of `sidebar_shot::run`).
+    pub sidebar_shot: bool,
     /// Open the Settings window at start (screenshots).
     pub settings: bool,
     /// Extra folders to open as tabs.
@@ -96,7 +112,7 @@ fn parse_args() -> Launch {
             "--ingest" => l.ingest = true,
             "--crop" => l.crop = true,
             "--live" => l.live = true,
-            "--about" => l.about = true,
+            "--about" | "--about-dialog" => l.about = true,
             "--check-updates" => l.check_updates = true,
             "--ingest-source" => l.ingest_source = args.next().map(PathBuf::from),
             "--ingest-dest" => l.ingest_dest = args.next().map(PathBuf::from),
@@ -113,6 +129,10 @@ fn parse_args() -> Launch {
             "--settings" => l.settings = true,
             "--rename-dialog" => l.rename_dialog = true,
             "--trash-dialog" => l.trash_dialog = true,
+            "--copy-dialog" => l.copy_dialog = true,
+            "--bug-dialog" => l.bug_dialog = true,
+            "--extract-dialog" => l.extract_dialog = true,
+            "--sidebar-shot" => l.sidebar_shot = true,
             "--preview" => l.preview = true,
             "--zoom11" => {
                 l.preview = true;
@@ -138,6 +158,123 @@ fn parse_args() -> Launch {
     l
 }
 
+/// Set in the scratch-HOME child of `--sidebar-shot`.
+const SHOT_CHILD: &str = "APATURE_SIDEBAR_SHOT_CHILD";
+
+/// Hidden `--sidebar-shot [--screenshot out.png] [--theme …] [photos]`:
+/// builds a throwaway home folder (Pictures/Assignments/…, a Finder-hidden
+/// Library, a dot folder and a photo library package the tree must skip),
+/// copies up to a dozen photos from `photos` into one assignment folder, and
+/// runs a second Apature with HOME pointing there, which opens that folder,
+/// screenshots the window (sidebar tree expanded to it) and quits. Your own
+/// prefs, logs and running Apature are never touched; the scratch folder is
+/// deleted afterwards. Returns the exit code.
+fn sidebar_shot() -> i32 {
+    use std::fs;
+    let mut out = PathBuf::from("sidebar_tree.png");
+    let mut photos: Option<PathBuf> = None;
+    let mut pass: Vec<String> = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--sidebar-shot" => {}
+            "--screenshot" => out = args.next().map(PathBuf::from).unwrap_or(out),
+            "--theme" | "--size" | "--frames" => {
+                pass.push(a);
+                pass.extend(args.next());
+            }
+            _ if !a.starts_with("--") => photos = Some(PathBuf::from(a)),
+            _ => pass.push(a),
+        }
+    }
+    let out = if out.is_absolute() {
+        out
+    } else {
+        std::env::current_dir().unwrap_or_default().join(out)
+    };
+    let root = std::env::temp_dir().join(format!("apature-sidebar-shot-{}", std::process::id()));
+    let user = std::env::var("USER").unwrap_or_else(|_| "photographer".into());
+    let home = root.join(user);
+    let shoot = home.join("Pictures/Assignments/2026-10-22 Storm Damage");
+    let dirs = [
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Movies",
+        "Music",
+        "Library/Caches",
+        ".config",
+        "Pictures/Archive/2025",
+        "Pictures/Assignments/2026-10-20 City Council",
+        "Pictures/Assignments/2026-10-21 Football Semifinal/SELECTS",
+        "Pictures/Assignments/2026-10-22 Storm Damage/SELECTS",
+        "Pictures/Assignments/2026-10-22 Storm Damage/Aerials",
+        "Pictures/Photos Library.photoslibrary/database",
+    ];
+    for d in dirs {
+        if let Err(e) = fs::create_dir_all(home.join(d)) {
+            eprintln!("sidebar-shot: {e}");
+            return 1;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("chflags")
+            .arg("hidden")
+            .arg(home.join("Library"))
+            .status();
+    }
+    if let Some(src) = photos.as_ref().and_then(|p| fs::read_dir(p).ok()) {
+        let mut files: Vec<PathBuf> = src
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| {
+                p.extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .is_some_and(|e| !matches!(e.as_str(), "xmp" | "txt" | "json"))
+            })
+            .collect();
+        files.sort();
+        for f in files.iter().take(12) {
+            if let Some(n) = f.file_name() {
+                let _ = fs::copy(f, shoot.join(n));
+            }
+        }
+    }
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("sidebar-shot: {e}");
+            return 1;
+        }
+    };
+    let status = std::process::Command::new(exe)
+        .arg("--sidebar-shot")
+        .arg("--screenshot")
+        .arg(&out)
+        .args(&pass)
+        .arg(&shoot)
+        .env("HOME", &home)
+        .env(SHOT_CHILD, "1")
+        .status();
+    let _ = fs::remove_dir_all(&root);
+    match status {
+        Ok(s) if s.success() && out.is_file() => {
+            println!("{}", out.display());
+            0
+        }
+        Ok(s) => {
+            eprintln!("sidebar-shot: no screenshot ({s})");
+            1
+        }
+        Err(e) => {
+            eprintln!("sidebar-shot: {e}");
+            1
+        }
+    }
+}
+
 /// The app icon, decoded from the bundled PNG (see assets/icon.svg for the source).
 fn icon() -> Option<egui::IconData> {
     let bytes = include_bytes!("../assets/icon-256.png");
@@ -151,6 +288,9 @@ fn icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result {
+    if std::env::args().any(|a| a == "--sidebar-shot") && std::env::var_os(SHOT_CHILD).is_none() {
+        std::process::exit(sidebar_shot());
+    }
     init_logging();
     let launch = parse_args();
     let (w, h) = launch.size.unwrap_or((1400.0, 900.0));

@@ -38,20 +38,77 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
         }
     }
 
-    if !compare {
+    if compare {
+        app.pool.retain_previews(&panes);
+    } else {
+        // Preload the next photos in the direction of travel (and one
+        // behind) at fit size. Queued decodes for photos already flipped
+        // past are dropped, so the focused one is always next in line.
+        let pos = app.cursor_pos();
+        if let Some(last) = app.pv.last_pos {
+            if pos != last {
+                app.pv.dir = if pos > last { 1 } else { -1 };
+            }
+        }
+        app.pv.last_pos = Some(pos);
         let ppp = ui.ctx().pixels_per_point();
         let fit_px = ((rect.width().max(rect.height())) * ppp).ceil() as u32;
-        if let Some(n) = app.view_neighbor(1) {
-            app.request_preview(n, fit_px, 1);
+        for (i, idx) in app.prefetch_targets().into_iter().enumerate() {
+            app.request_preview(idx, fit_px, 1 + i as u32);
         }
-        if let Some(p) = app.view_neighbor(-1) {
-            app.request_preview(p, fit_px, 2);
-        }
+        app.pool.retain_previews(&app.preview_wanted());
     }
     if app.cols > 0 {
         let row = app.cursor_pos() / app.cols;
         let rows = app.row_count();
         app.schedule_thumbs(row.saturating_sub(1)..(row + 2).min(rows));
+    }
+}
+
+/// The image's size in pixels for layout: its upright `native` size
+/// (capped like the largest preview we decode) when known, else the texture.
+pub fn content_px(native: Option<[u32; 2]>, tex: Vec2, cap: u32) -> Vec2 {
+    match native {
+        Some([w, h]) if w > 0 && h > 0 => {
+            let v = Vec2::new(w as f32, h as f32);
+            let long = v.x.max(v.y);
+            if long > cap as f32 {
+                (v * (cap as f32 / long)).round()
+            } else {
+                v
+            }
+        }
+        _ => tex,
+    }
+}
+
+/// Where an image of `size` pixels sits fitted in `rect`: centred, inside a
+/// small margin, never enlarged past one pixel per point.
+pub fn fit_rect(rect: Rect, size: Vec2) -> Rect {
+    let inner = rect.shrink(S5);
+    let s = (inner.width() / size.x)
+        .min(inner.height() / size.y)
+        .min(1.0);
+    Rect::from_center_size(rect.center(), size * s)
+}
+
+/// Texture coordinates that show `tex` in a frame shaped like `content`.
+/// A thumbnail with a slightly different shape (letterboxed embedded
+/// thumbnails) is centre-cropped rather than squashed.
+pub fn uv_for(tex: Vec2, content: Vec2) -> Rect {
+    let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    if tex.x <= 0.0 || tex.y <= 0.0 || content.x <= 0.0 || content.y <= 0.0 {
+        return full;
+    }
+    let (at, ac) = (tex.x / tex.y, content.x / content.y);
+    if at > ac * 1.02 {
+        let w = ac / at;
+        Rect::from_min_max(Pos2::new(0.5 - w / 2.0, 0.0), Pos2::new(0.5 + w / 2.0, 1.0))
+    } else if at < ac / 1.02 {
+        let h = at / ac;
+        Rect::from_min_max(Pos2::new(0.0, 0.5 - h / 2.0), Pos2::new(1.0, 0.5 + h / 2.0))
+    } else {
+        full
     }
 }
 
@@ -132,12 +189,13 @@ fn draw_pane(
     let mut zoom_label = String::from("loading…");
     let mut shown_rect: Option<Rect> = None;
     if let Some(tex) = tex {
-        let size = tex.size_vec2();
-        let inner = rect.shrink(S5);
-        let s_fit = (inner.width() / size.x)
-            .min(inner.height() / size.y)
-            .min(1.0);
-        let fitted = Rect::from_center_size(rect.center(), size * s_fit);
+        // Lay out by the size the full preview will have, not the texture
+        // we happen to hold: a thumbnail or smaller cached preview is drawn
+        // stretched into the same rect, so the swap does not jump.
+        let native = app.native.get(idx).copied().flatten();
+        let size = content_px(native, tex.size_vec2(), FULL_CAP.min(max_tex));
+        let uv = uv_for(tex.size_vec2(), size);
+        let fitted = fit_rect(rect, size);
 
         // 1:1 — one texture pixel per physical pixel, panned by `center`.
         let one = {
@@ -202,12 +260,7 @@ fn draw_pane(
         } else {
             target
         };
-        p.image(
-            tex.id(),
-            shown,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        p.image(tex.id(), shown, uv, Color32::WHITE);
         shown_rect = Some(shown);
         zoom_label = match (app.pv.mode, preview_px) {
             (ZoomMode::Fit, _) if compare => "fit".into(),
@@ -634,5 +687,60 @@ fn crop_tool(
     p.galley(pos + Vec2::new(4.0, 2.0), galley, t.text);
     if ui.input(|i| i.pointer.any_down()) {
         ui.ctx().request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane() -> Rect {
+        Rect::from_min_size(Pos2::new(0.0, 30.0), Vec2::new(1512.0, 900.0))
+    }
+
+    #[test]
+    fn thumbnail_and_full_preview_fill_the_same_rect() {
+        let native = Some([6240, 4160]);
+        let thumb = content_px(native, Vec2::new(320.0, 213.0), 16384);
+        let full = Vec2::new(6240.0, 4160.0);
+        let a = fit_rect(pane(), thumb);
+        let b = fit_rect(pane(), full);
+        assert_eq!(a, b);
+        // Bigger than the 320 px thumbnail: it is scaled up, not drawn small.
+        assert!(a.width() > 1000.0);
+        // A fit-size preview (3024 px) lands in the same place too.
+        let fit = content_px(native, Vec2::new(3024.0, 2016.0), 16384);
+        assert_eq!(fit_rect(pane(), fit), b);
+    }
+
+    #[test]
+    fn portrait_frames_use_the_upright_shape() {
+        // EXIF-rotated frame: the worker reports the upright size.
+        let native = Some([4160, 6240]);
+        let r = fit_rect(pane(), content_px(native, Vec2::new(213.0, 320.0), 16384));
+        assert!(r.height() > r.width());
+        assert_eq!(r, fit_rect(pane(), Vec2::new(4160.0, 6240.0)));
+    }
+
+    #[test]
+    fn unknown_size_falls_back_to_the_texture_and_caps_apply() {
+        let t = Vec2::new(320.0, 213.0);
+        assert_eq!(content_px(None, t, 16384), t);
+        assert_eq!(
+            content_px(Some([20000, 10000]), t, 16384),
+            Vec2::new(16384.0, 8192.0)
+        );
+    }
+
+    #[test]
+    fn letterboxed_thumbnail_is_centre_cropped() {
+        // A 4:3 thumbnail for a 3:2 photo: crop top and bottom.
+        let uv = uv_for(Vec2::new(160.0, 120.0), Vec2::new(6000.0, 4000.0));
+        assert!((uv.height() - (4.0 / 3.0) / 1.5).abs() < 1e-4);
+        assert!((uv.center().y - 0.5).abs() < 1e-6);
+        assert_eq!(uv.width(), 1.0);
+        // Same shape: the whole texture.
+        let uv = uv_for(Vec2::new(320.0, 213.0), Vec2::new(6240.0, 4160.0));
+        assert_eq!(uv, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)));
     }
 }

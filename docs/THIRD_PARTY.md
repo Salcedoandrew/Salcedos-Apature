@@ -50,3 +50,4 @@ tool (`cargo-about` is the usual answer). Tracked in `docs/STATUS.md`.
 - security-framework 3 (MIT / Apache-2.0) — macOS Keychain for delivery passwords.
 - cjxl (libjxl, BSD-3-Clause) — optional external tool for JPEG XL export; not bundled, found via Homebrew/PATH/APATURE_CJXL.
 - tray-icon 0.26 (MIT / Apache-2.0) — the macOS menu bar extra.
+- Ported code (not a crate dependency): RAW preview rules from radenkovic/extract-raw-preview (MIT), see `THIRD_PARTY_NOTICES.md`.

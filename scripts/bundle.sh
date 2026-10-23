@@ -9,13 +9,19 @@ cd "$(dirname "$0")/.."
 
 VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 0)
-APP=target/bundle/Apature.app
+# APP and APATURE_BINARY can be overridden (scripts/dmg.sh bundles a
+# universal binary into target/dist without touching target/bundle).
+APP="${APP:-target/bundle/Apature.app}"
+BINARY="${APATURE_BINARY:-}"
 
-APATURE_BUILD="$BUILD" cargo build --release -p apature
+if [[ -z "$BINARY" ]]; then
+  APATURE_BUILD="$BUILD" cargo build --release -p apature
+  BINARY=target/release/apature
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/apature "$APP/Contents/MacOS/Apature"
+cp "$BINARY" "$APP/Contents/MacOS/Apature"
 cp apps/desktop/assets/Apature.icns "$APP/Contents/Resources/Apature.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
