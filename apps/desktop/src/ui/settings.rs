@@ -111,6 +111,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ),
     ("X · T", "Reject · toggle tag"),
     ("⏎ / Space · Esc", "Preview · back"),
+    ("G", "Preview: back to the contact sheet"),
     (
         "Z · C",
         "Preview: 1:1 at the pointer · compare the selection",
@@ -148,6 +149,7 @@ const SHORTCUTS_PM: &[(&str, &str)] = &[
     ),
     ("X · T", "Reject · toggle tag"),
     ("⏎ / Space · Esc", "Preview · back"),
+    ("G", "Preview: back to the contact sheet"),
     (
         "Z · V",
         "Preview: 1:1 at the pointer · compare the selection",

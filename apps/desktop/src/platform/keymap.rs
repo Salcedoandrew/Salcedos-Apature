@@ -69,6 +69,18 @@ pub const PM_BARE_KEYS: [&str; 13] = [
     "[", "]", "M", "I", "0", "1", "2", "3", "4", "5", "6", "7", "8",
 ];
 
+/// Bare keys the egui handler owns only while Preview is open, in both
+/// layouts: G closes Preview (in the crop tool G cycles the guides instead).
+/// No menu item may take them bare, or the press would do two things.
+pub const PREVIEW_BARE_KEYS: [&str; 1] = ["G"];
+
+/// Does a bare G press close Preview? Only in Preview, outside the crop
+/// tool (where G is next guides), and without ⇧. Elsewhere G does nothing
+/// bare (⌘G is Ingest… in the Photo Mechanic layout, the menu's job).
+pub fn g_closes_preview(in_preview: bool, crop_active: bool, shift: bool) -> bool {
+    in_preview && !crop_active && !shift
+}
+
 /// Every menu item with a key in either layout, by title, with its key in
 /// `layout` (None: no key). The items macOS supplies (Hide, Quit, Cut, Copy,
 /// Paste, Full Screen) are listed so a collision with them shows up too.
@@ -234,6 +246,31 @@ mod tests {
                 vec!["Reveal in Finder", "Refresh Folder"],
             ]
         );
+    }
+
+    #[test]
+    fn preview_bare_keys_are_free_in_both_layouts() {
+        for layout in [ShortcutLayout::PhotoMechanic, ShortcutLayout::Classic] {
+            for (title, k) in menu_keys(layout) {
+                if let Some(k) = k {
+                    assert!(
+                        !(k.mods == 0 && PREVIEW_BARE_KEYS.contains(&k.key)),
+                        "{title} takes bare {} ({layout:?})",
+                        k.key
+                    );
+                }
+            }
+        }
+        // ⌘G stays Ingest… in Photo Mechanic's layout.
+        assert_eq!(key(ShortcutLayout::PhotoMechanic, "Ingest…"), a(CMD, "G"));
+    }
+
+    #[test]
+    fn g_closes_preview_only_in_preview_outside_crop() {
+        assert!(g_closes_preview(true, false, false));
+        assert!(!g_closes_preview(false, false, false));
+        assert!(!g_closes_preview(true, true, false));
+        assert!(!g_closes_preview(true, false, true));
     }
 
     #[test]

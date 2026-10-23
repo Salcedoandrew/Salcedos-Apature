@@ -4318,6 +4318,13 @@ impl App {
                     self.selection.only(self.cursor);
                 }
             }
+            Command::ClosePreview => {
+                if self.workspace == Workspace::Preview && self.pv.crop.is_none() {
+                    self.pv.compare = None;
+                    self.workspace = Workspace::Sheet;
+                    self.scroll_to_cursor = true;
+                }
+            }
             Command::Activate => {
                 if self.pv.crop.is_some() {
                     self.dispatch_later = Some(Command::CropApply);
@@ -4557,6 +4564,16 @@ impl App {
                     if pressed(Key::Backspace) || pressed(Key::Delete) {
                         out.push(Command::CropClear);
                     }
+                }
+                // G closes Preview (the crop tool keeps G for its guides).
+                if pressed(Key::G)
+                    && crate::platform::keymap::g_closes_preview(
+                        in_preview,
+                        self.pv.crop.is_some(),
+                        shift,
+                    )
+                {
+                    out.push(Command::ClosePreview);
                 }
                 if pressed(Key::Z) && !shift {
                     out.push(Command::ToggleZoom);

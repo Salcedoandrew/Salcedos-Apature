@@ -178,6 +178,9 @@ pub enum Command {
     /// A quarter turn, losslessly, in the sidecar (`true` = clockwise).
     Rotate(bool),
     Escape,
+    /// Leave Preview for the contact sheet, the photo still focused and
+    /// scrolled into view (bare G in Preview, outside the crop tool).
+    ClosePreview,
     Activate,
 }
 
@@ -219,6 +222,7 @@ impl Command {
                 | Command::CyclePreviewBoost
                 | Command::Activate
                 | Command::Escape
+                | Command::ClosePreview
         )
     }
 
