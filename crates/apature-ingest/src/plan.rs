@@ -290,7 +290,11 @@ pub fn today() -> (i32, u32, u32) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    // Howard Hinnant's days-to-civil.
+    civil_from_secs(secs)
+}
+
+/// Civil date (UTC) of seconds since 1970 (Howard Hinnant's days-to-civil).
+pub(crate) fn civil_from_secs(secs: i64) -> (i32, u32, u32) {
     let z = secs.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -594,6 +598,19 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn civil_dates_across_leap_rules() {
+        for (secs, want) in [
+            (0, (1970, 1, 1)),
+            (-86_400, (1969, 12, 31)),
+            (951_782_400, (2000, 2, 29)),      // 2000 is a leap year (÷400)
+            (4_107_542_400, (2100, 3, 1)),     // 2100 is not (÷100)
+            (4_107_542_400 - 1, (2100, 2, 28)),
+        ] {
+            assert_eq!(civil_from_secs(secs), want, "{secs}");
+        }
+    }
     use std::fs;
 
     fn card(dir: &Path) {

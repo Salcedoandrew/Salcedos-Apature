@@ -373,4 +373,79 @@ mod tests {
         assert_eq!(t.uint(ex.get(PIXEL_Y).unwrap(), 0), Some(2048));
         assert!(!patch_for_export(&mut [0u8; 4], 1, 1), "garbage is refused");
     }
+
+    /// A big-endian ("MM") EXIF block as cameras such as Nikon and Canon
+    /// RAWs write it: IFD0 then the Exif IFD, values after both.
+    fn big_endian_block() -> Vec<u8> {
+        type Ent = (u16, u16, u32, Vec<u8>);
+        let ascii = |s: &str| [s.as_bytes(), b"\0"].concat();
+        let ratl = |n: u32, d: u32| [n.to_be_bytes(), d.to_be_bytes()].concat();
+        let model = ascii("NIKON D850");
+        let date = ascii("2026:10:06 14:03:11");
+        let mut ifd0: Vec<Ent> = vec![
+            (0x0110, 2, model.len() as u32, model),
+            (tag::ORIENTATION, T_SHORT, 1, 6u16.to_be_bytes().to_vec()),
+            (EXIF_IFD, T_LONG, 1, vec![]), // offset filled in below
+        ];
+        let exif: Vec<Ent> = vec![
+            (0x829A, 5, 1, ratl(1, 250)),
+            (0x829D, 5, 1, ratl(28, 10)),
+            (0x8827, T_SHORT, 1, 800u16.to_be_bytes().to_vec()),
+            (0x9003, 2, date.len() as u32, date),
+            (PIXEL_X, T_LONG, 1, 6000u32.to_be_bytes().to_vec()),
+            (PIXEL_Y, T_SHORT, 1, 4000u16.to_be_bytes().to_vec()),
+        ];
+        let ifd_len = |n: usize| 2 + n * 12 + 4;
+        let exif_at = 8 + ifd_len(ifd0.len());
+        ifd0[2].3 = (exif_at as u32).to_be_bytes().to_vec();
+        let mut data_at = exif_at + ifd_len(exif.len());
+        let mut out = b"MM\0\x2a\0\0\0\x08".to_vec();
+        let mut data = Vec::new();
+        for ents in [&ifd0, &exif] {
+            out.extend_from_slice(&(ents.len() as u16).to_be_bytes());
+            for (tg, ty, n, v) in ents.iter() {
+                out.extend_from_slice(&tg.to_be_bytes());
+                out.extend_from_slice(&ty.to_be_bytes());
+                out.extend_from_slice(&n.to_be_bytes());
+                if v.len() <= 4 {
+                    let mut inline = v.clone();
+                    inline.resize(4, 0);
+                    out.extend_from_slice(&inline);
+                } else {
+                    out.extend_from_slice(&(data_at as u32).to_be_bytes());
+                    data.extend_from_slice(v);
+                    data_at += v.len();
+                }
+            }
+            out.extend_from_slice(&0u32.to_be_bytes());
+        }
+        out.extend_from_slice(&data);
+        out
+    }
+
+    #[test]
+    fn big_endian_exif_reads_and_patches() {
+        let mut block = big_endian_block();
+        let back = exif::from_bytes(&block).expect("parses");
+        assert_eq!(back.model.as_deref(), Some("NIKON D850"));
+        assert_eq!(back.date_time_original.as_deref(), Some("2026:10:06 14:03:11"));
+        assert_eq!(back.exposure_time, Some((1, 250)));
+        assert_eq!(back.f_number, Some(2.8));
+        assert_eq!(back.iso, Some(800));
+        assert_eq!(back.orientation, 6);
+
+        assert!(patch_for_export(&mut block, 2048, 1365));
+        assert!(block.starts_with(b"MM"), "stays big-endian");
+        let back = exif::from_bytes(&block).unwrap();
+        assert_eq!(back.orientation, 1);
+        assert_eq!(back.model.as_deref(), Some("NIKON D850"), "the rest is untouched");
+        let (t, first) = Tiff::parse(&block).unwrap();
+        let p = t.uint(t.read_ifd(first).unwrap().get(EXIF_IFD).unwrap(), 0).unwrap() as u32;
+        let ex = t.read_ifd(p).unwrap();
+        assert_eq!(t.uint(ex.get(PIXEL_X).unwrap(), 0), Some(2048));
+        assert_eq!(t.uint(ex.get(PIXEL_Y).unwrap(), 0), Some(1365));
+
+        assert!(set_orientation(&mut block, 8));
+        assert_eq!(exif::from_bytes(&block).unwrap().orientation, 8);
+    }
 }
