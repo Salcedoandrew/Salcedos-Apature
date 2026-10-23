@@ -176,8 +176,11 @@ pub struct PreviewView {
     /// Loupe under the pointer (L) in fit mode.
     pub loupe: bool,
     /// One magnification for 1:1 and the loupe: 1.0 = one image pixel per
-    /// screen pixel, up to 4.0. ⌘-scroll or ⌘= / ⌘- change it.
+    /// screen pixel, ¼× to 8×. ⌘-scroll or the Zoom slider change it.
     pub zoom: f32,
+    /// Lock scrolling (Zoom section): keep the pan when moving to another
+    /// photo while zoomed; off re-centres each photo.
+    pub lock_scroll: bool,
     /// Last view position drawn and the direction of travel (+1 / -1),
     /// for preloading ahead.
     pub last_pos: Option<usize>,
@@ -249,6 +252,7 @@ impl Default for PreviewView {
             crop: None,
             loupe: false,
             zoom: 1.0,
+            lock_scroll: false,
             zoom_since: None,
             zoom_from: None,
             last_rect: None,
@@ -3031,6 +3035,22 @@ impl App {
                 self.scroll_to_cursor = true;
             }
         });
+    }
+
+    /// Zoom on or off at once, without the ease (Zoom section and click to
+    /// zoom, as in Photo Mechanic). On keeps the last pan and level unless
+    /// `at` (an image point 0..1) says where to centre.
+    pub fn set_zoom(&mut self, on: bool, at: Option<egui::Vec2>) {
+        if on {
+            if let Some(a) = at {
+                self.pv.center = egui::Vec2::new(a.x.clamp(0.0, 1.0), a.y.clamp(0.0, 1.0));
+            }
+            self.pv.mode = ZoomMode::OneToOne;
+        } else {
+            self.pv.mode = ZoomMode::Fit;
+        }
+        self.pv.zoom_since = None;
+        self.pv.zoom_from = None;
     }
 
     /// Toggle 1:1 and fit. `at` is the image point (0..1) to zoom into (the

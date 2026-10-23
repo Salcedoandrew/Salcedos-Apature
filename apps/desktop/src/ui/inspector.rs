@@ -60,6 +60,75 @@ fn section<R>(
     ui.add_space(S2);
 }
 
+/// Photo Mechanic's Zoom control: a "Zoom:" checkbox, a slider over the
+/// ¼–8× steps with tick labels, and Lock scrolling. Live in Preview only.
+fn zoom_section(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
+    use super::preview::{zoom_at_step, zoom_step, ZOOM_LABELS, ZOOM_STEPS};
+    use crate::app::ZoomMode;
+    let in_preview = app.workspace == crate::commands::Workspace::Preview;
+    let zoomed = in_preview && app.pv.mode == ZoomMode::OneToOne;
+    let mut on = zoomed;
+    let mut step = zoom_step(app.pv.zoom);
+    let before = step;
+    let mut lock = app.pv.lock_scroll;
+    section(ui, t, "Zoom", "", |ui| {
+        ui.add_enabled_ui(in_preview, |ui| {
+            ui.checkbox(&mut on, RichText::new("Zoom:").size(11.5).color(t.text));
+            let x_w = 26.0;
+            let w = ui.available_width() - x_w;
+            let resp = ui
+                .horizontal(|ui| {
+                    ui.add_space(x_w - ui.spacing().item_spacing.x);
+                    ui.spacing_mut().slider_width = w;
+                    ui.add(
+                        egui::Slider::new(&mut step, 0..=ZOOM_STEPS.len() - 1)
+                            .show_value(false)
+                            .step_by(1.0),
+                    )
+                })
+                .inner;
+            // Tick labels under the slider, at each step's handle position.
+            let r = resp.rect;
+            let inset = r.height() / 2.5;
+            let (row, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 14.0), egui::Sense::hover());
+            let color = if in_preview { t.text2 } else { t.muted };
+            let font = egui::FontId::monospace(10.0);
+            ui.painter().text(
+                Pos2::new(row.left(), row.center().y),
+                egui::Align2::LEFT_CENTER,
+                "x:",
+                font.clone(),
+                color,
+            );
+            let n = (ZOOM_LABELS.len() - 1) as f32;
+            for (i, l) in ZOOM_LABELS.iter().enumerate() {
+                let x = r.left() + inset + (r.width() - 2.0 * inset) * i as f32 / n;
+                ui.painter().text(
+                    Pos2::new(x, row.center().y),
+                    egui::Align2::CENTER_CENTER,
+                    l,
+                    font.clone(),
+                    color,
+                );
+            }
+            ui.add_enabled(
+                zoomed,
+                egui::Checkbox::new(&mut lock, RichText::new("Lock scrolling").size(11.5)),
+            );
+        });
+    });
+    app.pv.lock_scroll = lock;
+    if step != before {
+        app.pv.zoom = zoom_at_step(step);
+        // Moving the slider zooms to that level, like Photo Mechanic.
+        on = in_preview;
+    }
+    if on != zoomed {
+        app.set_zoom(on, None);
+    }
+}
+
 pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     let mut cmds: Vec<Command> = Vec::new();
     let resp = egui::SidePanel::right("inspector")
@@ -222,6 +291,8 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                         kv(ui, t, &rows);
                         let _ = Rating(0);
                     });
+
+                    zoom_section(app, ui, t);
 
                     let targets = app.selection.targets(idx);
                     let mixed = |f: &dyn Fn(&apature_core::Marks) -> i32| {

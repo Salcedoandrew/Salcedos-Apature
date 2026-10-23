@@ -11,6 +11,27 @@ use super::tokens::{Theme, S3, S5};
 use crate::app::{App, ZoomMode};
 use crate::selection::Mods;
 
+/// Photo Mechanic's zoom steps (× of 1:1) and their tick labels.
+pub const ZOOM_STEPS: [f32; 11] = [0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+pub const ZOOM_LABELS: [&str; 11] = ["¼", "½", "¾", "1", "2", "3", "4", "5", "6", "7", "8"];
+pub const ZOOM_MIN: f32 = 0.25;
+pub const ZOOM_MAX: f32 = 8.0;
+
+/// The step nearest a magnification (⌘-scroll can land between steps).
+pub fn zoom_step(zoom: f32) -> usize {
+    ZOOM_STEPS
+        .iter()
+        .enumerate()
+        .min_by(|a, b| (a.1 - zoom).abs().total_cmp(&(b.1 - zoom).abs()))
+        .map(|(i, _)| i)
+        .unwrap_or(3)
+}
+
+/// The magnification of step `i` (clamped to the last step).
+pub fn zoom_at_step(i: usize) -> f32 {
+    ZOOM_STEPS[i.min(ZOOM_STEPS.len() - 1)]
+}
+
 /// Largest preview we ask for at 1:1 (also bounded by the GPU).
 const FULL_CAP: u32 = 16384;
 
@@ -22,6 +43,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
     };
     let compare = panes.len() > 1;
     let rects = split(rect, panes.len());
+    // Moving to another photo while zoomed re-centres it unless Lock
+    // scrolling is on (compare panes always share one pan).
+    if !compare && app.pv.mode == ZoomMode::OneToOne && !app.pv.lock_scroll {
+        if app.pv.last_pos.is_some_and(|last| last != app.cursor_pos()) {
+            app.pv.center = Vec2::splat(0.5);
+        }
+    }
 
     ui.painter().rect_filled(rect, CornerRadius::ZERO, t.photo);
     let mut focus_click: Option<usize> = None;
@@ -291,7 +319,7 @@ fn draw_pane(
                         (pos.y - shown.min.y) / shown.height(),
                     );
                     let side = 260.0_f32;
-                    let full_pts = size / ppp * app.pv.zoom;
+                    let full_pts = size / ppp * app.pv.zoom.max(1.0);
                     let half = Vec2::new(side / full_pts.x, side / full_pts.y) * 0.5;
                     let uv = Rect::from_min_max(
                         Pos2::new((f.x - half.x).max(0.0), (f.y - half.y).max(0.0)),
@@ -344,26 +372,49 @@ fn draw_pane(
         if resp.hovered() && ui.input(|i| i.modifiers.command) {
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
             if scroll != 0.0 {
-                app.pv.zoom = (app.pv.zoom * (1.0 + scroll * 0.01)).clamp(1.0, 4.0);
+                app.pv.zoom = (app.pv.zoom * (1.0 + scroll * 0.01)).clamp(ZOOM_MIN, ZOOM_MAX);
             }
         }
-        if !cropping
-            && app.pv.mode == ZoomMode::OneToOne
-            && (focused || !compare)
-            && !ui.input(|i| i.modifiers.command)
-        {
+        let zoomed = app.pv.mode == ZoomMode::OneToOne;
+        let pannable = size_pts.x > rect.width() + 0.5 || size_pts.y > rect.height() + 0.5;
+        // Like Photo Mechanic: pan by click-drag only (open hand, closed
+        // while dragging); a click without a drag zooms in on that point
+        // (magnifier +) or back to fit (magnifier −). egui tells a click
+        // from a drag by a few points of movement. All of it is instant.
+        if !cropping && zoomed && (focused || !compare) && !ui.input(|i| i.modifiers.command) {
             if resp.dragged() {
                 let d = resp.drag_delta();
                 app.pv.center -= Vec2::new(d.x / size_pts.x, d.y / size_pts.y);
             }
-            if resp.hovered() {
-                let scroll = ui.input(|i| i.raw_scroll_delta);
-                if scroll != Vec2::ZERO {
-                    app.pv.center -= Vec2::new(scroll.x / size_pts.x, scroll.y / size_pts.y);
+        }
+        if !cropping && !compare {
+            if resp.dragged() && zoomed {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            } else if resp.hovered() {
+                let over_image = resp.hover_pos().is_some_and(|p| shown.contains(p));
+                if zoomed && pannable {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                } else if zoomed {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomOut);
+                } else if over_image {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
+                }
+            }
+            if resp.clicked() {
+                if zoomed {
+                    app.set_zoom(false, None);
+                } else if let Some(pos) = resp.interact_pointer_pos().filter(|p| shown.contains(*p))
+                {
+                    let at = Vec2::new(
+                        (pos.x - shown.min.x) / shown.width(),
+                        (pos.y - shown.min.y) / shown.height(),
+                    );
+                    app.set_zoom(true, Some(at));
                 }
             }
         }
-        if !cropping && resp.double_clicked() {
+        // Compare keeps double-click (a single click focuses a pane).
+        if !cropping && compare && resp.double_clicked() {
             let at = resp
                 .interact_pointer_pos()
                 .map(|pos| {
@@ -696,6 +747,29 @@ mod tests {
 
     fn pane() -> Rect {
         Rect::from_min_size(Pos2::new(0.0, 30.0), Vec2::new(1512.0, 900.0))
+    }
+
+    #[test]
+    fn zoom_steps_snap_and_map() {
+        assert_eq!(ZOOM_STEPS.len(), ZOOM_LABELS.len());
+        assert_eq!(zoom_step(1.0), 3);
+        assert_eq!(zoom_step(0.25), 0);
+        assert_eq!(zoom_step(0.1), 0);
+        assert_eq!(zoom_step(0.6), 1);
+        assert_eq!(zoom_step(0.7), 2);
+        assert_eq!(zoom_step(1.4), 3);
+        assert_eq!(zoom_step(1.6), 4);
+        assert_eq!(zoom_step(8.0), 10);
+        assert_eq!(zoom_step(20.0), 10);
+        assert_eq!(zoom_at_step(0), 0.25);
+        assert_eq!(zoom_at_step(3), 1.0);
+        assert_eq!(zoom_at_step(10), 8.0);
+        assert_eq!(zoom_at_step(99), 8.0);
+        for i in 0..ZOOM_STEPS.len() {
+            assert_eq!(zoom_step(zoom_at_step(i)), i);
+        }
+        assert_eq!(ZOOM_LABELS[0], "¼");
+        assert_eq!(ZOOM_LABELS[3], "1");
     }
 
     #[test]
