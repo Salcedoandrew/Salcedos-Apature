@@ -459,33 +459,27 @@ fn draw_pane(
     line2.push(zoom_label);
     let font1 = if compare { 11.0 } else { 12.0 };
     let font2 = if compare { 10.0 } else { 11.0 };
-    // Text sits on a soft plate so it reads over any photo.
-    let plate = Rect::from_min_size(
-        rect.left_top() + Vec2::new(S3 - 4.0, S3 - 4.0),
-        Vec2::new(
-            (line1.chars().count().max(line2.join("   ").chars().count()) as f32) * 6.6 + 16.0,
-            40.0,
-        ),
+    // Text sits on a soft plate so it reads over any photo. The plate is
+    // sized from the laid-out text (not a per-character guess, which ran
+    // short for the 12 pt first line) with the same padding on every side.
+    const PAD: f32 = 8.0;
+    let origin = rect.left_top() + Vec2::new(S3 + 2.0, S3);
+    let g1 = p.layout_no_wrap(line1, FontId::monospace(font1), Color32::WHITE);
+    let g2 = p.layout_no_wrap(
+        line2.join("   "),
+        FontId::monospace(font2),
+        Color32::from_white_alpha(200),
     );
+    let line2_y = 18.0;
+    let text = Vec2::new(g1.size().x.max(g2.size().x), line2_y + g2.size().y);
+    let plate = Rect::from_min_size(origin - Vec2::splat(PAD), text + Vec2::splat(PAD * 2.0));
     p.rect_filled(
         plate.intersect(rect),
         CornerRadius::same(4),
         Color32::from_black_alpha(if t.dark { 110 } else { 150 }),
     );
-    p.text(
-        rect.left_top() + Vec2::new(S3 + 2.0, S3),
-        Align2::LEFT_TOP,
-        line1,
-        FontId::monospace(font1),
-        Color32::WHITE,
-    );
-    p.text(
-        rect.left_top() + Vec2::new(S3 + 2.0, S3 + 18.0),
-        Align2::LEFT_TOP,
-        line2.join("   "),
-        FontId::monospace(font2),
-        Color32::from_white_alpha(200),
-    );
+    p.galley(origin, g1, Color32::WHITE);
+    p.galley(origin + Vec2::new(0.0, line2_y), g2, Color32::WHITE);
     if let Some(c) = t.class_color(&app.scheme, m.color_class) {
         p.rect_filled(
             Rect::from_min_size(rect.left_top(), Vec2::new(4.0, rect.height())),
