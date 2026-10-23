@@ -17,6 +17,246 @@ pub struct ExifSummary {
     pub f_number: Option<f64>,
     pub iso: Option<u32>,
     pub focal_length_mm: Option<f64>,
+    /// Firmware, exposure program, white balance and the like, already
+    /// human-readable; only the ones the file has.
+    pub details: CameraDetails,
+}
+
+/// Photo Mechanic-style camera fields beyond the exposure line. ISO,
+/// aperture, shutter and focal length are on `exposure_line` already.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CameraDetails {
+    pub firmware: Option<String>,
+    pub frame: Option<String>,
+    pub exposure_comp: Option<String>,
+    pub flash_comp: Option<String>,
+    pub program: Option<String>,
+    pub focus_mode: Option<String>,
+    pub white_balance: Option<String>,
+    pub icc_profile: Option<String>,
+    pub contrast: Option<String>,
+    pub sharpening: Option<String>,
+    pub quality: Option<String>,
+}
+
+impl CameraDetails {
+    /// (label, value) for each field present, in Photo Mechanic's order.
+    pub fn rows(&self) -> Vec<(&'static str, String)> {
+        [
+            ("Firmware", &self.firmware),
+            ("Frame #", &self.frame),
+            ("Exp. Comp.", &self.exposure_comp),
+            ("Flash Comp.", &self.flash_comp),
+            ("Program", &self.program),
+            ("Focus Mode", &self.focus_mode),
+            ("White Bal.", &self.white_balance),
+            ("ICC Profile", &self.icc_profile),
+            ("Contrast", &self.contrast),
+            ("Sharpening", &self.sharpening),
+            ("Quality", &self.quality),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| v.clone().map(|v| (k, v)))
+        .collect()
+    }
+}
+
+// Standard tags read for the details (not needed elsewhere, so kept here).
+const SOFTWARE: u16 = 0x0131;
+const EXPOSURE_PROGRAM: u16 = 0x8822;
+const EXPOSURE_BIAS: u16 = 0x9204;
+const IMAGE_NUMBER: u16 = 0x9211;
+const COLOR_SPACE: u16 = 0xA001;
+const INTEROP_IFD: u16 = 0xA005;
+const WHITE_BALANCE: u16 = 0xA403;
+const CONTRAST: u16 = 0xA408;
+const SHARPNESS: u16 = 0xA40A;
+
+/// "-0.3 EV", "+1 EV", "0 EV".
+pub fn format_ev(v: f64) -> String {
+    let r = (v * 10.0).round() / 10.0;
+    if r == 0.0 {
+        "0 EV".into()
+    } else if r.fract() == 0.0 {
+        format!("{r:+.0} EV")
+    } else {
+        format!("{r:+.1} EV")
+    }
+}
+
+/// Canon's EV encoding (1/32 steps, with 0x0c and 0x14 meaning 1/3 and 2/3).
+pub fn canon_ev(raw: i16) -> f64 {
+    let sign = if raw < 0 { -1.0 } else { 1.0 };
+    let v = (raw as i32).abs();
+    let frac = v & 0x1f;
+    let whole = (v - frac) as f64;
+    let frac = match frac {
+        0x0c => 32.0 / 3.0,
+        0x14 => 64.0 / 3.0,
+        f => f as f64,
+    };
+    sign * (whole + frac) / 32.0
+}
+
+/// EXIF ExposureProgram.
+pub fn exposure_program(v: u64) -> Option<&'static str> {
+    Some(match v {
+        1 => "Manual",
+        2 => "Program AE",
+        3 => "Aperture-priority AE",
+        4 => "Shutter speed priority AE",
+        5 => "Creative (Slow speed)",
+        6 => "Action (High speed)",
+        7 => "Portrait",
+        8 => "Landscape",
+        9 => "Bulb",
+        _ => return None,
+    })
+}
+
+/// EXIF WhiteBalance (Auto or Manual only).
+pub fn exif_white_balance(v: u64) -> Option<&'static str> {
+    match v {
+        0 => Some("Auto"),
+        1 => Some("Manual"),
+        _ => None,
+    }
+}
+
+/// EXIF Contrast (`sharpness` false) or Sharpness (true): 0 Normal, 1 Low/Soft, 2 High/Hard.
+pub fn exif_level(v: u64, sharpness: bool) -> Option<&'static str> {
+    match (v, sharpness) {
+        (0, _) => Some("Normal"),
+        (1, false) => Some("Low"),
+        (2, false) => Some("High"),
+        (1, true) => Some("Soft"),
+        (2, true) => Some("Hard"),
+        _ => None,
+    }
+}
+
+/// EXIF ColorSpace / Canon ColorSpace: 1 sRGB, 2 Adobe RGB.
+pub fn color_space(v: u64) -> Option<&'static str> {
+    match v {
+        1 => Some("sRGB"),
+        2 => Some("Adobe RGB"),
+        0xFFFF => Some("Uncalibrated"),
+        _ => None,
+    }
+}
+
+/// Canon CameraSettings FocusMode.
+pub fn canon_focus_mode(v: i16) -> Option<&'static str> {
+    Some(match v {
+        0 => "One-shot AF",
+        1 => "AI Servo AF",
+        2 => "AI Focus AF",
+        3 | 6 => "Manual Focus",
+        4 => "Single",
+        5 => "Continuous",
+        16 => "Pan Focus",
+        256 => "One-shot AF (Live View)",
+        257 => "AI Servo AF (Live View)",
+        258 => "AI Focus AF (Live View)",
+        512 => "Movie Snap Focus",
+        519 => "Movie Servo AF",
+        _ => return None,
+    })
+}
+
+/// Canon CameraSettings Quality.
+pub fn canon_quality(v: i16) -> Option<&'static str> {
+    Some(match v {
+        1 => "Economy",
+        2 => "Normal",
+        3 => "Fine",
+        4 => "RAW",
+        5 => "Superfine",
+        7 => "CRAW",
+        130 => "Light (RAW)",
+        131 => "Standard (RAW)",
+        _ => return None,
+    })
+}
+
+/// Canon ShotInfo WhiteBalance.
+pub fn canon_white_balance(v: i16) -> Option<&'static str> {
+    Some(match v {
+        0 => "Auto",
+        1 => "Daylight",
+        2 => "Cloudy",
+        3 => "Tungsten",
+        4 => "Fluorescent",
+        5 => "Flash",
+        6 => "Custom",
+        7 => "Black & White",
+        8 => "Shade",
+        9 => "Manual Temperature (Kelvin)",
+        14 => "Daylight Fluorescent",
+        15 => "Custom 1",
+        16 => "Custom 2",
+        17 => "Underwater",
+        _ => return None,
+    })
+}
+
+/// Canon's signed picture-style levels: 0 Normal, else "+1" / "-1"; 0x7fff is n/a.
+pub fn canon_level(v: i16) -> Option<String> {
+    match v {
+        i16::MIN..=-100 | 100..=i16::MAX => None,
+        0 => Some("Normal".into()),
+        v if v > 0 => Some(format!("+{v}")),
+        v => Some(v.to_string()),
+    }
+}
+
+/// Canon picture-style strength (ProcessingInfo), "0".."10"; out of range is n/a.
+pub fn canon_strength(v: i16) -> Option<String> {
+    (0..=10).contains(&v).then(|| v.to_string())
+}
+
+/// Canon FileNumber (folder × 10000 + file) → the file's 4-digit frame, "0955".
+pub fn canon_frame(file_number: u64) -> Option<String> {
+    (file_number > 0).then(|| format!("{:04}", file_number % 10_000))
+}
+
+/// "Firmware Version 1.0.2" → "1.0.2"; other text as written.
+pub fn firmware_text(s: &str) -> String {
+    let s = s.trim();
+    for p in ["Firmware Version ", "Firmware Ver.", "Firmware "] {
+        if let Some(rest) = s.strip_prefix(p) {
+            return rest.trim().to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// IFD0 Software is the camera firmware only when no editor wrote it.
+pub fn software_is_firmware(s: &str) -> bool {
+    let l = s.to_lowercase();
+    let editors = [
+        "adobe",
+        "lightroom",
+        "photoshop",
+        "capture one",
+        "gimp",
+        "darktable",
+        "rawtherapee",
+        "photo mechanic",
+        "apature",
+        "windows",
+        "mac os",
+        "macos",
+        "picasa",
+        "affinity",
+        "luminar",
+        "dxo",
+        "snapseed",
+        "digital photo professional",
+        "aftershoot",
+        "imagemagick",
+    ];
+    !l.is_empty() && l.chars().any(|c| c.is_ascii_digit()) && !editors.iter().any(|e| l.contains(e))
 }
 
 impl ExifSummary {
@@ -117,6 +357,10 @@ fn from_cr3(data: &[u8]) -> Option<ExifSummary> {
     let exif = boxed(b"CMT2")?;
     let (t, first) = Tiff::parse(exif).ok()?;
     read_exif_ifd(&t, first, &mut s);
+    // CMT3 is the Canon maker notes as their own TIFF stream.
+    if let Some((t, first)) = boxed(b"CMT3").and_then(|b| Tiff::parse(b).ok()) {
+        read_canon_makernote(&t, first, &mut s);
+    }
     Some(s)
 }
 
@@ -152,6 +396,11 @@ fn from_tiff(data: &[u8]) -> Option<ExifSummary> {
             s.orientation = o as u32;
         }
     }
+    s.details.firmware = ifd0
+        .get(SOFTWARE)
+        .and_then(|e| t.ascii(e))
+        .filter(|v| software_is_firmware(v))
+        .map(|v| firmware_text(&v));
     if let Some(exif_off) = ifd0.get(tag::EXIF_IFD).and_then(|e| t.uint(e, 0)) {
         read_exif_ifd(&t, exif_off as u32, &mut s);
     }
@@ -184,6 +433,118 @@ fn read_exif_ifd(t: &Tiff, at: u32, s: &mut ExifSummary) {
             .get(tag::LENS_MODEL)
             .and_then(|e| t.ascii(e))
             .filter(|v| !v.is_empty());
+        read_exif_details(t, &exif, s);
+        // Canon maker notes are a plain IFD with offsets from the TIFF start.
+        if is_canon(s) {
+            if let Some(e) = exif.get(tag::MAKER_NOTE) {
+                if let Ok(off) = t.u32(e.pos) {
+                    read_canon_makernote(t, off, s);
+                }
+            }
+        }
+    }
+}
+
+fn is_canon(s: &ExifSummary) -> bool {
+    s.make
+        .as_deref()
+        .is_some_and(|m| m.to_lowercase().starts_with("canon"))
+}
+
+/// Exposure comp, program, white balance, colour space, contrast,
+/// sharpness and image number from the Exif IFD.
+fn read_exif_details(t: &Tiff, exif: &apature_core::tiff::Ifd, s: &mut ExifSummary) {
+    let d = &mut s.details;
+    let u = |tg: u16| exif.get(tg).and_then(|e| t.uint(e, 0));
+    if let Some((n, den)) = exif
+        .get(EXPOSURE_BIAS)
+        .and_then(|e| t.rational(e, 0))
+        .filter(|(_, den)| *den != 0)
+    {
+        d.exposure_comp = Some(format_ev(n as i32 as f64 / den as i32 as f64));
+    }
+    d.program = u(EXPOSURE_PROGRAM)
+        .and_then(exposure_program)
+        .map(Into::into);
+    d.white_balance = u(WHITE_BALANCE)
+        .and_then(exif_white_balance)
+        .map(Into::into);
+    d.contrast = u(CONTRAST)
+        .and_then(|v| exif_level(v, false))
+        .map(Into::into);
+    d.sharpening = u(SHARPNESS)
+        .and_then(|v| exif_level(v, true))
+        .map(Into::into);
+    d.frame = u(IMAGE_NUMBER).map(|v| format!("{v:04}"));
+    d.icc_profile = u(COLOR_SPACE).and_then(color_space).map(Into::into);
+    // Uncalibrated with interop index R03 is how cameras mark Adobe RGB.
+    if d.icc_profile.as_deref() == Some("Uncalibrated") {
+        let r03 = u(INTEROP_IFD)
+            .and_then(|off| t.read_ifd(off as u32).ok())
+            .and_then(|i| i.get(0x0001).and_then(|e| t.ascii(e)))
+            .is_some_and(|v| v == "R03");
+        if r03 {
+            d.icc_profile = Some("Adobe RGB".into());
+        }
+    }
+}
+
+/// Firmware, frame, focus mode, quality, white balance, flash comp (and
+/// what the Exif IFD lacked) from a Canon maker-note IFD at `at`.
+fn read_canon_makernote(t: &Tiff, at: u32, s: &mut ExifSummary) {
+    let Ok(mn) = t.read_ifd(at) else { return };
+    let d = &mut s.details;
+    let short = |tg: u16, i: usize| -> Option<i16> {
+        mn.get(tg)
+            .and_then(|e| t.uint(e, i))
+            .map(|v| v as u16 as i16)
+    };
+    if let Some(fw) = mn
+        .get(0x0007)
+        .and_then(|e| t.ascii(e))
+        .filter(|v| !v.is_empty())
+    {
+        d.firmware = Some(firmware_text(&fw));
+    }
+    if d.frame.is_none() {
+        d.frame = mn
+            .get(0x0008)
+            .and_then(|e| t.uint(e, 0))
+            .and_then(canon_frame);
+    }
+    // CameraSettings (0x0001): 3 quality, 7 focus mode, 13 contrast, 15 sharpness.
+    if let Some(q) = short(0x0001, 3).and_then(canon_quality) {
+        d.quality = Some(q.into());
+    }
+    if let Some(f) = short(0x0001, 7).and_then(canon_focus_mode) {
+        d.focus_mode = Some(f.into());
+    }
+    if d.contrast.is_none() {
+        d.contrast = short(0x0001, 13).and_then(canon_level);
+    }
+    if d.sharpening.is_none() {
+        // ProcessingInfo (0x00a0) 2 is the picture style's sharpness
+        // strength on newer bodies (0 = none), shown as the number.
+        d.sharpening = short(0x00a0, 2)
+            .and_then(canon_strength)
+            .or_else(|| short(0x0001, 15).and_then(canon_level));
+    }
+    // ShotInfo (0x0004): 6 exposure comp, 7 white balance, 15 flash comp.
+    if d.exposure_comp.is_none() {
+        d.exposure_comp = short(0x0004, 6).map(|v| format_ev(canon_ev(v)));
+    }
+    if let Some(wb) = short(0x0004, 7).and_then(canon_white_balance) {
+        d.white_balance = Some(wb.into());
+    }
+    d.flash_comp = short(0x0004, 15).map(|v| format_ev(canon_ev(v)));
+    if d.icc_profile.is_none() || d.icc_profile.as_deref() == Some("Uncalibrated") {
+        if let Some(c) = mn
+            .get(0x00b4)
+            .and_then(|e| t.uint(e, 0))
+            .and_then(color_space)
+        {
+            d.icc_profile = Some(c.into());
+        }
     }
 }
 
@@ -326,5 +687,66 @@ mod tests {
         let r = from_bytes(&raf).unwrap();
         assert_eq!(r.orientation, 6);
         assert_eq!(r.model.as_deref(), Some("Z 6_2"));
+    }
+
+    #[test]
+    fn detail_value_helpers() {
+        assert_eq!(format_ev(-1.0 / 3.0), "-0.3 EV");
+        assert_eq!(format_ev(2.0 / 3.0), "+0.7 EV");
+        assert_eq!(format_ev(1.0), "+1 EV");
+        assert_eq!(format_ev(0.0), "0 EV");
+        assert_eq!(format_ev(-0.01), "0 EV");
+        assert!((canon_ev(-12) + 1.0 / 3.0).abs() < 1e-9);
+        assert!((canon_ev(0x14) - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(canon_ev(32), 1.0);
+        assert_eq!(canon_ev(0), 0.0);
+        assert_eq!(exposure_program(2), Some("Program AE"));
+        assert_eq!(exposure_program(1), Some("Manual"));
+        assert_eq!(exposure_program(0), None);
+        assert_eq!(exif_white_balance(0), Some("Auto"));
+        assert_eq!(exif_level(0, false), Some("Normal"));
+        assert_eq!(exif_level(2, true), Some("Hard"));
+        assert_eq!(exif_level(7, true), None);
+        assert_eq!(color_space(1), Some("sRGB"));
+        assert_eq!(color_space(2), Some("Adobe RGB"));
+        assert_eq!(canon_focus_mode(1), Some("AI Servo AF"));
+        assert_eq!(canon_focus_mode(6), Some("Manual Focus"));
+        assert_eq!(canon_quality(4), Some("RAW"));
+        assert_eq!(canon_quality(-1), None);
+        assert_eq!(canon_white_balance(1), Some("Daylight"));
+        assert_eq!(canon_level(0).as_deref(), Some("Normal"));
+        assert_eq!(canon_level(2).as_deref(), Some("+2"));
+        assert_eq!(canon_level(-1).as_deref(), Some("-1"));
+        assert_eq!(canon_level(0x7fff), None);
+        assert_eq!(canon_strength(0).as_deref(), Some("0"));
+        assert_eq!(canon_strength(0x7fff), None);
+        assert_eq!(canon_frame(1_000_955).as_deref(), Some("0955"));
+        assert_eq!(canon_frame(0), None);
+        assert_eq!(firmware_text("Firmware Version 1.0.2"), "1.0.2");
+        assert_eq!(firmware_text("Ver.1.10"), "Ver.1.10");
+        assert!(software_is_firmware("Ver.1.10"));
+        assert!(!software_is_firmware(
+            "Adobe Lightroom Classic 13.2 (Macintosh)"
+        ));
+        assert!(!software_is_firmware("Picture Style Editor"));
+    }
+
+    #[test]
+    fn detail_rows_skip_missing_and_keep_order() {
+        let d = CameraDetails {
+            quality: Some("RAW".into()),
+            firmware: Some("1.0.2".into()),
+            program: Some("Manual".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            d.rows(),
+            vec![
+                ("Firmware", "1.0.2".to_string()),
+                ("Program", "Manual".to_string()),
+                ("Quality", "RAW".to_string()),
+            ]
+        );
+        assert!(CameraDetails::default().rows().is_empty());
     }
 }

@@ -320,6 +320,7 @@ mod tests {
             f_number: Some(2.8),
             iso: Some(400),
             focal_length_mm: Some(70.0),
+            ..Default::default()
         }
     }
 

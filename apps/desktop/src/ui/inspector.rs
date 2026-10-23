@@ -132,9 +132,11 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                     ui.add_space(S4 - S2);
 
                     section(ui, t, "Info", "", |ui| {
+                        // One grid for every row, so the gaps are even: EXIF,
+                        // then camera details, then the files.
+                        let mut rows: Vec<(&str, String)> = Vec::new();
                         match &app.exif[idx] {
                             Some(e) => {
-                                let mut rows = Vec::new();
                                 let cam = e.camera_line();
                                 if !cam.is_empty() {
                                     rows.push(("Camera", cam));
@@ -149,23 +151,21 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                                 if let Some(d) = &e.date_time_original {
                                     rows.push(("Taken", d.clone()));
                                 }
+                                rows.extend(e.details.rows());
                                 if rows.is_empty() {
                                     ui.label(
                                         RichText::new("No EXIF in this file")
                                             .size(11.0)
                                             .color(t.muted),
                                     );
-                                } else {
-                                    kv(ui, t, &rows);
                                 }
                             }
                             None => {
                                 ui.label(RichText::new("reading…").size(11.0).color(t.muted));
                             }
                         }
-                        // File rows (formerly the Files section), after Taken.
+                        // File rows (formerly the Files section).
                         let it = &app.items[idx];
-                        let mut rows = Vec::new();
                         for v in it.variants() {
                             let k = match v.kind {
                                 Kind::Raw => "RAW",
