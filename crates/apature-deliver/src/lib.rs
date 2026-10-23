@@ -57,6 +57,8 @@ pub enum DeliverError {
     Folder(String, String),
     #[error("{0}: {1}")]
     File(PathBuf, String),
+    #[error("SFTP server {0}: {1}")]
+    HostKey(String, String),
 }
 
 #[derive(Clone, Debug)]
@@ -208,8 +210,23 @@ fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverErro
             let mut sess = ssh2::Session::new()
                 .map_err(|e| DeliverError::Connect(addr.clone(), e.to_string()))?;
             sess.set_tcp_stream(tcp);
+            let known = std::env::var_os("HOME")
+                .map(|h| Path::new(&h).join(".ssh/known_hosts"))
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            // Ask the server for the kind of key known_hosts has for it, so
+            // the key `ssh` saved is the one we get to compare.
+            let algos = host_key_algorithms(&sess, &known, &target.host, target.port);
+            if !algos.is_empty() {
+                let _ = sess.method_pref(ssh2::MethodType::HostKey, &algos);
+            }
             sess.handshake()
                 .map_err(|e| DeliverError::Connect(addr.clone(), e.to_string()))?;
+            // Before any password or key goes out: is this the real server?
+            let (key, _) = sess.host_key().ok_or_else(|| {
+                DeliverError::HostKey(target.host.clone(), "sent no host key".into())
+            })?;
+            check_host_key(&sess, &known, &target.host, target.port, key, &target.user)?;
             match &target.key_file {
                 Some(key) => sess
                     .userauth_pubkey_file(
@@ -238,6 +255,81 @@ fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverErro
                 sftp,
             }))
         }
+    }
+}
+
+/// Host-key algorithms for the key types `known_hosts` lists for this
+/// host and port (hashed entries too), in OpenSSH's order; empty if none.
+fn host_key_algorithms(sess: &ssh2::Session, known_hosts: &str, host: &str, port: u16) -> String {
+    let mut types = Vec::new();
+    for line in known_hosts.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with('@') {
+            continue;
+        }
+        let Some(ty) = line.split_whitespace().nth(1) else { continue };
+        let Ok(mut one) = sess.known_hosts() else { continue };
+        // With a dummy key, a listed host reads as a mismatch, not unknown.
+        if one.read_str(line, ssh2::KnownHostFileKind::OpenSSH).is_ok()
+            && !matches!(one.check_port(host, port, &[0]), ssh2::CheckResult::NotFound)
+        {
+            types.push(ty.to_string());
+        }
+    }
+    const ORDER: [(&str, &str); 6] = [
+        ("ssh-ed25519", "ssh-ed25519"),
+        ("ecdsa-sha2-nistp256", "ecdsa-sha2-nistp256"),
+        ("ecdsa-sha2-nistp384", "ecdsa-sha2-nistp384"),
+        ("ecdsa-sha2-nistp521", "ecdsa-sha2-nistp521"),
+        ("ssh-rsa", "rsa-sha2-512,rsa-sha2-256,ssh-rsa"),
+        ("ssh-dss", "ssh-dss"),
+    ];
+    ORDER
+        .iter()
+        .filter(|(t, _)| types.iter().any(|x| x == t))
+        .map(|(_, a)| *a)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Check an SFTP server's host key against `known_hosts` text (the user's
+/// `~/.ssh/known_hosts`, the file `ssh` itself uses). Fails closed: a
+/// server that isn't listed, or whose key changed, is refused.
+fn check_host_key(
+    sess: &ssh2::Session,
+    known_hosts: &str,
+    host: &str,
+    port: u16,
+    key: &[u8],
+    user: &str,
+) -> Result<(), DeliverError> {
+    let err = |m: String| DeliverError::HostKey(host.to_string(), m);
+    let mut kh = sess.known_hosts().map_err(|e| err(e.to_string()))?;
+    for line in known_hosts.lines().map(str::trim) {
+        // Markers (@cert-authority, @revoked) and lines libssh2 can't read
+        // are skipped rather than failing the whole file.
+        if !line.is_empty() && !line.starts_with('#') && !line.starts_with('@') {
+            let _ = kh.read_str(line, ssh2::KnownHostFileKind::OpenSSH);
+        }
+    }
+    let ssh_cmd = if port == 22 {
+        format!("ssh {user}@{host}")
+    } else {
+        format!("ssh -p {port} {user}@{host}")
+    };
+    match kh.check_port(host, port, key) {
+        ssh2::CheckResult::Match => Ok(()),
+        ssh2::CheckResult::NotFound => Err(err(format!(
+            "not in ~/.ssh/known_hosts, so Apature can't confirm it is the real server. \
+             Connect once in Terminal with `{ssh_cmd}`, check the fingerprint with the desk, \
+             answer yes, then try again."
+        ))),
+        ssh2::CheckResult::Mismatch => Err(err(
+            "its host key does NOT match ~/.ssh/known_hosts. Someone may be intercepting \
+             the connection, or the server was reinstalled. Nothing was sent; check with \
+             the desk before updating known_hosts."
+                .into(),
+        )),
+        ssh2::CheckResult::Failure => Err(err("the host key could not be checked".into())),
     }
 }
 
@@ -320,6 +412,44 @@ pub fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sftp_host_keys_must_be_known_and_match() {
+        // ssh-ed25519 blobs with 32 bytes of 0x01 and of 0x02.
+        let blob = |b: u8| {
+            let mut v = vec![0, 0, 0, 11];
+            v.extend_from_slice(b"ssh-ed25519");
+            v.extend_from_slice(&[0, 0, 0, 32]);
+            v.extend_from_slice(&[b; 32]);
+            v
+        };
+        let known = "# comment\n\
+            @cert-authority *.example ssh-ed25519 AAAA\n\
+            desk.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB\n\
+            [alt.example]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB\n\
+            garbage line\n";
+        let sess = ssh2::Session::new().unwrap();
+        let check = |host: &str, port: u16, key: &[u8]| {
+            check_host_key(&sess, known, host, port, key, "me")
+        };
+        assert!(check("desk.example", 22, &blob(1)).is_ok());
+        assert!(check("alt.example", 2222, &blob(1)).is_ok());
+        let changed = check("desk.example", 22, &blob(2)).unwrap_err().to_string();
+        assert!(changed.contains("does NOT match"), "{changed}");
+        let unknown = check("other.example", 22, &blob(1)).unwrap_err().to_string();
+        assert!(unknown.contains("ssh me@other.example"), "{unknown}");
+        // The port matters: alt.example on 22 isn't the listed server.
+        assert!(check("alt.example", 22, &blob(1)).is_err());
+        // The algorithms asked for follow what is listed for that host.
+        assert_eq!(host_key_algorithms(&sess, known, "desk.example", 22), "ssh-ed25519");
+        assert_eq!(host_key_algorithms(&sess, known, "other.example", 22), "");
+        let rsa = "desk.example ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC7\n";
+        let both = format!("{known}{rsa}");
+        let a = host_key_algorithms(&sess, &both, "desk.example", 22);
+        assert!(a == "ssh-ed25519" || a.starts_with("ssh-ed25519,rsa-sha2-512"), "{a}");
+        // No known_hosts at all: refused.
+        assert!(check_host_key(&sess, "", "desk.example", 22, &blob(1), "me").is_err());
+    }
 
     #[test]
     fn remote_paths_join_with_slashes() {

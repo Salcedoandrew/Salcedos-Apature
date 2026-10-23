@@ -60,6 +60,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - Tab now shows and hides the sidebar in the separate Preview window too. That window never received the key and had no sidebar to show; now it has both, and Tab in the main window still toggles the catalog's sidebar.
 - After pressing Tab in Preview, the arrow keys change photos again straight away; before, a hidden control took the keyboard and you had to click the photo first. Tab now also shows and hides the right-hand panel (Info, Zoom, Marks) together with the sidebar, in Preview and in the catalog, as in Photo Mechanic: if either panel is showing, Tab hides both, otherwise it shows both. Preview keeps that for the session; the catalog saves it.
 - Exporting or extracting a photo whose caption, keywords or other fields are too long for one JPEG metadata block (about 64 KB) now fails with a clear message instead of writing a broken JPEG and reporting success. Normal-length captions are unaffected.
+- SFTP delivery now checks that it is talking to the real server before sending your password or key: the server's key must match the one in ~/.ssh/known_hosts (the file Terminal's ssh uses). An unknown server is refused with instructions to connect once in Terminal and confirm it; a changed key is refused with a warning and nothing is sent. FTP, FTPS and folder delivery are unchanged.
 
 ## [0.1.0] — 2026-10-21
 
