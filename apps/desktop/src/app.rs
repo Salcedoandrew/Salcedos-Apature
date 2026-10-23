@@ -277,6 +277,22 @@ pub struct CopyDialog {
     pub error: Option<String>,
 }
 
+/// Help › Report a Bug… (see `bug_report`).
+pub struct BugDialog {
+    pub report: crate::bug_report::BugReport,
+    pub include_info: bool,
+    /// Gathered when the dialog opens; shown read-only and sent only when
+    /// `include_info` is on.
+    pub info: crate::bug_report::SystemInfo,
+    /// What the last Submit or Copy did.
+    pub notice: Option<String>,
+    /// ⌘A reached the menu bar (Edit › Select All) while the dialog was
+    /// open: select the focused field's text, not every photo.
+    pub select_all: bool,
+    /// Put the cursor in Title on the first frame.
+    pub focus_title: bool,
+}
+
 pub struct RenameDialog {
     pub template: String,
     pub seq_start: u32,
@@ -502,6 +518,9 @@ pub struct App {
     /// Items awaiting confirmation to go to the Trash.
     pub trash_dialog: Option<Vec<usize>>,
     pub copy_dialog: Option<CopyDialog>,
+    /// Help › Report a Bug…. While it is open, menu keys never reach the
+    /// photos (see `update`).
+    pub bug_dialog: Option<BugDialog>,
     /// The copy in progress (or just finished), shown by the dialog or the status line.
     pub copy_running: Option<crate::copy_job::CopyRunning>,
     /// Open the destination as a contact sheet when the running copy ends.
@@ -650,6 +669,7 @@ impl App {
             meta_clip: None,
             trash_dialog: None,
             copy_dialog: None,
+            bug_dialog: None,
             copy_running: None,
             copy_open_after: false,
             copy_jobs: crate::copy_job::CopyJobs::new(cc.egui_ctx.clone()),
@@ -848,6 +868,17 @@ impl App {
             app.selection.all(&app.view.clone());
             app.open_copy_dialog();
         }
+        if launch.bug_dialog {
+            app.open_bug_dialog();
+            if let Some(d) = app.bug_dialog.as_mut() {
+                d.report = crate::bug_report::BugReport {
+                    title: "Crop guides vanish after rotating a photo".into(),
+                    happened: "After rotating a NEF with ] the crop guides (G) no longer draw.".into(),
+                    steps: "1. Open a folder of NEFs\n2. Press ] on a photo\n3. Press K, then G".into(),
+                    expected: "The rule-of-thirds guides over the crop.".into(),
+                };
+            }
+        }
         if launch.trash_dialog && !app.view.is_empty() {
             let picks: Vec<usize> = app.view.iter().take(2).copied().collect();
             app.trash_dialog = Some(picks);
@@ -1013,6 +1044,22 @@ impl App {
             picks.len(),
             if picks.len() == 1 { "" } else { "s" }
         );
+    }
+
+    /// Help › Report a Bug…; an open dialog keeps what was typed.
+    pub fn open_bug_dialog(&mut self) {
+        if self.bug_dialog.is_some() {
+            return;
+        }
+        let focused = self.items.get(self.cursor).map(|i| i.path().to_path_buf());
+        self.bug_dialog = Some(BugDialog {
+            report: Default::default(),
+            include_info: true,
+            info: crate::bug_report::SystemInfo::collect(self.prefs.shortcut_layout, focused.as_deref()),
+            notice: None,
+            select_all: false,
+            focus_title: true,
+        });
     }
 
     pub fn open_copy_dialog(&mut self) {
@@ -4136,6 +4183,7 @@ impl App {
                 }
             }
             Command::OpenAbout => self.about_open = true,
+            Command::ReportBug => self.open_bug_dialog(),
             Command::CheckUpdates => self.start_update_check(ctx, true),
             Command::OpenUpdate => {
                 if let Some(u) = &self.update_available {
@@ -4149,6 +4197,7 @@ impl App {
             }
             Command::TrashConfirm => self.trash_confirm(),
             Command::CloseDialog => {
+                self.bug_dialog = None;
                 self.rename_dialog = None;
                 self.trash_dialog = None;
                 self.close_copy_dialog();
@@ -4294,7 +4343,9 @@ impl App {
             }
             Command::Rotate(cw) => self.rotate(cw),
             Command::Escape => {
-                if self.pv.crop.is_some() {
+                if self.bug_dialog.is_some() {
+                    self.bug_dialog = None;
+                } else if self.pv.crop.is_some() {
                     self.dispatch_later = Some(Command::CropCancel);
                 } else if self.copy_dialog.is_some() {
                     self.close_copy_dialog();
@@ -4353,7 +4404,8 @@ impl App {
         if !crate::keyonce::handler_takes(has_menu, ctx.wants_keyboard_input() && !tree, false) {
             return out;
         }
-        if self.rename_dialog.is_some()
+        if self.bug_dialog.is_some()
+            || self.rename_dialog.is_some()
             || self.trash_dialog.is_some()
             || self.copy_dialog.is_some()
             || self.extract_dialog.is_some()
@@ -4771,6 +4823,19 @@ impl eframe::App for App {
         }
         let now = std::time::Instant::now();
         for c in self.platform.drain_menu() {
+            // The bug report's fields take typing: a ⌘ key the menu bar
+            // caught must not mark, select or move photos behind it. ⌘A
+            // selects the field's text; only window items still work.
+            if let Some(d) = self.bug_dialog.as_mut() {
+                match c {
+                    Command::SelectAll => d.select_all = true,
+                    Command::CloseWindow
+                    | Command::MinimizeWindow
+                    | Command::ShowMainWindow => self.dispatch(ctx, c),
+                    _ => {}
+                }
+                continue;
+            }
             if self.key_once.admit(&c, crate::keyonce::Source::Menu, now) {
                 self.dispatch(ctx, c);
             }

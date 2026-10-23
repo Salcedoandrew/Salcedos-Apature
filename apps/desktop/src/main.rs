@@ -1,5 +1,6 @@
 //! Apature desktop. `apature [folder] [--theme dark|light] [--screenshot out.png [--frames N]] [--copy-dialog]`
-//! (hidden: `--sidebar-shot` screenshots the folder tree from a scratch HOME)
+//! (hidden: `--sidebar-shot` screenshots the folder tree from a scratch HOME;
+//! `--bug-dialog` opens Help › Report a Bug… filled with an example)
 //! `--ingest-run --ingest-source <card> --ingest-dest <dir>` ingests headlessly and reports;
 //! `--export-run --export-dest <dir>` does the same for export.
 //!
@@ -7,6 +8,7 @@
 //! appearances without a bundled app or screen-recording permission.
 
 mod app;
+mod bug_report;
 mod commands;
 mod copy_job;
 mod deliver_job;
@@ -71,6 +73,8 @@ pub struct Launch {
     pub rename_dialog: bool,
     pub trash_dialog: bool,
     pub copy_dialog: bool,
+    /// Hidden: open Help › Report a Bug… with an example report (screenshots).
+    pub bug_dialog: bool,
     pub extract_dialog: bool,
     /// Hidden: screenshot the sidebar's folder tree (child of `sidebar_shot::run`).
     pub sidebar_shot: bool,
@@ -125,6 +129,7 @@ fn parse_args() -> Launch {
             "--rename-dialog" => l.rename_dialog = true,
             "--trash-dialog" => l.trash_dialog = true,
             "--copy-dialog" => l.copy_dialog = true,
+            "--bug-dialog" => l.bug_dialog = true,
             "--extract-dialog" => l.extract_dialog = true,
             "--sidebar-shot" => l.sidebar_shot = true,
             "--preview" => l.preview = true,

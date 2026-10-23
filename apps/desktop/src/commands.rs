@@ -93,6 +93,8 @@ pub enum Command {
     OpenUpdate,
     RevealLog,
     OpenRepo,
+    /// Help › Report a Bug…: the bug report dialog.
+    ReportBug,
     /// Copy the focused photo's marks and IPTC; paste onto the selection.
     CopyMetadata,
     PasteMetadata,
@@ -293,6 +295,7 @@ impl Command {
             Command::CheckUpdates => "app.updates".into(),
             Command::RevealLog => "help.log".into(),
             Command::OpenRepo => "help.repo".into(),
+            Command::ReportBug => "help.reportbug".into(),
             other => format!("other.{other:?}"),
         }
     }
@@ -318,6 +321,7 @@ impl Command {
             "app.updates" => Command::CheckUpdates,
             "help.log" => Command::RevealLog,
             "help.repo" => Command::OpenRepo,
+            "help.reportbug" => Command::ReportBug,
             "view.stack" => Command::ToggleStack,
             "image.crop.clear" => Command::CropClear,
             "file.deliver" => Command::DeliverLast,

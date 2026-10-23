@@ -1,5 +1,6 @@
-//! Modal dialogs for file operations: Rename Photos and Move to Trash.
-//! Both show exactly what will happen before anything moves.
+//! Modal dialogs: About, Report a Bug, and the file operations (Rename
+//! Photos, Move to Trash, Copy Photos, Extract Previews), which show exactly
+//! what will happen before anything moves.
 
 use egui::RichText;
 
@@ -69,6 +70,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     let mut cmds: Vec<Command> = Vec::new();
     copy_photos(app, ctx, t, &mut cmds);
     extract_previews(app, ctx, t, &mut cmds);
+    report_bug(app, ctx, t, &mut cmds);
 
     if let Some(d) = app.rename_dialog.as_mut() {
         let n = d.targets.len();
@@ -545,5 +547,114 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
     }
     if changed {
         app.copy_recompute();
+    }
+}
+
+/// One labelled white field of the bug report. `select_all` applies a ⌘A
+/// that the menu bar caught (see `App::bug_dialog`) to this field when it
+/// has focus, instead of selecting every photo.
+fn bug_field(ui: &mut egui::Ui, t: &Theme, label: &str, text: &mut String, rows: usize, hint: &str, select_all: bool) -> egui::Response {
+    ui.label(RichText::new(label).monospace().size(9.5).color(t.muted));
+    let r = light(ui, |ui| {
+        let edit = if rows <= 1 {
+            egui::TextEdit::singleline(text)
+        } else {
+            egui::TextEdit::multiline(text).desired_rows(rows)
+        };
+        ui.add(edit.desired_width(f32::INFINITY).hint_text(hint))
+    });
+    if select_all && r.has_focus() {
+        if let Some(mut s) = egui::TextEdit::load_state(ui.ctx(), r.id) {
+            let n = text.chars().count();
+            s.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(n),
+            )));
+            s.store(ui.ctx(), r.id);
+        }
+    }
+    r
+}
+
+/// Help › Report a Bug…: a title, three optional notes and, if wanted, the
+/// system info, opened as a prefilled GitHub issue in the browser (no token
+/// in the app; the tester signs in on GitHub) or copied as Markdown.
+fn report_bug(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Command>) {
+    use crate::bug_report;
+    let mut status: Option<String> = None;
+    let Some(d) = app.bug_dialog.as_mut() else { return };
+    let modal = egui::Modal::new(egui::Id::new("bug-dialog")).show(ctx, |ui| {
+        ui.set_width(560.0);
+        ui.spacing_mut().item_spacing.y = S2;
+        ui.label(RichText::new("Report a Bug").size(16.0).strong());
+        ui.label(RichText::new("Opens GitHub in your browser; you'll need a GitHub account to submit.").size(11.5).color(t.text2));
+        ui.add_space(S1);
+        let all = std::mem::take(&mut d.select_all);
+        let r = bug_field(ui, t, "TITLE (REQUIRED)", &mut d.report.title, 1, "A short summary, e.g. Crop guides vanish after rotating", all);
+        if std::mem::take(&mut d.focus_title) {
+            r.request_focus();
+        }
+        bug_field(ui, t, "WHAT HAPPENED", &mut d.report.happened, 3, "What went wrong?", all);
+        bug_field(ui, t, "STEPS TO REPRODUCE", &mut d.report.steps, 3, "1. Open a folder of NEFs\n2. …", all);
+        bug_field(ui, t, "WHAT YOU EXPECTED", &mut d.report.expected, 2, "What should have happened?", all);
+        ui.add_space(S1);
+        ui.checkbox(&mut d.include_info, "Include system info");
+        if d.include_info {
+            egui::Frame::NONE
+                .fill(t.raised)
+                .corner_radius(4.0)
+                .inner_margin(egui::Margin::same(S2 as i8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (k, v) in d.info.lines() {
+                        ui.label(RichText::new(format!("{k}: {v}")).monospace().size(10.5).color(t.text2));
+                    }
+                    ui.label(RichText::new("Only these lines are added: no file names, folders or photo metadata.").size(10.5).color(t.muted));
+                });
+        }
+        if let Some(n) = &d.notice {
+            ui.label(RichText::new(n).size(11.5).color(t.text));
+        }
+        ui.add_space(S2);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let info = d.include_info.then_some(&d.info);
+                let submit = ui
+                    .add_enabled(d.report.can_submit(), egui::Button::new(RichText::new("Submit on GitHub…").strong()))
+                    .on_disabled_hover_text("Give the bug a title first");
+                if submit.clicked() {
+                    let link = bug_report::issue_link(&d.report, info);
+                    match bug_report::open_in_browser(&link.url) {
+                        Ok(()) if link.trimmed => {
+                            ui.ctx().copy_text(bug_report::clipboard_text(&d.report, info));
+                            d.notice = Some(format!(
+                                "The report is too long for a GitHub link (over {} characters), so the page opens with a trimmed copy. The full report is on the clipboard: paste it over the trimmed text before you submit.",
+                                bug_report::MAX_URL_LEN
+                            ));
+                        }
+                        Ok(()) => {
+                            status = Some("Bug report opened in your browser".into());
+                            cmds.push(Command::CloseDialog);
+                        }
+                        Err(e) => d.notice = Some(format!("Couldn't open the browser ({e}). Use Copy to Clipboard instead.")),
+                    }
+                }
+                if ui.button("Copy to Clipboard").on_hover_text("The whole report as Markdown").clicked() {
+                    ui.ctx().copy_text(bug_report::clipboard_text(&d.report, info));
+                    d.notice = Some("Copied the report as Markdown.".into());
+                }
+                if ui.button(if d.notice.is_some() { "Close" } else { "Cancel" }).clicked() {
+                    cmds.push(Command::CloseDialog);
+                }
+            });
+        });
+    });
+    // Esc closes; a stray click beside the dialog doesn't throw the report away.
+    if modal.should_close() && !modal.backdrop_response.clicked() {
+        cmds.push(Command::CloseDialog);
+    }
+    if let Some(s) = status {
+        app.status = s;
     }
 }

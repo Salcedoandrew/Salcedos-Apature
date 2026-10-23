@@ -375,6 +375,8 @@ impl MenuBar {
             &item(Command::OpenShortcuts, "Keyboard Shortcuts"),
             &item(Command::RevealLog, "Reveal Log in Finder"),
             &item(Command::OpenRepo, "Apature on GitHub"),
+            &PredefinedMenuItem::separator(),
+            &item(Command::ReportBug, "Report a Bug…"),
         ])?;
 
         menu.append_items(&[&app, &file, &edit, &view, &image, &tools, &window, &help])?;

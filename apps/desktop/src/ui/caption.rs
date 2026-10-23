@@ -475,7 +475,8 @@ pub fn show_fields(app: &mut App, ctx: &egui::Context, t: &Theme) {
             i.key_pressed(Key::Escape),
         )
     });
-    if save_next {
+    // Not while a dialog's text field above the caption has the keys.
+    if save_next && app.bug_dialog.is_none() {
         cmds.push(Command::SaveCaptionAndNext);
     }
     if esc && ctx.wants_keyboard_input() {
