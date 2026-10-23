@@ -572,6 +572,9 @@ pub struct App {
     /// the sidebar toggle shows it for this session. The catalog keeps
     /// `prefs.sidebar_visible`.
     pub preview_sidebar: bool,
+    /// A bare Tab taken from the main window's input (raw_input_hook):
+    /// toggle the sidebar this frame.
+    tab_toggle: bool,
     pub preview_from: Option<egui::Rect>,
     pub cursor_cell_rect: Option<egui::Rect>,
     /// Keyboard focus moved: the ring slides from `focus_from` over 160 ms.
@@ -711,6 +714,7 @@ impl App {
             sheet_fade_since: None,
             preview_since: None,
             preview_sidebar: false,
+            tab_toggle: false,
             preview_from: None,
             cursor_cell_rect: None,
             focus_from: None,
@@ -3024,6 +3028,9 @@ impl App {
                         .default_size([1200.0, 800.0])
                         .show(ctx, |ui| ui::preview::show(self, ui, t));
                 } else {
+                    // The inspector (Info, Zoom, Marks…) beside the photo, as in
+                    // Photo Mechanic's Preview window.
+                    ui::inspector::show(self, ctx, t);
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE.fill(t.photo))
                         .show(ctx, |ui| ui::preview::show(self, ui, t));
@@ -4766,6 +4773,37 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Bare Tab shows or hides the sidebar. It is taken out of the input
+    /// before egui sees it, so egui doesn't also cycle focus on the main
+    /// view; while a text field has focus or a dialog is open it is left
+    /// alone, so Tab still moves between fields.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let text_focus = ctx
+            .memory(|m| m.focused())
+            .is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some());
+        let dialog = self.bug_dialog.is_some()
+            || self.rename_dialog.is_some()
+            || self.trash_dialog.is_some()
+            || self.copy_dialog.is_some()
+            || self.extract_dialog.is_some()
+            || self.settings_open
+            || self.about_open
+            || self.filter_popup_open;
+        if text_focus || dialog {
+            return;
+        }
+        let bare_tab = |e: &egui::Event| {
+            matches!(e, egui::Event::Key { key: egui::Key::Tab, modifiers, .. } if modifiers.is_none())
+        };
+        if raw_input.events.iter().any(|e| {
+            bare_tab(e) && matches!(e, egui::Event::Key { pressed: true, repeat: false, .. })
+        }) {
+            self.tab_toggle = true;
+        }
+        // Drop presses, repeats and releases alike so egui never sees them.
+        raw_input.events.retain(|e| !bare_tab(e));
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let dt_ms = ctx.input(|i| i.stable_dt) * 1000.0;
         if dt_ms > 0.0 && dt_ms < 1000.0 {
@@ -4890,6 +4928,9 @@ impl eframe::App for App {
             if self.key_once.admit(&c, crate::keyonce::Source::Keys, now) {
                 self.dispatch(ctx, c);
             }
+        }
+        if std::mem::take(&mut self.tab_toggle) {
+            self.dispatch(ctx, Command::ToggleSidebar);
         }
 
         if self.workspace == Workspace::Caption {

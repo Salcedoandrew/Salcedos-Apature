@@ -154,55 +154,62 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                         ui.label(RichText::new("No folder open").color(t.muted));
                         return;
                     };
-                    // Preview on top.
-                    let w = ui.available_width();
-                    // A sharp preview for the inspector: decode at panel size × scale.
-                    let want = (w * ui.ctx().pixels_per_point()).ceil() as u32;
-                    app.request_preview(idx, want, 1);
-                    let (rect, _) =
-                        ui.allocate_exact_size(Vec2::new(w, w * 2.0 / 3.0), egui::Sense::hover());
-                    ui.painter()
-                        .rect_filled(rect, CornerRadius::ZERO, t.photo_cell);
-                    let tex = app
-                        .previews
-                        .get(&idx)
-                        .map(|(h, ..)| h)
-                        .or(app.thumbs[idx].as_ref());
-                    let mut label = String::from("loading…");
-                    if let Some(tex) = tex {
-                        let size = tex.size_vec2();
-                        let s = (rect.width() / size.x).min(rect.height() / size.y);
-                        let fitted = Rect::from_center_size(rect.center(), size * s);
-                        ui.painter().image(
-                            tex.id(),
-                            fitted,
-                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                        label = match app.previews.get(&idx) {
-                            Some((_, ls, _)) => format!("{ls} px preview"),
-                            None => "thumbnail".into(),
-                        };
-                    }
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(super::mono(label, 10.0, t.muted));
+                    // Preview on top, in the catalog only: in Preview the photo is
+                    // already on screen, and leaving it out keeps Info and Zoom in view.
+                    if app.workspace != crate::commands::Workspace::Preview {
+                        // Preview on top.
+                        let w = ui.available_width();
+                        // A sharp preview for the inspector: decode at panel size × scale.
+                        let want = (w * ui.ctx().pixels_per_point()).ceil() as u32;
+                        app.request_preview(idx, want, 1);
+                        let (rect, _) = ui
+                            .allocate_exact_size(Vec2::new(w, w * 2.0 / 3.0), egui::Sense::hover());
+                        ui.painter()
+                            .rect_filled(rect, CornerRadius::ZERO, t.photo_cell);
+                        let tex = app
+                            .previews
+                            .get(&idx)
+                            .map(|(h, ..)| h)
+                            .or(app.thumbs[idx].as_ref());
+                        let mut label = String::from("loading…");
+                        if let Some(tex) = tex {
+                            let size = tex.size_vec2();
+                            let s = (rect.width() / size.x).min(rect.height() / size.y);
+                            let fitted = Rect::from_center_size(rect.center(), size * s);
+                            ui.painter().image(
+                                tex.id(),
+                                fitted,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                            label = match app.previews.get(&idx) {
+                                Some((_, ls, _)) => format!("{ls} px preview"),
+                                None => "thumbnail".into(),
+                            };
+                        }
+                        ui.horizontal(|ui| {
                             ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::Center),
+                                egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.add(
-                                        egui::Label::new(super::mono(
-                                            app.items[idx].display_name(),
-                                            10.0,
-                                            t.muted,
-                                        ))
-                                        .truncate(),
+                                    ui.label(super::mono(label, 10.0, t.muted));
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(super::mono(
+                                                    app.items[idx].display_name(),
+                                                    10.0,
+                                                    t.muted,
+                                                ))
+                                                .truncate(),
+                                            );
+                                        },
                                     );
                                 },
                             );
                         });
-                    });
-                    ui.add_space(S4 - S2);
+                        ui.add_space(S4 - S2);
+                    }
 
                     section(ui, t, "Info", "", |ui| {
                         // One grid for every row, so the gaps are even: EXIF,

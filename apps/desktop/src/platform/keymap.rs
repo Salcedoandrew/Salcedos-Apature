@@ -74,6 +74,13 @@ pub const PM_BARE_KEYS: [&str; 13] = [
 /// No menu item may take them bare, or the press would do two things.
 pub const PREVIEW_BARE_KEYS: [&str; 1] = ["G"];
 
+/// Bare Tab shows or hides the sidebar in the catalog and in Preview. The
+/// egui input hook owns it (so it can stand aside while a text field has
+/// focus or a dialog is open); the menu keeps ⌃⌘S, because a bare Tab menu
+/// key would take Tab away from text fields too. No menu item may take it.
+#[cfg(test)]
+pub const SIDEBAR_BARE_KEY: &str = "Tab";
+
 /// Does a bare G press close Preview? Only in Preview, outside the crop
 /// tool (where G is next guides), and without ⇧. Elsewhere G does nothing
 /// bare (⌘G is Ingest… in the Photo Mechanic layout, the menu's job).
@@ -263,6 +270,21 @@ mod tests {
         }
         // ⌘G stays Ingest… in Photo Mechanic's layout.
         assert_eq!(key(ShortcutLayout::PhotoMechanic, "Ingest…"), a(CMD, "G"));
+    }
+
+    #[test]
+    fn tab_is_free_for_the_sidebar_in_both_layouts() {
+        for layout in [ShortcutLayout::PhotoMechanic, ShortcutLayout::Classic] {
+            for (title, k) in menu_keys(layout) {
+                if let Some(k) = k {
+                    assert!(
+                        !(k.mods == 0 && k.key == SIDEBAR_BARE_KEY),
+                        "{title} takes bare Tab ({layout:?})"
+                    );
+                }
+            }
+            assert_eq!(key(layout, "Show Sidebar"), a(CMD | CTRL, "S"));
+        }
     }
 
     #[test]

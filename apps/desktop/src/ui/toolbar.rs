@@ -23,7 +23,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                     t,
                     super::icons::Icon::Sidebar,
                     app.sidebar_shown(),
-                    "Show or hide the sidebar (⌃⌘S)",
+                    "Show or hide the sidebar (Tab)",
                 );
                 if sb.clicked() {
                     cmds.push(Command::ToggleSidebar);

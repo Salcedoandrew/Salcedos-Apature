@@ -40,6 +40,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - Fujifilm RAF files now show the right camera, lens, exposure and orientation.
 - Screenshots now show a real storm-damage assignment instead of test frames.
 - Example outlet names removed from the export preset hint and test fixtures.
+- Press Tab to show or hide the left sidebar, in the catalog and in Preview (in Preview it only lasts for that visit), like Photo Mechanic. Tab still moves between fields while you type or when a dialog is open. The menu keeps ⌃⌘S as its shortcut, and the toolbar tooltip now mentions Tab.
 
 ### Fixed
 - Preview's info box in the top-left corner has even padding again: its width was estimated from the number of characters, which came out too narrow, so the end of the second line (e.g. the "x" in "2560 px preview") touched the right edge. The box is now sized from the actual text, with 8 px of room on every side.
@@ -55,6 +56,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - The Favorites hint ("Add the open folder with File › Add Folder to Favorites") only shows while you have no favorites.
 - Opening a folder that is already open in a tab, by another path to it (a link, or Macintosh HD › Volumes › your drive), switches to that tab instead of opening a second one. If a folder failed to open while restoring tabs, the tab you were on keeps its photos instead of turning blank.
 - A preview that finishes loading after you have moved on can no longer be shown in place of another photo: each result has to match the file it was made for, as well as the folder and tab. Preview also keeps the photos either side of the one you're looking at (in the sort order you see), so flipping back and forth reloads less.
+- The Zoom section now shows when Preview opens in its own window. That window had no right-hand panel, so Info and Zoom were missing there. Preview also drops the small thumbnail at the top of the panel, so Zoom sits right under Info without scrolling.
 
 ## [0.1.0] — 2026-10-21
 
