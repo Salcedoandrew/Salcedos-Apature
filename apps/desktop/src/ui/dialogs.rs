@@ -358,6 +358,21 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
                 let cur = p.current.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
                 ui.label(RichText::new(format!("{} of {} files · {} of {}  {cur}", p.files_done, p.files_total, human_bytes(p.bytes_done), human_bytes(p.bytes_total))).monospace().size(10.5).color(t.text2));
             }
+            // Time and speed, like Photo Mechanic's stats table: live while
+            // copying (average so far), final once done.
+            let elapsed = r.elapsed();
+            egui::Grid::new("copy-stats").num_columns(2).spacing([S3, 2.0]).show(ui, |ui| {
+                ui.label(RichText::new("Time").size(11.5).color(t.text2));
+                ui.label(RichText::new(crate::copy_job::format_elapsed(elapsed)).monospace().size(11.5).color(t.text));
+                ui.end_row();
+                ui.label(RichText::new("Speed").size(11.5).color(t.text2));
+                ui.label(RichText::new(crate::copy_job::format_speed(crate::copy_job::mb_per_sec(r.bytes_copied(), elapsed))).monospace().size(11.5).color(t.text));
+                ui.end_row();
+            });
+            if r.done.is_none() {
+                // Keep the clock ticking between progress reports (e.g. one big file).
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+            }
             if let Some(o) = &r.done {
                 let mut line = format!("{} file{} copied", o.copied.len(), if o.copied.len() == 1 { "" } else { "s" });
                 if o.cancelled {
