@@ -568,6 +568,10 @@ pub struct App {
     /// text last changed.
     pub sheet_fade_since: Option<Instant>,
     pub preview_since: Option<Instant>,
+    /// Sidebar in Preview: hidden by default so the photo gets the room;
+    /// the sidebar toggle shows it for this session. The catalog keeps
+    /// `prefs.sidebar_visible`.
+    pub preview_sidebar: bool,
     pub preview_from: Option<egui::Rect>,
     pub cursor_cell_rect: Option<egui::Rect>,
     /// Keyboard focus moved: the ring slides from `focus_from` over 160 ms.
@@ -706,6 +710,7 @@ impl App {
             applied_ui_scale: None,
             sheet_fade_since: None,
             preview_since: None,
+            preview_sidebar: false,
             preview_from: None,
             cursor_cell_rect: None,
             focus_from: None,
@@ -2596,7 +2601,7 @@ impl App {
 
     fn sync_menu(&self) {
         self.platform.sync_toggles(
-            self.prefs.sidebar_visible,
+            self.sidebar_shown(),
             self.prefs.inspector_visible,
             self.prefs.filmstrip_visible,
             self.prefs.advance_after_mark,
@@ -3035,6 +3040,16 @@ impl App {
                 self.scroll_to_cursor = true;
             }
         });
+    }
+
+    /// Whether the left sidebar is shown: hidden in Preview unless toggled
+    /// on there; elsewhere the saved preference.
+    pub fn sidebar_shown(&self) -> bool {
+        if self.workspace == Workspace::Preview {
+            self.preview_sidebar
+        } else {
+            self.prefs.sidebar_visible
+        }
     }
 
     /// Zoom on or off at once, without the ease (Zoom section and click to
@@ -3776,8 +3791,12 @@ impl App {
                 }
             }
             Command::ToggleSidebar => {
-                self.prefs.sidebar_visible = !self.prefs.sidebar_visible;
-                self.prefs_dirty = true;
+                if self.workspace == Workspace::Preview {
+                    self.preview_sidebar = !self.preview_sidebar;
+                } else {
+                    self.prefs.sidebar_visible = !self.prefs.sidebar_visible;
+                    self.prefs_dirty = true;
+                }
             }
             Command::ToggleInspector => {
                 self.prefs.inspector_visible = !self.prefs.inspector_visible;

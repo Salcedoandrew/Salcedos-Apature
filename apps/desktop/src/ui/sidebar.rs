@@ -548,7 +548,8 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
         }
     }
 
-    let focused = app.prefs.sidebar_visible && tree_has_focus(ctx);
+    let shown = app.sidebar_shown();
+    let focused = shown && tree_has_focus(ctx);
     if focused {
         expanded_changed |= tree_keys(app, ctx, &mut cmds);
     }
@@ -579,7 +580,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                 .inner_margin(egui::Margin::symmetric(S2 as i8, S3 as i8))
                 .stroke(egui::Stroke::NONE),
         )
-        .show_animated(ctx, app.prefs.sidebar_visible, |ui| {
+        .show_animated(ctx, shown, |ui| {
             ui.spacing_mut().item_spacing.y = S1;
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -689,7 +690,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
         return;
     };
     let w = resp.response.rect.width();
-    if app.prefs.sidebar_visible
+    if app.sidebar_shown()
         && (w - app.prefs.sidebar_width).abs() > 0.5
         && SIDEBAR_RANGE.contains(&w)
     {

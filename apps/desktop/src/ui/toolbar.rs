@@ -22,7 +22,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                     ui,
                     t,
                     super::icons::Icon::Sidebar,
-                    app.prefs.sidebar_visible,
+                    app.sidebar_shown(),
                     "Show or hide the sidebar (⌃⌘S)",
                 );
                 if sb.clicked() {
