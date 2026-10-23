@@ -64,6 +64,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - Exporting several RAW files at once with "Render RAW with the macOS engine" could mix up or lose pictures when two RAWs shared a file name (for example a/IMG_0001.CR2 and b/IMG_0001.NEF), because both used the same temporary file. Each render now gets its own.
 - Renaming a photo to the same name with different capitals (shot.jpg to SHOT.jpg) is no longer refused as "a file with this name already exists".
 - A damaged RAW or TIFF whose metadata claims billions of values no longer makes Apature spin for a long time reading it; only the values actually in the file are read.
+- If Apature can't save its list of already-imported photos after an ingest, it now says so (a warning in the app, a line in the command-line output) instead of staying silent. The copies themselves are fine, but "Only new" may offer those photos again.
 
 ## [0.1.0] — 2026-10-21
 

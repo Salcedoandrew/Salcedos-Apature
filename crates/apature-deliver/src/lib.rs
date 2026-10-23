@@ -414,6 +414,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn folder_delivery_sends_every_file_whole_and_leaves_no_parts() {
+        let t = tempfile::tempdir().unwrap();
+        let a = t.path().join("A.JPG");
+        let b = t.path().join("B.JPG");
+        std::fs::write(&a, b"first photo").unwrap();
+        std::fs::write(&b, vec![7u8; 100_000]).unwrap();
+        let desk = t.path().join("desk");
+        std::fs::create_dir(&desk).unwrap();
+        let target = Target {
+            name: "Desk".into(),
+            kind: Kind::Folder,
+            host: String::new(),
+            port: 0,
+            user: String::new(),
+            dir: desk.to_string_lossy().into_owned(),
+            key_file: None,
+        };
+        let mut events = Vec::new();
+        let r = send(&target, "", &[a.clone(), b.clone()], |e| events.push(e)).unwrap();
+        assert_eq!((r.sent, r.failed.len(), r.bytes), (2, 0, 100_011));
+        assert_eq!(std::fs::read(desk.join("A.JPG")).unwrap(), b"first photo");
+        assert_eq!(std::fs::read(desk.join("B.JPG")).unwrap(), vec![7u8; 100_000]);
+        let mut names: Vec<String> = std::fs::read_dir(&desk)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["A.JPG", "B.JPG"], "no .part or probe files left");
+        assert!(a.exists() && b.exists(), "originals stay");
+        assert!(matches!(events.last(), Some(Event::Finished)));
+    }
+
+    #[test]
     fn sftp_host_keys_must_be_known_and_match() {
         // ssh-ed25519 blobs with 32 bytes of 0x01 and of 0x02.
         let blob = |b: u8| {

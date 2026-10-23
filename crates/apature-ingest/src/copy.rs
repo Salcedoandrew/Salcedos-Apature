@@ -54,11 +54,7 @@ pub fn copy_verified(src: &Path, dst: &Path) -> Result<CopyReport, IngestError> 
         output.sync_all()?;
         drop(output);
         let src_hash = hex(&hasher.finalize());
-        let dst_hash = sha256_file(&tmp)?;
-        if src_hash != dst_hash {
-            return Err(IngestError::Mismatch(src.to_path_buf()));
-        }
-        fs::rename(&tmp, dst)?;
+        verify_and_publish(src, &tmp, dst, &src_hash)?;
         Ok(CopyReport {
             source: src.to_path_buf(),
             destination: dst.to_path_buf(),
@@ -70,6 +66,16 @@ pub fn copy_verified(src: &Path, dst: &Path) -> Result<CopyReport, IngestError> 
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// Re-read the flushed temporary copy; only when it hashes to `src_hash`
+/// does it take the destination name.
+fn verify_and_publish(src: &Path, tmp: &Path, dst: &Path, src_hash: &str) -> Result<(), IngestError> {
+    if sha256_file(tmp)? != src_hash {
+        return Err(IngestError::Mismatch(src.to_path_buf()));
+    }
+    fs::rename(tmp, dst)?;
+    Ok(())
 }
 
 pub fn sha256_file(path: &Path) -> io::Result<String> {
@@ -101,6 +107,37 @@ fn temp_name(dst: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multi_megabyte_copy_crosses_buffer_edges_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("BIG.NEF");
+        // 3 MiB + a bit, so reads land on and straddle the 1 MiB buffer.
+        let data: Vec<u8> = (0..3 * (1 << 20) + 12_345).map(|i: usize| (i * 31 % 251) as u8).collect();
+        fs::write(&src, &data).unwrap();
+        let dst = dir.path().join("out/BIG.NEF");
+        let r = copy_verified(&src, &dst).unwrap();
+        assert_eq!(r.bytes, data.len() as u64);
+        assert!(fs::read(&dst).unwrap() == data, "copy differs");
+        assert_eq!(r.sha256, hex(&Sha256::digest(&data)));
+    }
+
+    #[test]
+    fn a_copy_that_reads_back_different_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("A.NEF");
+        fs::write(&src, b"original").unwrap();
+        let tmp = dir.path().join(".A.NEF.part");
+        fs::write(&tmp, b"corrupted").unwrap();
+        let dst = dir.path().join("A-copy.NEF");
+        let hash = sha256_file(&src).unwrap();
+        assert!(matches!(
+            verify_and_publish(&src, &tmp, &dst, &hash),
+            Err(IngestError::Mismatch(_))
+        ));
+        assert!(!dst.exists(), "a bad copy never takes the real name");
+        assert!(src.exists());
+    }
 
     #[test]
     fn copies_and_verifies() {

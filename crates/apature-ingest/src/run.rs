@@ -47,6 +47,9 @@ pub struct Report {
     pub bytes_copied: u64,
     pub elapsed_secs: f64,
     pub cancelled: bool,
+    /// The ledger of already-ingested photos couldn't be saved: the copies
+    /// are fine, but "only new" may offer these photos again.
+    pub ledger_error: Option<String>,
 }
 
 impl Report {
@@ -152,7 +155,9 @@ pub fn run(
             }
         }
     }
-    let _ = ledger.save();
+    if let Err(e) = ledger.save() {
+        report.ledger_error = Some(e.to_string());
+    }
     report.elapsed_secs = t0.elapsed().as_secs_f64();
     on_event(Event::Finished);
     report
@@ -208,6 +213,27 @@ mod tests {
         let again = build_plan(&opts, &ledger2).unwrap();
         assert!(again.entries.is_empty());
         assert_eq!(again.skipped.len(), 3);
+    }
+
+    #[test]
+    fn a_ledger_that_cannot_be_saved_is_in_the_report() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("CARD");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("A.JPG"), "a").unwrap();
+        // The ledger's folder is a file, so saving must fail.
+        fs::write(t.path().join("blocked"), "").unwrap();
+        let mut ledger = Ledger::load(&t.path().join("blocked/ledger.json"));
+        let opts = Options {
+            source: src,
+            primary: t.path().join("P"),
+            folder_template: "{filename}".into(),
+            ..Default::default()
+        };
+        let plan = build_plan(&opts, &ledger).unwrap();
+        let report = run(&plan, &mut ledger, &AtomicBool::new(false), |_| {});
+        assert_eq!(report.files_ok(), 1, "the copy itself succeeded");
+        assert!(report.ledger_error.is_some(), "{report:?}");
     }
 
     #[test]

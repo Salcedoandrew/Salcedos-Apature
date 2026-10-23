@@ -225,6 +225,30 @@ mod tests {
     }
 
     #[test]
+    fn trash_refuses_a_missing_path_and_accepts_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(trash(&[]).is_ok());
+        assert!(matches!(
+            trash(&[d.path().join("not-there.JPG")]),
+            Err(FileOpError::Trash(_))
+        ));
+    }
+
+    /// Moves real files into your Trash, so it only runs when asked:
+    /// `cargo test -p apature-core -- --ignored trash_moves`.
+    #[test]
+    #[ignore]
+    fn trash_moves_every_file_of_an_item() {
+        let d = tempfile::tempdir().unwrap();
+        let a = item(d.path(), "apature-trash-test", &["NEF", "JPG"]);
+        let files = item_files(&a);
+        assert_eq!(files.len(), 2);
+        trash(&files).unwrap();
+        assert!(files.iter().all(|f| !f.exists()));
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
+    }
+
+    #[test]
     fn case_only_rename_is_not_a_collision() {
         let d = tempfile::tempdir().unwrap();
         let a = item(d.path(), "shot", &["JPG"]);
