@@ -4229,8 +4229,9 @@ impl App {
                 }
             }
             Command::OpenRepo => {
+                // This edition's repository; About links the original.
                 let _ = std::process::Command::new("open")
-                    .arg("https://github.com/McCal-Codes/apature")
+                    .arg(crate::credits::FORK_URL)
                     .spawn();
             }
             Command::ShowMainWindow => {

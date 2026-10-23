@@ -1,4 +1,4 @@
-//! Apature desktop. `apature [folder] [--theme dark|light] [--screenshot out.png [--frames N]] [--copy-dialog]`
+//! Apature desktop. `apature [folder] [--theme dark|light] [--screenshot out.png [--frames N]] [--copy-dialog] [--about-dialog]`
 //! (hidden: `--sidebar-shot` screenshots the folder tree from a scratch HOME;
 //! `--bug-dialog` opens Help › Report a Bug… filled with an example)
 //! `--ingest-run --ingest-source <card> --ingest-dest <dir>` ingests headlessly and reports;
@@ -11,6 +11,7 @@ mod app;
 mod bug_report;
 mod commands;
 mod copy_job;
+mod credits;
 mod deliver_job;
 mod export_job;
 mod extract_job;
@@ -111,7 +112,7 @@ fn parse_args() -> Launch {
             "--ingest" => l.ingest = true,
             "--crop" => l.crop = true,
             "--live" => l.live = true,
-            "--about" => l.about = true,
+            "--about" | "--about-dialog" => l.about = true,
             "--check-updates" => l.check_updates = true,
             "--ingest-source" => l.ingest_source = args.next().map(PathBuf::from),
             "--ingest-dest" => l.ingest_dest = args.next().map(PathBuf::from),

@@ -11,7 +11,8 @@ use apature_ingest::{DateFolders, DestMode, OnCollision};
 
 const THIRD_PARTY: &str = include_str!("../../../../docs/THIRD_PARTY.md");
 
-/// About: name, version and build, what it is, where it lives, and the
+/// About: name, version and build, what it is, who made it (the original
+/// project and this edition's changes, see `credits`), and the
 /// third-party notices the licences require us to show.
 fn about(app: &mut App, ctx: &egui::Context, t: &Theme) {
     if !app.about_open {
@@ -36,10 +37,25 @@ fn about(app: &mut App, ctx: &egui::Context, t: &Theme) {
             ui.label(RichText::new("Keyboard-first contact sheet, culling, metadata and delivery for photojournalists.").size(12.5).color(t.text2));
             ui.add_space(S2);
             ui.horizontal(|ui| {
-                ui.hyperlink_to("Apature on GitHub", "https://github.com/McCal-Codes/apature");
+                ui.label(RichText::new("Apature, originally created by").size(12.0).color(t.text));
+                ui.hyperlink_to(crate::credits::UPSTREAM_NAME, crate::credits::UPSTREAM_URL);
+            });
+            ui.horizontal(|ui| {
+                ui.hyperlink_to("Apature on GitHub", crate::credits::UPSTREAM_URL);
                 ui.label(RichText::new("·  © 2026 Caleb McCartney  ·  MIT or Apache-2.0").size(11.0).color(t.muted));
             });
+            ui.add_space(S2);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("This edition by").size(12.0).color(t.text));
+                ui.hyperlink_to(crate::credits::FORK_AUTHOR, crate::credits::FORK_URL);
+            });
         });
+        ui.add_space(S1);
+        super::eyebrow(ui, t, "Changes in this edition");
+        ui.add_space(S1);
+        for c in crate::credits::FORK_CHANGES {
+            ui.label(RichText::new(format!("•  {c}")).size(11.5).color(t.text2));
+        }
         ui.add_space(S3);
         super::eyebrow(ui, t, "Third-party notices");
         ui.add_space(S1);

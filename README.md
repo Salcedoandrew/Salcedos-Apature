@@ -1,3 +1,24 @@
+## About this fork
+
+Based on **Apature** by [McCal-Codes](https://github.com/McCal-Codes/apature), the original project by Caleb McCartney.
+This edition is by [Andrew Salcedo](https://github.com/Salcedoandrew/apature) and adds:
+
+- Photo Mechanic keyboard shortcuts
+- RAW preview extraction for all major cameras
+- Select By rating, color class and tag
+- Copy Photos
+- Extract JPEG Previews from RAW
+- Sidebar folder tree
+- G closes Preview
+- Ratings saved to XMP sidecars (originals untouched)
+- Rating and preview fixes
+- Help › Report a Bug
+
+Test builds are on [this fork's releases](https://github.com/Salcedoandrew/apature/releases); report problems in
+[its Issues](https://github.com/Salcedoandrew/apature/issues). The original README follows; the licence is unchanged.
+
+---
+
 <p align="center">
   <img src="docs/images/apature-icon.png" width="96" alt="Apature app icon">
 </p>
