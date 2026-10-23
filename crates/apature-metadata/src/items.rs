@@ -182,8 +182,9 @@ pub fn read_iptc(item: &PhotoItem) -> Iptc {
     match (from_jpeg(), side_text) {
         (Some(j), Some(t)) => {
             // Sidecar fields win, including ones cleared on purpose.
-            let mut m = j.overlay(&iptc::parse(&t));
-            for f in iptc::cleared(&t) {
+            let side = iptc::parse(&t);
+            let mut m = j.overlay(&side);
+            for f in iptc::cleared_in(&t, &side) {
                 m.clear(f);
             }
             m

@@ -344,40 +344,54 @@ fn element_re(prefix: &str, name: &str) -> Regex {
     .unwrap()
 }
 
+/// One compiled pattern per [`TABLE`] row (the property, or the whole
+/// element for lists), built once rather than for every photo read.
+fn field_res() -> &'static [Regex] {
+    static RES: OnceLock<Vec<Regex>> = OnceLock::new();
+    RES.get_or_init(|| {
+        TABLE
+            .iter()
+            .map(|(_, prefix, _, name, kind)| match kind {
+                Kind::Simple => Regex::new(&xmp::prop_pattern(prefix, name)).unwrap(),
+                _ => element_re(prefix, name),
+            })
+            .collect()
+    })
+}
+
 /// Read IPTC fields from sidecar or packet text.
 /// Fields present in `text` but empty: cleared on purpose (see [`apply`]).
 pub fn cleared(text: &str) -> Vec<Field> {
-    let parsed = parse(text);
+    cleared_in(text, &parse(text))
+}
+
+/// [`cleared`] when `text` has already been parsed into `parsed`.
+pub fn cleared_in(text: &str, parsed: &Iptc) -> Vec<Field> {
     TABLE
         .iter()
-        .filter(|(f, prefix, _, name, kind)| {
-            let present = match kind {
-                Kind::Simple => Regex::new(&xmp::prop_pattern(prefix, name))
-                    .unwrap()
-                    .is_match(text),
-                _ => element_re(prefix, name).is_match(text),
-            };
+        .zip(field_res())
+        .filter(|((f, ..), re)| {
+            let present = re.is_match(text);
             present
                 && parsed
                     .get(*f)
                     .is_none_or(|v| v.iter().all(|s| s.is_empty()))
         })
-        .map(|(f, ..)| *f)
+        .map(|((f, ..), _)| *f)
         .collect()
 }
 
 pub fn parse(text: &str) -> Iptc {
     let mut out = Iptc::default();
-    for (f, prefix, _, name, kind) in TABLE {
+    for ((f, _, _, _, kind), re) in TABLE.iter().zip(field_res()) {
         match kind {
             Kind::Simple => {
-                let re = Regex::new(&xmp::prop_pattern(prefix, name)).unwrap();
-                if let Some(v) = xmp::value_of(&re, text) {
+                if let Some(v) = xmp::value_of(re, text) {
                     out.set(*f, vec![v]);
                 }
             }
             Kind::Alt | Kind::Seq | Kind::Bag => {
-                if let Some(m) = element_re(prefix, name).find(text) {
+                if let Some(m) = re.find(text) {
                     let inner = m.as_str();
                     let items: Vec<String> = li_re()
                         .captures_iter(inner)
