@@ -1316,6 +1316,7 @@ impl App {
                 }
                 crate::copy_job::CopyMsg::Done(o) => {
                     r.finished.get_or_insert_with(std::time::Instant::now);
+                    crate::copy_job::log_outcome(&o, r.elapsed());
                     let files = o.copied.len();
                     let text = if o.cancelled {
                         format!(

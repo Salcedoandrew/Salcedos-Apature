@@ -54,6 +54,45 @@ impl CopyRunning {
     }
 }
 
+/// apature.log line for a copy's start.
+pub fn start_log_line(dest: &std::path::Path, files: usize, bytes: u64) -> String {
+    format!("copy photos: start → {}: {files} files, {bytes} bytes", dest.display())
+}
+
+/// "done", "cancelled" or "failed" (any file failed) for a finished copy.
+pub fn outcome_status(o: &CopyOutcome) -> &'static str {
+    if o.cancelled {
+        "cancelled"
+    } else if !o.failed.is_empty() {
+        "failed"
+    } else {
+        "done"
+    }
+}
+
+/// apature.log line for a copy's end.
+pub fn end_log_line(status: &str, files: usize, failed: usize, bytes: u64, elapsed: Duration) -> String {
+    let failed = if failed > 0 { format!(", {failed} failed") } else { String::new() };
+    format!(
+        "copy photos: {status}: {files} files copied{failed}, {bytes} bytes in {}, {}",
+        format_elapsed(elapsed),
+        format_speed(mb_per_sec(bytes, elapsed))
+    )
+}
+
+/// Log a finished copy: one end line, plus one line per file that failed.
+pub fn log_outcome(o: &CopyOutcome, elapsed: Duration) {
+    for (path, why) in &o.failed {
+        log::error!("copy photos: failed {}: {why}", path.display());
+    }
+    let line = end_log_line(outcome_status(o), o.copied.len(), o.failed.len(), o.bytes, elapsed);
+    if o.failed.is_empty() {
+        log::info!("{line}");
+    } else {
+        log::warn!("{line}");
+    }
+}
+
 /// "5 sec", "1 min 12 sec", "1 hr 3 min".
 pub fn format_elapsed(d: Duration) -> String {
     let s = d.as_secs();
@@ -103,6 +142,7 @@ impl CopyJobs {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let photos = plan.photos;
+        log::info!("{}", start_log_line(&dest, plan.entries.len(), plan.total_bytes));
         std::thread::Builder::new()
             .name("copy-photos".into())
             .spawn(move || {
@@ -146,5 +186,27 @@ mod tests {
         assert_eq!(format_speed(Some(v)), "268 MB/sec");
         assert_eq!(format_speed(mb_per_sec(2_500_000, Duration::from_secs(1))), "2.5 MB/sec");
         assert_eq!(format_speed(mb_per_sec(0, Duration::from_secs(3))), "0.0 MB/sec");
+    }
+
+    #[test]
+    fn log_lines() {
+        assert_eq!(
+            start_log_line(std::path::Path::new("/Volumes/CARD/Job"), 546, 10_300_000_000),
+            "copy photos: start → /Volumes/CARD/Job: 546 files, 10300000000 bytes"
+        );
+        assert_eq!(
+            end_log_line("done", 546, 0, 10_300_000_000, Duration::from_millis(38_433)),
+            "copy photos: done: 546 files copied, 10300000000 bytes in 38 sec, 268 MB/sec"
+        );
+        assert_eq!(
+            end_log_line("failed", 543, 3, 0, Duration::ZERO),
+            "copy photos: failed: 543 files copied, 3 failed, 0 bytes in 0 sec, —"
+        );
+        let mut o = CopyOutcome::default();
+        assert_eq!(outcome_status(&o), "done");
+        o.failed.push(("a.cr3".into(), "disk full".into()));
+        assert_eq!(outcome_status(&o), "failed");
+        o.cancelled = true;
+        assert_eq!(outcome_status(&o), "cancelled");
     }
 }
