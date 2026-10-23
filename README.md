@@ -1,7 +1,7 @@
 ## About this fork
 
 Based on **Apature** by [McCal-Codes](https://github.com/McCal-Codes/apature), the original project by Caleb McCartney.
-This edition is by [Andrew Salcedo](https://github.com/Salcedoandrew/apature) and adds:
+This edition is by [Andrew Salcedo](https://github.com/Salcedoandrew/salcedos-apature) and adds:
 
 - Photo Mechanic keyboard shortcuts
 - RAW preview extraction for all major cameras
@@ -14,8 +14,8 @@ This edition is by [Andrew Salcedo](https://github.com/Salcedoandrew/apature) an
 - Rating and preview fixes
 - Help › Report a Bug
 
-Test builds are on [this fork's releases](https://github.com/Salcedoandrew/apature/releases); report problems in
-[its Issues](https://github.com/Salcedoandrew/apature/issues). The original README follows; the licence is unchanged.
+Test builds are on [Salcedo's Apature releases](https://github.com/Salcedoandrew/salcedos-apature/releases); report problems in
+[its Issues](https://github.com/Salcedoandrew/salcedos-apature/issues). The original README follows; the licence is unchanged.
 
 ---
 

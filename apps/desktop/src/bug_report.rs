@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::prefs::ShortcutLayout;
 
 /// Where bug reports go. The one place the repository is named.
-pub const REPO_URL: &str = "https://github.com/Salcedoandrew/apature";
+pub const REPO_URL: &str = "https://github.com/Salcedoandrew/salcedos-apature";
 
 /// Longest link we hand to the browser. GitHub (and some browsers) refuse
 /// much longer ones, so a longer report is trimmed to fit.

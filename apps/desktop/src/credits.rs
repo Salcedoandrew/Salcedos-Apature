@@ -9,7 +9,7 @@ pub const UPSTREAM_URL: &str = "https://github.com/McCal-Codes/apature";
 
 /// This edition (Help › Apature on GitHub, bug reports).
 pub const FORK_AUTHOR: &str = "Andrew Salcedo";
-pub const FORK_URL: &str = "https://github.com/Salcedoandrew/apature";
+pub const FORK_URL: &str = crate::bug_report::REPO_URL;
 
 /// Andrew Salcedo's additions, in plain words.
 pub const FORK_CHANGES: &[&str] = &[
@@ -35,7 +35,7 @@ mod tests {
     fn credits_name_both_projects() {
         assert_ne!(UPSTREAM_URL, FORK_URL);
         assert!(UPSTREAM_URL.ends_with("/McCal-Codes/apature"));
-        assert!(FORK_URL.ends_with("/Salcedoandrew/apature"));
+        assert!(FORK_URL.ends_with("/Salcedoandrew/salcedos-apature"));
         assert_eq!(FORK_URL, crate::bug_report::REPO_URL);
         assert!(!FORK_CHANGES.is_empty());
     }

@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn repo_comes_from_bug_report_url() {
-        assert_eq!(repo(), "Salcedoandrew/apature");
+        assert_eq!(repo(), "Salcedoandrew/salcedos-apature");
         assert_eq!(format!("https://github.com/{}", repo()), REPO_URL);
     }
 
@@ -310,11 +310,11 @@ mod tests {
         assert!(u.prerelease);
         assert_eq!(
             u.page,
-            "https://github.com/Salcedoandrew/apature/releases/tag/v0.1.0-test.159"
+            "https://github.com/Salcedoandrew/salcedos-apature/releases/tag/v0.1.0-test.159"
         );
         assert_eq!(
             u.dmg.as_deref(),
-            Some("https://github.com/Salcedoandrew/apature/releases/download/v0.1.0-test.159/Apature-0.1.0-test-159-universal.dmg")
+            Some("https://github.com/Salcedoandrew/salcedos-apature/releases/download/v0.1.0-test.159/Apature-0.1.0-test-159-universal.dmg")
         );
         // A stable build only sees pre-releases with betas on, and 0.1.0
         // stable is newer than its own test builds.
@@ -336,7 +336,7 @@ mod tests {
             assert_eq!(u.version, "0.1.0-test.160", "from {cur}");
             assert_eq!(
                 u.dmg.as_deref(),
-                Some("https://github.com/Salcedoandrew/apature/releases/download/v0.1.0-test.160/Apature-0.1.0-test-160-universal.dmg")
+                Some("https://github.com/Salcedoandrew/salcedos-apature/releases/download/v0.1.0-test.160/Apature-0.1.0-test-160-universal.dmg")
             );
             assert_eq!(u.notes, "Notes for v0.1.0-test.160");
         }
@@ -347,7 +347,7 @@ mod tests {
             pick(&rel, "0.0.8", false).map(|u| (u.version, u.dmg)),
             Some((
                 "0.0.9".into(),
-                Some("https://github.com/Salcedoandrew/apature/releases/download/v0.0.9/Apature-0.0.9.dmg".into())
+                Some("https://github.com/Salcedoandrew/salcedos-apature/releases/download/v0.0.9/Apature-0.0.9.dmg".into())
             ))
         );
         assert_eq!(pick(&rel, "0.0.9", false), None);

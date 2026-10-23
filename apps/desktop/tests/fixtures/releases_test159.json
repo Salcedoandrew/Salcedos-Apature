@@ -1,7 +1,7 @@
 [
   {
-    "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/421335283",
-    "html_url": "https://github.com/Salcedoandrew/apature/releases/tag/v0.1.0-test.159",
+    "url": "https://api.github.com/repos/Salcedoandrew/salcedos-apature/releases/421335283",
+    "html_url": "https://github.com/Salcedoandrew/salcedos-apature/releases/tag/v0.1.0-test.159",
     "id": 421335283,
     "tag_name": "v0.1.0-test.159",
     "target_commitish": "select-copy",
@@ -10,16 +10,16 @@
     "prerelease": true,
     "created_at": "2026-10-23T00:40:30Z",
     "published_at": "2026-10-23T00:40:41Z",
-    "body": "Based on [Apature by McCal-Codes](https://github.com/McCal-Codes/apature). Changes in this edition by Andrew Salcedo:\n\n- Photo Mechanic keyboard shortcuts (the default; Apature classic is still in Settings \u203a Shortcuts)\n- RAW preview extraction for all major cameras (Fujifilm, Canon CR3/CRW, Panasonic, Olympus, Sony, Sigma, Hasselblad, Phase One and more)\n- Select By rating, color class and tag (Edit menu)\n- Copy Photos (File \u203a Copy Photos\u2026, \u2318Y)\n- Extract JPEG Previews from RAW (Tools menu)\n- Sidebar folder tree\n- G closes Preview\n- Ratings saved to XMP sidecars (originals untouched)\n- Rating and preview fixes (rating a photo no longer makes it jump)\n- Help \u203a Report a Bug\u2026\n\nThis test build works on both Apple silicon and Intel Macs (macOS 12 or later).\n\n## How to install\n1. Download `Apature-0.1.0-test-159-universal.dmg` below and open it.\n2. Drag Apature into Applications.\n3. The first time, right-click Apature and choose **Open**. If macOS still blocks it, go to **System Settings \u203a Privacy & Security** and click **Open Anyway**. This is needed because the test build isn't notarized by Apple.\n\n## Found a bug?\nUse **Help \u203a Report a Bug\u2026** in the app, or open an issue on the [Issues tab](https://github.com/Salcedoandrew/apature/issues).\n",
+    "body": "Based on [Apature by McCal-Codes](https://github.com/McCal-Codes/apature). Changes in this edition by Andrew Salcedo:\n\n- Photo Mechanic keyboard shortcuts (the default; Apature classic is still in Settings \u203a Shortcuts)\n- RAW preview extraction for all major cameras (Fujifilm, Canon CR3/CRW, Panasonic, Olympus, Sony, Sigma, Hasselblad, Phase One and more)\n- Select By rating, color class and tag (Edit menu)\n- Copy Photos (File \u203a Copy Photos\u2026, \u2318Y)\n- Extract JPEG Previews from RAW (Tools menu)\n- Sidebar folder tree\n- G closes Preview\n- Ratings saved to XMP sidecars (originals untouched)\n- Rating and preview fixes (rating a photo no longer makes it jump)\n- Help \u203a Report a Bug\u2026\n\nThis test build works on both Apple silicon and Intel Macs (macOS 12 or later).\n\n## How to install\n1. Download `Apature-0.1.0-test-159-universal.dmg` below and open it.\n2. Drag Apature into Applications.\n3. The first time, right-click Apature and choose **Open**. If macOS still blocks it, go to **System Settings \u203a Privacy & Security** and click **Open Anyway**. This is needed because the test build isn't notarized by Apple.\n\n## Found a bug?\nUse **Help \u203a Report a Bug\u2026** in the app, or open an issue on the [Issues tab](https://github.com/Salcedoandrew/salcedos-apature/issues).\n",
     "assets": [
       {
-        "url": "https://api.github.com/repos/Salcedoandrew/apature/releases/assets/667527018",
+        "url": "https://api.github.com/repos/Salcedoandrew/salcedos-apature/releases/assets/667527018",
         "id": 667527018,
         "name": "Apature-0.1.0-test-159-universal.dmg",
         "content_type": "application/x-apple-diskimage",
         "state": "uploaded",
         "size": 14680922,
-        "browser_download_url": "https://github.com/Salcedoandrew/apature/releases/download/v0.1.0-test.159/Apature-0.1.0-test-159-universal.dmg"
+        "browser_download_url": "https://github.com/Salcedoandrew/salcedos-apature/releases/download/v0.1.0-test.159/Apature-0.1.0-test-159-universal.dmg"
       }
     ]
   }
