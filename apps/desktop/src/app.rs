@@ -572,8 +572,11 @@ pub struct App {
     /// the sidebar toggle shows it for this session. The catalog keeps
     /// `prefs.sidebar_visible`.
     pub preview_sidebar: bool,
+    /// Inspector in Preview, once toggled there (Tab, ⌥⌘I): kept for the
+    /// session only. None follows `prefs.inspector_visible`.
+    pub preview_inspector: Option<bool>,
     /// A bare Tab taken from the main window's input (raw_input_hook):
-    /// toggle the sidebar this frame.
+    /// toggle both side panels this frame.
     tab_toggle: bool,
     pub preview_from: Option<egui::Rect>,
     pub cursor_cell_rect: Option<egui::Rect>,
@@ -714,6 +717,7 @@ impl App {
             sheet_fade_since: None,
             preview_since: None,
             preview_sidebar: false,
+            preview_inspector: None,
             tab_toggle: false,
             preview_from: None,
             cursor_cell_rect: None,
@@ -2606,7 +2610,7 @@ impl App {
     fn sync_menu(&self) {
         self.platform.sync_toggles(
             self.sidebar_shown(),
-            self.prefs.inspector_visible,
+            self.inspector_shown(),
             self.prefs.filmstrip_visible,
             self.prefs.advance_after_mark,
         );
@@ -3020,13 +3024,15 @@ impl App {
             if self.tab_is_free(ctx)
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
             {
-                // egui has already moved focus for this Tab; undo that.
+                // egui has already read this Tab as "focus the next widget";
+                // cancel that, or a checkbox takes focus and eats the arrows.
                 ctx.memory_mut(|m| {
+                    m.move_focus(egui::FocusDirection::None);
                     if let Some(id) = m.focused() {
                         m.surrender_focus(id);
                     }
                 });
-                self.dispatch(ctx, Command::ToggleSidebar);
+                self.toggle_side_panels();
             }
             for c in cmds {
                 if self.key_once.admit(&c, crate::keyonce::Source::Keys, now) {
@@ -3078,6 +3084,31 @@ impl App {
             || self.about_open
             || self.filter_popup_open;
         !text_focus && !dialog
+    }
+
+    /// Whether the right inspector is shown: in Preview the session's own
+    /// choice once toggled there; elsewhere the saved preference.
+    pub fn inspector_shown(&self) -> bool {
+        if self.workspace == Workspace::Preview {
+            self.preview_inspector.unwrap_or(self.prefs.inspector_visible)
+        } else {
+            self.prefs.inspector_visible
+        }
+    }
+
+    /// Tab, as in Photo Mechanic: hide both side panels if either is
+    /// showing, else show both. Preview keeps it for the session; the
+    /// catalog saves it.
+    fn toggle_side_panels(&mut self) {
+        let show = !(self.sidebar_shown() || self.inspector_shown());
+        if self.workspace == Workspace::Preview {
+            self.preview_sidebar = show;
+            self.preview_inspector = Some(show);
+        } else {
+            self.prefs.sidebar_visible = show;
+            self.prefs.inspector_visible = show;
+            self.prefs_dirty = true;
+        }
     }
 
     /// Whether the left sidebar is shown: hidden in Preview unless toggled
@@ -3837,8 +3868,12 @@ impl App {
                 }
             }
             Command::ToggleInspector => {
-                self.prefs.inspector_visible = !self.prefs.inspector_visible;
-                self.prefs_dirty = true;
+                if self.workspace == Workspace::Preview {
+                    self.preview_inspector = Some(!self.inspector_shown());
+                } else {
+                    self.prefs.inspector_visible = !self.prefs.inspector_visible;
+                    self.prefs_dirty = true;
+                }
             }
             Command::ToggleFilmstrip => {
                 self.prefs.filmstrip_visible = !self.prefs.filmstrip_visible;
@@ -4950,7 +4985,7 @@ impl eframe::App for App {
             }
         }
         if std::mem::take(&mut self.tab_toggle) {
-            self.dispatch(ctx, Command::ToggleSidebar);
+            self.toggle_side_panels();
         }
 
         if self.workspace == Workspace::Caption {

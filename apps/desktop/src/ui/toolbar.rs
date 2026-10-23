@@ -23,7 +23,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                     t,
                     super::icons::Icon::Sidebar,
                     app.sidebar_shown(),
-                    "Show or hide the sidebar (Tab)",
+                    "Show or hide the sidebar (⌃⌘S; Tab shows or hides both side panels)",
                 );
                 if sb.clicked() {
                     cmds.push(Command::ToggleSidebar);
@@ -233,7 +233,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                         ui,
                         t,
                         super::icons::Icon::Inspector,
-                        app.prefs.inspector_visible,
+                        app.inspector_shown(),
                         "Show or hide the inspector (⌥⌘I)",
                     );
                     if ins.clicked() {

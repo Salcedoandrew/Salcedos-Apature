@@ -145,7 +145,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                 .inner_margin(egui::Margin::same(S3 as i8))
                 .stroke(egui::Stroke::NONE),
         )
-        .show_animated(ctx, app.prefs.inspector_visible, |ui| {
+        .show_animated(ctx, app.inspector_shown(), |ui| {
             ui.spacing_mut().item_spacing.y = S2;
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -492,7 +492,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
         return;
     };
     let w = resp.response.rect.width();
-    if app.prefs.inspector_visible
+    if app.inspector_shown()
         && (w - app.prefs.inspector_width).abs() > 0.5
         && INSPECTOR_RANGE.contains(&w)
     {
