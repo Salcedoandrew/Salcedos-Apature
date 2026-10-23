@@ -65,6 +65,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - Renaming a photo to the same name with different capitals (shot.jpg to SHOT.jpg) is no longer refused as "a file with this name already exists".
 - A damaged RAW or TIFF whose metadata claims billions of values no longer makes Apature spin for a long time reading it; only the values actually in the file are read.
 - If Apature can't save its list of already-imported photos after an ingest, it now says so (a warning in the app, a line in the command-line output) instead of staying silent. The copies themselves are fine, but "Only new" may offer those photos again.
+- In the IPTC-IIM block of exported and extracted JPEGs, a field longer than IIM's 32,767-byte limit is now cut at a whole character, so an accented letter or other non-English character at the cut no longer turns into garbage.
 
 ## [0.1.0] — 2026-10-21
 

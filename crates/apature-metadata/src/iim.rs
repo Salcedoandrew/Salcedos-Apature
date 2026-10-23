@@ -8,7 +8,11 @@ use crate::Iptc;
 
 /// One dataset: 0x1C, record, dataset, big-endian length, bytes.
 fn ds(out: &mut Vec<u8>, rec: u8, set: u8, data: &[u8]) {
-    let n = data.len().min(32767);
+    let mut n = data.len().min(32767);
+    // Never cut a UTF-8 character in half: step back to its first byte.
+    while n > 0 && n < data.len() && data[n] & 0xC0 == 0x80 {
+        n -= 1;
+    }
     out.push(0x1C);
     out.push(rec);
     out.push(set);
@@ -179,6 +183,16 @@ mod tests {
             date_created: Some("2026-10-06T00:00:00".into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_length_cap_never_splits_a_character() {
+        let mut out = Vec::new();
+        ds(&mut out, 2, 120, "é".repeat(20_000).as_bytes()); // 40,000 bytes
+        let sets = parse(&out);
+        let v = &sets[0].2;
+        assert_eq!(v.len(), 32_766, "back to the last whole character");
+        assert!(std::str::from_utf8(v).is_ok());
     }
 
     #[test]

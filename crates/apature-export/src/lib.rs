@@ -349,7 +349,8 @@ pub fn export(
     let summary = if pixels == PixelSource::SystemRawDecode {
         exif::from_bytes(&data).unwrap_or_default()
     } else {
-        exif::read(&src_path).unwrap_or_else(|_| exif::from_bytes(&data).unwrap_or_default())
+        // `data` is the source file already in memory; don't map it again.
+        exif::from_bytes(&data).unwrap_or_default()
     };
     let mut img =
         decode_jpeg(jpeg_bytes, target).map_err(|e| ExportError::Decode(src_path.clone(), e))?;
