@@ -3015,6 +3015,19 @@ impl App {
             self.workspace = Workspace::Preview;
             let cmds = self.keyboard_commands(ctx);
             let now = std::time::Instant::now();
+            // The main window's raw_input_hook never sees this window's keys,
+            // so bare Tab is taken here; it toggles the Preview sidebar.
+            if self.tab_is_free(ctx)
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
+            {
+                // egui has already moved focus for this Tab; undo that.
+                ctx.memory_mut(|m| {
+                    if let Some(id) = m.focused() {
+                        m.surrender_focus(id);
+                    }
+                });
+                self.dispatch(ctx, Command::ToggleSidebar);
+            }
             for c in cmds {
                 if self.key_once.admit(&c, crate::keyonce::Source::Keys, now) {
                     self.dispatch(ctx, c);
@@ -3030,6 +3043,7 @@ impl App {
                 } else {
                     // The inspector (Info, Zoom, Marks…) beside the photo, as in
                     // Photo Mechanic's Preview window.
+                    ui::sidebar::show(self, ctx, t);
                     ui::inspector::show(self, ctx, t);
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE.fill(t.photo))
@@ -3047,6 +3061,23 @@ impl App {
                 self.scroll_to_cursor = true;
             }
         });
+    }
+
+    /// Bare Tab is ours (the sidebar) unless a text field has focus or a
+    /// dialog is open; then it is left to move between fields.
+    fn tab_is_free(&self, ctx: &egui::Context) -> bool {
+        let text_focus = ctx
+            .memory(|m| m.focused())
+            .is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some());
+        let dialog = self.bug_dialog.is_some()
+            || self.rename_dialog.is_some()
+            || self.trash_dialog.is_some()
+            || self.copy_dialog.is_some()
+            || self.extract_dialog.is_some()
+            || self.settings_open
+            || self.about_open
+            || self.filter_popup_open;
+        !text_focus && !dialog
     }
 
     /// Whether the left sidebar is shown: hidden in Preview unless toggled
@@ -4778,18 +4809,7 @@ impl eframe::App for App {
     /// view; while a text field has focus or a dialog is open it is left
     /// alone, so Tab still moves between fields.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        let text_focus = ctx
-            .memory(|m| m.focused())
-            .is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some());
-        let dialog = self.bug_dialog.is_some()
-            || self.rename_dialog.is_some()
-            || self.trash_dialog.is_some()
-            || self.copy_dialog.is_some()
-            || self.extract_dialog.is_some()
-            || self.settings_open
-            || self.about_open
-            || self.filter_popup_open;
-        if text_focus || dialog {
+        if !self.tab_is_free(ctx) {
             return;
         }
         let bare_tab = |e: &egui::Event| {
