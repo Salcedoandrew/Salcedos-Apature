@@ -16,6 +16,7 @@ mod filter;
 mod folder_tree;
 mod ingest_job;
 mod keyonce;
+mod mark_writer;
 mod platform;
 mod prefs;
 mod select_by;

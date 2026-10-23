@@ -512,6 +512,11 @@ pub struct App {
     extract_jobs: crate::extract_job::ExtractJobs,
     /// One action per keypress across the menu and the key handler.
     key_once: crate::keyonce::KeyOnce,
+    /// Writes marks on its own thread (see `mark_writer`).
+    mark_writer: crate::mark_writer::MarkWriter,
+    /// The newest single-photo mark and its status line, finished with the
+    /// file count once the write lands.
+    mark_status: Option<(u64, String)>,
     ingest_jobs: IngestJobs,
     /// Files currently being dragged over the window, for the drop overlay.
     pub drag_hover: usize,
@@ -652,6 +657,8 @@ impl App {
             extract_running: None,
             extract_jobs: crate::extract_job::ExtractJobs::new(cc.egui_ctx.clone()),
             key_once: Default::default(),
+            mark_writer: Default::default(),
+            mark_status: None,
             export_jobs: crate::export_job::ExportJobs::new(cc.egui_ctx.clone()),
             deliver_jobs: DeliverJobs::new(cc.egui_ctx.clone()),
             ingest_jobs: IngestJobs::new(cc.egui_ctx.clone(), ledger_path),
@@ -2054,6 +2061,7 @@ impl App {
     /// through the undo stack; IPTC is written in place (not undoable, the
     /// status says how many files).
     fn paste_metadata(&mut self) {
+        self.flush_marks();
         let Some((m, iptc)) = self.meta_clip.clone() else {
             self.status = "Nothing copied yet (⌥⌘C copies the focused photo's metadata)".into();
             return;
@@ -2228,6 +2236,7 @@ impl App {
 
     /// Write the draft's changed fields. Returns true when something was written.
     fn save_caption(&mut self, announce: bool) -> bool {
+        self.flush_marks();
         let Some(draft) = self.caption_draft.as_ref() else {
             return false;
         };
@@ -2301,6 +2310,7 @@ impl App {
     /// in the draft go to every selected photo; untouched fields stay as each
     /// photo had them.
     fn save_caption_to_selection(&mut self) {
+        self.flush_marks();
         let Some(draft) = self.caption_draft.as_ref() else {
             return;
         };
@@ -2460,6 +2470,7 @@ impl App {
 
     /// Store (or remove) the crop in the sidecar; previews re-render.
     fn write_crop(&mut self, idx: usize, crop: Option<edits::Crop>) {
+        self.flush_marks();
         let sidecar = self.items[idx].sidecar_path();
         let change = edits::Change {
             crop: Some(crop),
@@ -2486,6 +2497,7 @@ impl App {
     }
 
     fn apply_stationery(&mut self) {
+        self.flush_marks();
         let Some(pad) = self.assignment.as_ref().map(|a| a.iptc()) else {
             return;
         };
@@ -2568,6 +2580,7 @@ impl App {
     /// files (by path), so new arrivals from an ingest slot in without
     /// disturbing a cull in progress.
     pub fn refresh_folder(&mut self) {
+        self.flush_marks();
         let Some(dir) = self.folder.clone() else {
             return;
         };
@@ -2642,6 +2655,7 @@ impl App {
 
     /// Open `dir` in a new tab, or switch to it if it is already open.
     pub fn open_folder(&mut self, dir: &Path) {
+        self.flush_marks();
         if let Some(i) = self.tab_for(dir) {
             self.switch_tab(i);
             return;
@@ -2756,6 +2770,7 @@ impl App {
     }
 
     pub fn switch_tab(&mut self, i: usize) {
+        self.flush_marks();
         if i >= self.tabs.len() || i == self.active {
             return;
         }
@@ -3358,6 +3373,7 @@ impl App {
     /// sidecar; the files themselves are never touched. Turning the other way
     /// undoes it.
     fn rotate(&mut self, cw: bool) {
+        self.flush_marks();
         use apature_metadata::edits;
         if self.items.is_empty() {
             return;
@@ -3416,44 +3432,75 @@ impl App {
         };
     }
 
+    /// Set marks in memory and queue the file writes; never waits for disk.
+    /// The view keeps its order (and the scroll its place) even when sorted
+    /// or filtered by marks: the photo stays put until the next re-sort.
     fn apply_marks(&mut self, apply: &[(usize, Marks)]) {
-        let mut written = 0;
-        let mut failed = None;
+        let policy = self.prefs.jpeg_marks();
+        let mut last = 0;
         for &(i, m) in apply {
             self.marks[i] = m;
-            match items::write(&self.items[i], &m, &self.scheme, self.prefs.jpeg_marks()) {
-                Ok(w) => {
-                    written += w.len();
-                    self.conflicts[i].clear();
-                }
-                Err(e) => failed = Some(e.to_string()),
-            }
+            last = self
+                .mark_writer
+                .submit(self.items[i].clone(), m, self.scheme.clone(), policy);
         }
-        self.status = match failed {
-            Some(e) => format!("Could not write marks: {e}"),
-            None if apply.len() == 1 => {
-                let (i, m) = apply[0];
-                format!(
-                    "{}: {} · {} · {} → {} file{}",
-                    self.items[i].display_name(),
-                    ui::rating_text(m.rating),
-                    self.scheme.name(m.color_class).unwrap_or("no class"),
-                    if m.tagged { "tagged" } else { "untagged" },
-                    written,
-                    if written == 1 { "" } else { "s" }
-                )
-            }
-            None => format!("{} photos marked → {written} files written", apply.len()),
-        };
-        // Marks may change what the filter shows and the sort order.
-        if self.filter.is_active()
-            || matches!(
-                self.prefs.sort,
-                filter::Sort::Rating | filter::Sort::ColorClass
+        self.status = if apply.len() == 1 {
+            let (i, m) = apply[0];
+            format!(
+                "{}: {} · {} · {}",
+                self.items[i].display_name(),
+                ui::rating_text(m.rating),
+                self.scheme.name(m.color_class).unwrap_or("no class"),
+                if m.tagged { "tagged" } else { "untagged" },
             )
-        {
-            self.rebuild_view();
+        } else {
+            format!("{} photos marked", apply.len())
+        };
+        self.mark_status = Some((last, self.status.clone()));
+        // No `rebuild_view` here, even when sorted or filtered by marks:
+        // re-sorting moved the photo away under the user (the sheet
+        // scrolled after it; Preview landed at the end with nowhere to go).
+    }
+
+    /// Take in finished mark writes: clear conflicts, report failures.
+    fn poll_mark_writes(&mut self) {
+        for d in self.mark_writer.poll() {
+            let idx = self.items.iter().position(|it| it.path() == d.path);
+            match d.result {
+                Ok(n) => {
+                    if let Some(i) = idx {
+                        if let Some(c) = self.conflicts.get_mut(i) {
+                            c.clear();
+                        }
+                    }
+                    if let Some((seq, text)) = &self.mark_status {
+                        if *seq == d.seq && self.status == *text {
+                            self.status =
+                                format!("{text} → {n} file{}", if n == 1 { "" } else { "s" });
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("marks for {}: {e}", d.path.display());
+                    self.status = format!("Could not write marks: {e}");
+                    self.status_since = Some(Instant::now());
+                }
+            }
         }
+    }
+
+    /// Wait for queued mark writes before anything else touches sidecars
+    /// (captions, crops, turns, a rescan, copies), so none of them races a
+    /// pending write. Instant when nothing is queued.
+    pub fn flush_marks(&mut self) {
+        if self.mark_writer.pending() > 0
+            && !self
+                .mark_writer
+                .wait_idle(std::time::Duration::from_secs(30))
+        {
+            log::warn!("mark writes still pending after 30 s");
+        }
+        self.poll_mark_writes();
     }
 
     // ----- navigation --------------------------------------------------------
@@ -3624,6 +3671,9 @@ impl App {
     // ----- commands ----------------------------------------------------------
 
     pub fn dispatch(&mut self, ctx: &egui::Context, cmd: Command) {
+        if !cmd.leaves_files_alone() {
+            self.flush_marks();
+        }
         match cmd {
             Command::OpenFolder(p) => self.open_folder(&p),
             Command::OpenFolderHere(p) => self.open_folder_here(&p),
@@ -4611,6 +4661,10 @@ impl eframe::App for App {
             };
             self.stats.frame_ms_max = self.stats.frame_ms_max.max(dt_ms);
         }
+        self.poll_mark_writes();
+        if self.mark_writer.pending() > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         if self.applied_appearance != Some(self.prefs.appearance) {
             ctx.set_theme(match self.prefs.appearance {
                 crate::prefs::Appearance::System => egui::ThemePreference::System,
@@ -4829,6 +4883,8 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        // Also runs on quit: every queued mark reaches disk first.
+        self.flush_marks();
         if self.launch.sidebar_shot {
             // Screenshot instance: never write prefs.
             return;

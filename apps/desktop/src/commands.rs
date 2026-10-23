@@ -182,6 +182,46 @@ pub enum Command {
 }
 
 impl Command {
+    /// Marking, moving and view commands, which never read or write a
+    /// sidecar on the UI thread; anything else waits for queued mark writes
+    /// first (see `App::flush_marks`).
+    pub fn leaves_files_alone(&self) -> bool {
+        matches!(
+            self,
+            Command::MoveFocus { .. }
+                | Command::Move(_)
+                | Command::MovePage(_)
+                | Command::Home
+                | Command::End
+                | Command::Click { .. }
+                | Command::SetRating(_)
+                | Command::SetClass(_)
+                | Command::ToggleTag
+                | Command::Undo
+                | Command::Redo
+                | Command::SelectAll
+                | Command::SelectNone
+                | Command::SelectBy(_)
+                | Command::SetFilter(_)
+                | Command::ClearFilter(_)
+                | Command::SetSort(_)
+                | Command::ToggleSortReversed
+                | Command::ToggleAdvanceAfterMark
+                | Command::ZoomIn
+                | Command::ZoomOut
+                | Command::ToggleZoom
+                | Command::ToggleLoupe
+                | Command::ToggleCompare
+                | Command::ToggleStack
+                | Command::ToggleSidebar
+                | Command::ToggleInspector
+                | Command::ToggleFilmstrip
+                | Command::CyclePreviewBoost
+                | Command::Activate
+                | Command::Escape
+        )
+    }
+
     /// Menu identifiers are strings so the native menu can round-trip them.
     pub fn menu_id(&self) -> String {
         match self {
@@ -332,5 +372,39 @@ impl Command {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marking_and_moving_never_wait_for_mark_writes() {
+        for c in [
+            Command::SetRating(5),
+            Command::SetClass(2),
+            Command::ToggleTag,
+            Command::Move(1),
+            Command::MoveFocus {
+                delta: 1,
+                shift: false,
+                command: false,
+            },
+            Command::Undo,
+        ] {
+            assert!(c.leaves_files_alone(), "{c:?}");
+        }
+        // These read or copy sidecars, so queued marks land first.
+        for c in [
+            Command::SaveCaption,
+            Command::CopyStart,
+            Command::ExportStart,
+            Command::RefreshFolder,
+            Command::Rotate(true),
+            Command::CropApply,
+        ] {
+            assert!(!c.leaves_files_alone(), "{c:?}");
+        }
     }
 }
