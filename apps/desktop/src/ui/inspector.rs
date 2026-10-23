@@ -61,11 +61,15 @@ fn section<R>(
 }
 
 /// Photo Mechanic's Zoom control: a "Zoom:" checkbox, a slider over the
-/// ¼–8× steps with tick labels, and Lock scrolling. Live in Preview only.
+/// ¼–8× steps with tick labels, and Lock scrolling. Shown in Preview only.
 fn zoom_section(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
     use super::preview::{zoom_at_step, zoom_step, ZOOM_LABELS, ZOOM_STEPS};
     use crate::app::ZoomMode;
     let in_preview = app.workspace == crate::commands::Workspace::Preview;
+    // Preview only; the catalog doesn't show the section at all.
+    if !in_preview {
+        return;
+    }
     let zoomed = in_preview && app.pv.mode == ZoomMode::OneToOne;
     let mut on = zoomed;
     let mut step = zoom_step(app.pv.zoom);
