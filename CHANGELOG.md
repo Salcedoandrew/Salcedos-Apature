@@ -5,6 +5,10 @@ All notable, user-visible changes. Versions follow semantic versioning;
 
 ## [Unreleased]
 
+### Docs
+- Added an AI disclosure to the README: this edition was built with help from AI coding assistants and tested by Andrew Salcedo.
+
+
 ### Added
 - About Apature credits the original: "Apature, originally created by McCal-Codes" with a link to the upstream project, then "This edition by Andrew Salcedo" with a link to this fork and a short list of the changes in this edition. The copyright, licence and third-party notices are unchanged. Help › Apature on GitHub now opens this fork. The README starts with the same "About this fork" credits. `--about-dialog` opens About at start for screenshots.
 - Test builds for Intel Macs too: `scripts/dmg.sh` builds one universal Apature.app (Apple silicon and Intel) and a drag-to-Applications disk image, `Apature-<version>-test-<build>-universal.dmg`, for GitHub pre-releases. `scripts/bundle.sh` accepts `APP` and `APATURE_BINARY` so it can bundle that binary without touching your local build.

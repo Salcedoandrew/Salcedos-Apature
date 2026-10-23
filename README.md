@@ -17,6 +17,10 @@ This edition is by [Andrew Salcedo](https://github.com/Salcedoandrew/salcedos-ap
 Test builds are on [Salcedo's Apature releases](https://github.com/Salcedoandrew/salcedos-apature/releases); report problems in
 [its Issues](https://github.com/Salcedoandrew/salcedos-apature/issues). The original README follows; the licence is unchanged.
 
+### AI disclosure
+
+The changes in this edition were written with the help of AI coding assistants. Andrew Salcedo directed the work and tested every change, but some bugs may remain, so please report any problems through Help › Report a Bug… or the Issues tab. The original Apature is by McCal-Codes.
+
 ---
 
 <p align="center">
