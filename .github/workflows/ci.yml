@@ -3,6 +3,9 @@ name: CI
 # Linux for the libraries and a type-check of the desktop (cheapest minutes);
 # one macOS job builds and tests the desktop crate itself on pushes to main,
 # so a commit that does not compile can never sit on main unnoticed.
+# A second macOS job type-checks the desktop on pull requests, so a PR that
+# breaks macOS-only code (platform/macos.rs, the sips RAW path, the Trash
+# method, extract timestamping) fails before it merges instead of after.
 # Bundling, signing and the real-card checks stay on the owner's Mac.
 on:
   push:
@@ -39,6 +42,18 @@ jobs:
       # build run on the Mac, where it ships.
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace --exclude apature
+
+  desktop-macos-check:
+    # Check only, no release build and no tests: enough to catch a PR that
+    # breaks macOS-only code, at a fraction of the full macOS job's minutes.
+    if: github.event_name == 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p apature --all-targets
 
   desktop-macos:
     # macOS minutes cost ten times Linux ones: pushes to main only, and not
