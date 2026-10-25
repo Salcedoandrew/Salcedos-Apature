@@ -58,14 +58,10 @@ fn with_stem(path: &Path, stem: &str) -> PathBuf {
 /// Plan renaming each item to its new stem (no extension, no separators).
 pub fn plan_rename(items: &[(&PhotoItem, String)]) -> Result<RenamePlan, FileOpError> {
     let mut plan = RenamePlan::default();
-    // Lowercased path strings: on a case-insensitive disk (APFS default,
-    // ExFAT cards) a case-only rename's target *is* its source under a
-    // different spelling, and an exact comparison would report the file as
-    // colliding with itself.
-    let mut sources: HashSet<String> = HashSet::new();
+    let mut sources: HashSet<PathBuf> = HashSet::new();
     for (it, _) in items {
         for f in item_files(it) {
-            sources.insert(f.to_string_lossy().to_lowercase());
+            sources.insert(f);
         }
     }
     let mut targets: HashSet<PathBuf> = HashSet::new();
@@ -96,9 +92,9 @@ pub fn plan_rename(items: &[(&PhotoItem, String)]) -> Result<RenamePlan, FileOpE
             }
             // Case-only renames on a case-insensitive disk report the target
             // as existing; the two-phase rename below handles those, so only
-            // a target that is not also a source (ignoring letter case)
-            // counts as a collision.
-            if to.exists() && !sources.contains(&to.to_string_lossy().to_lowercase()) {
+            // a target that is not also a source (by path, or the same file
+            // under another case) counts as a collision.
+            if to.exists() && !sources.contains(&to) && !is_one_of(&to, &sources) {
                 plan.collisions
                     .push((to.clone(), "a file with this name already exists".into()));
                 continue;
@@ -107,6 +103,24 @@ pub fn plan_rename(items: &[(&PhotoItem, String)]) -> Result<RenamePlan, FileOpE
         }
     }
     Ok(plan)
+}
+
+/// Is `p` the same file on disk as one of `sources` (e.g. `SHOT.jpg` and
+/// `shot.jpg` on a case-insensitive disk)?
+fn is_one_of(p: &Path, sources: &HashSet<PathBuf>) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let id = |q: &Path| std::fs::metadata(q).ok().map(|m| (m.dev(), m.ino()));
+        id(p).is_some_and(|t| sources.iter().any(|s| id(s) == Some(t)))
+    }
+    #[cfg(not(unix))]
+    {
+        let low = p.to_string_lossy().to_lowercase();
+        sources
+            .iter()
+            .any(|s| s.to_string_lossy().to_lowercase() == low)
+    }
 }
 
 /// Execute a plan. Two phases (every source to a temporary name, then every
@@ -274,32 +288,27 @@ mod tests {
     }
 
     #[test]
-    fn case_only_rename_is_not_a_collision_with_itself() {
-        // On a case-insensitive disk (APFS, ExFAT) `dsc_0001.JPG` "exists"
-        // the moment `DSC_0001.JPG` does; the plan must treat the target as
-        // the same source, not as a file already using the name. (On this
-        // case-sensitive test filesystem the differently-cased target does
-        // not exist, so this pins the plan-level behavior: one move, no
-        // collision, and the two-phase rename carries it out.)
+    fn case_only_rename_is_not_a_collision() {
+        // On a case-insensitive disk (APFS, ExFAT) `SHOT.JPG` "exists" the
+        // moment `shot.JPG` does; the plan must treat the target as the same
+        // source (same inode), not as a file already using the name. (On
+        // this case-sensitive test filesystem the differently-cased target
+        // does not exist, so this pins the plan-level behavior: one move,
+        // no collision, and the two-phase rename carries it out.)
         let d = tempfile::tempdir().unwrap();
-        let a = item(d.path(), "DSC_0001", &["JPG"]);
-        let plan = plan_rename(&[(&a, "dsc_0001".into())]).unwrap();
-        assert!(
-            plan.collisions.is_empty(),
-            "case-only rename collided: {:?}",
-            plan.collisions
-        );
-        assert_eq!(
-            plan.moves,
-            vec![(
-                d.path().join("DSC_0001.JPG"),
-                d.path().join("dsc_0001.JPG")
-            )]
-        );
-        assert!(plan.can_run());
+        let a = item(d.path(), "shot", &["JPG"]);
+        let plan = plan_rename(&[(&a, "SHOT".into())]).unwrap();
+        assert!(plan.collisions.is_empty(), "{:?}", plan.collisions);
         rename(&plan).unwrap();
-        assert!(d.path().join("dsc_0001.JPG").is_file());
-        assert!(!d.path().join("DSC_0001.JPG").exists());
+        let names: Vec<String> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["SHOT.JPG"]);
+        // A different file under the new name is still a collision.
+        let b = item(d.path(), "other", &["JPG"]);
+        let plan = plan_rename(&[(&b, "SHOT".into())]).unwrap();
+        assert_eq!(plan.collisions.len(), 1);
     }
 
     #[test]

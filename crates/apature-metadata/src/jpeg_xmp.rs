@@ -19,6 +19,9 @@ pub const XMP_SIG: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 /// bytes - 29 signature bytes). Bigger packets need Extended XMP, which we
 /// do not write.
 pub const MAX_PACKET: usize = 65_504;
+/// Most bytes after the marker and length that one JPEG segment can hold
+/// (the 2-byte length counts itself, so 65535 - 2).
+pub const MAX_SEGMENT_BODY: usize = 65_533;
 /// Whitespace padding appended to a freshly created packet so later edits
 /// by other tools can grow it in place (the XMP spec's recommendation).
 const PADDING: usize = 2048;
@@ -33,6 +36,8 @@ pub enum JpegXmpError {
     Malformed(usize),
     #[error("XMP packet is {0} bytes; more than {MAX_PACKET} needs Extended XMP, which is not supported")]
     PacketTooLarge(usize),
+    #[error("the {0} block is {1} bytes, more than one JPEG segment holds ({MAX_SEGMENT_BODY}); shorten the caption, keywords or other long fields")]
+    SegmentTooLarge(&'static str, usize),
     #[error("{0}")]
     Xmp(#[from] XmpError),
     #[error("embedded packet in {0} did not read back with the requested marks; original left untouched")]
@@ -133,6 +138,27 @@ fn build_segment(packet: &str) -> Result<Vec<u8>, JpegXmpError> {
     seg.extend_from_slice(XMP_SIG);
     seg.extend_from_slice(packet.as_bytes());
     Ok(seg)
+}
+
+/// One marker segment: FF `marker`, length, `sig`, `body`. A body too big
+/// for the 16-bit length is an error, never a wrapped length (which would
+/// leave a corrupt file). `what` names the block in the error.
+pub fn segment(
+    marker: u8,
+    what: &'static str,
+    sig: &[u8],
+    body: &[u8],
+) -> Result<Vec<u8>, JpegXmpError> {
+    let n = sig.len() + body.len();
+    if n > MAX_SEGMENT_BODY {
+        return Err(JpegXmpError::SegmentTooLarge(what, n));
+    }
+    let mut v = Vec::with_capacity(n + 4);
+    v.extend_from_slice(&[0xFF, marker]);
+    v.extend_from_slice(&((n + 2) as u16).to_be_bytes());
+    v.extend_from_slice(sig);
+    v.extend_from_slice(body);
+    Ok(v)
 }
 
 /// Return a copy of `data` with `packet` as its XMP segment: replacing the

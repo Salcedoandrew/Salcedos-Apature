@@ -788,6 +788,9 @@ fn ingest(
         report.bytes_copied as f64 / 1e6,
         report.elapsed_secs
     );
+    if let Some(e) = &report.ledger_error {
+        eprintln!("warning: the ingest ledger could not be saved ({e}); \"only new\" may offer these photos again");
+    }
     // Where the wall-clock time goes (the copy figure above includes the
     // ledger save; the rest is scanning, EXIF and fingerprints in the plan).
     eprintln!(

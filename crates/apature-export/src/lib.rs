@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use apature_core::{Kind, PhotoItem};
-use apature_metadata::jpeg_xmp::{header_segments, is_exif_segment};
+use apature_metadata::jpeg_xmp::{header_segments, is_exif_segment, segment as jpeg_segment};
 use apature_metadata::{edits, exif, exif_write, iim, iptc, Iptc};
 use apature_preview::{decode_jpeg, find_embedded_jpegs, rotate, Rgb};
 
@@ -282,21 +282,18 @@ fn crop_to(img: Rgb, c: edits::Crop) -> Rgb {
     Rgb::from_image(image::imageops::crop_imm(&src, x, y, w, h).to_image())
 }
 
-/// One APP1 segment (marker included). The length field is a u16 counting
-/// its own two bytes, so a longer segment cannot be represented at all:
-/// error instead of wrapping the length and silently corrupting the JPEG
-/// (same policy as `apature_metadata::jpeg_xmp`'s MAX_PACKET check).
+/// One APP1 segment (marker included), built by the shared guard in
+/// `apature_metadata::jpeg_xmp`: a body too big for the 16-bit length is an
+/// error, never a wrapped length that would silently corrupt the JPEG.
 pub(crate) fn app1(sig: &[u8], body: &[u8]) -> Result<Vec<u8>, ExportError> {
-    let len = 2 + sig.len() + body.len();
-    if len > u16::MAX as usize {
-        return Err(ExportError::SegmentTooLarge(len));
-    }
-    let mut v = Vec::with_capacity(len + 2);
-    v.extend_from_slice(&[0xFF, 0xE1]);
-    v.extend_from_slice(&(len as u16).to_be_bytes());
-    v.extend_from_slice(sig);
-    v.extend_from_slice(body);
-    Ok(v)
+    jpeg_segment(0xE1, "APP1", sig, body).map_err(|e| match e {
+        // The shared guard counts sig + body; our error counts the whole
+        // length field, which is two bytes more.
+        apature_metadata::jpeg_xmp::JpegXmpError::SegmentTooLarge(_, n) => {
+            ExportError::SegmentTooLarge(n + 2)
+        }
+        other => ExportError::Jpeg(other),
+    })
 }
 
 /// `encoded` with `segs` spliced in right after SOI and the encoder's

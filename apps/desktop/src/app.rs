@@ -2090,6 +2090,16 @@ impl App {
                         .as_ref()
                         .map(|p| rep.all_verified(p))
                         .unwrap_or(false);
+                    if let Some(e) = &rep.ledger_error {
+                        log::warn!("ingest ledger not saved: {e}");
+                        self.toast(
+                            ui::toasts::Kind::Warn,
+                            format!(
+                                "Photos copied, but Apature couldn't save its list of imported photos ({e}); \
+                                 \"Only new\" may offer them again"
+                            ),
+                        );
+                    }
                     let open_after = ok && self.prefs.open_after_ingest && !self.ingest.apply_pad;
                     if let Some(r) = self.ingest.running.as_mut() {
                         self.status = if ok {

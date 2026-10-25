@@ -121,10 +121,14 @@ pub const MAX_SEGMENT: usize = u16::MAX as usize;
 pub enum IimError {
     #[error("IIM segment is {0} bytes; a JPEG segment holds at most {MAX_SEGMENT}")]
     SegmentTooLarge(usize),
+    #[error("metadata: {0}")]
+    Jpeg(crate::jpeg_xmp::JpegXmpError),
 }
 
 /// A complete APP13 segment (marker included) holding the IIM block as
-/// Photoshop image resource 0x0404.
+/// Photoshop image resource 0x0404. Built by the shared guard in
+/// `crate::jpeg_xmp::segment`, so an oversized block is an error, never a
+/// wrapped length.
 pub fn app13_segment(iptc: &Iptc) -> Result<Vec<u8>, IimError> {
     let payload = datasets(iptc);
     let mut irb = Vec::with_capacity(payload.len() + 16);
@@ -136,16 +140,12 @@ pub fn app13_segment(iptc: &Iptc) -> Result<Vec<u8>, IimError> {
     if payload.len() % 2 == 1 {
         irb.push(0);
     }
-    let body_len = 2 + 14 + irb.len();
-    if body_len > MAX_SEGMENT {
-        return Err(IimError::SegmentTooLarge(body_len));
-    }
-    let mut seg = Vec::with_capacity(body_len + 2);
-    seg.extend_from_slice(&[0xFF, 0xED]);
-    seg.extend_from_slice(&(body_len as u16).to_be_bytes());
-    seg.extend_from_slice(b"Photoshop 3.0\0");
-    seg.extend_from_slice(&irb);
-    Ok(seg)
+    crate::jpeg_xmp::segment(0xED, "IPTC-IIM", b"Photoshop 3.0\0", &irb).map_err(|e| match e {
+        // The shared guard counts sig + body; our error counts the whole
+        // length field, which is two bytes more.
+        crate::jpeg_xmp::JpegXmpError::SegmentTooLarge(_, n) => IimError::SegmentTooLarge(n + 2),
+        other => IimError::Jpeg(other),
+    })
 }
 
 #[cfg(test)]
