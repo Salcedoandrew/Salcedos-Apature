@@ -540,6 +540,13 @@ pub struct App {
     /// The newest single-photo mark and its status line, finished with the
     /// file count once the write lands.
     mark_status: Option<(u64, String)>,
+    /// A bulk sidecar write (paste, caption-to-selection, stationery,
+    /// rotate) running on the mark-writer thread; the final status is set
+    /// when its last file reports in.
+    bulk_write: Option<BulkWrite>,
+    /// A single caption save running on the mark-writer thread. If it
+    /// fails, the draft goes dirty again so the caption is not lost.
+    caption_write: Option<CaptionWrite>,
     ingest_jobs: IngestJobs,
     /// Files currently being dragged over the window, for the drop overlay.
     pub drag_hover: usize,
@@ -592,6 +599,118 @@ pub struct App {
     run_done: bool,
     frames: u64,
     screenshot_requested: bool,
+}
+
+/// What a bulk sidecar write was, for the final status line.
+enum BulkKind {
+    Paste,
+    Caption,
+    Stationery,
+    Rotate { dir: &'static str },
+}
+
+/// A bulk sidecar write (paste, caption-to-selection, stationery, rotate)
+/// running on the mark-writer thread. The UI stays responsive while the
+/// files land; each file's result is recorded here, and the final status
+/// is set when the last file reports in.
+struct BulkWrite {
+    /// Sequence numbers still to report in.
+    remaining: HashSet<u64>,
+    /// Photos whose write landed.
+    ok: usize,
+    /// Files written across the photos that landed.
+    files: usize,
+    /// Photos whose write failed.
+    failed: usize,
+    last_error: Option<String>,
+    /// Photos the bulk was asked to write.
+    total: usize,
+    kind: BulkKind,
+}
+
+impl BulkWrite {
+    fn new(seqs: Vec<u64>, total: usize, kind: BulkKind) -> Self {
+        BulkWrite {
+            remaining: seqs.into_iter().collect(),
+            ok: 0,
+            files: 0,
+            failed: 0,
+            last_error: None,
+            total,
+            kind,
+        }
+    }
+
+    /// Record one file's result; returns the final status text when the
+    /// last file reports in.
+    fn record(&mut self, seq: u64, result: &Result<usize, String>) -> Option<String> {
+        if !self.remaining.remove(&seq) {
+            return None;
+        }
+        match result {
+            Ok(n) => {
+                self.ok += 1;
+                self.files += n;
+            }
+            Err(e) => {
+                self.failed += 1;
+                self.last_error = Some(e.clone());
+            }
+        }
+        if !self.remaining.is_empty() {
+            return None;
+        }
+        Some(self.finish_text())
+    }
+
+    fn finish_text(&self) -> String {
+        let s = if self.total == 1 { "" } else { "s" };
+        match &self.kind {
+            BulkKind::Paste => format!(
+                "Pasted metadata onto {} photo{} ({} files{})",
+                self.total,
+                s,
+                self.files,
+                if self.failed > 0 {
+                    format!(", {} failed", self.failed)
+                } else {
+                    String::new()
+                }
+            ),
+            BulkKind::Caption => match &self.last_error {
+                None => format!("Caption fields saved to {} photos", self.ok),
+                Some(e) => format!(
+                    "Saved to {} of {} photos; last error: {e}",
+                    self.ok, self.total
+                ),
+            },
+            BulkKind::Stationery => match &self.last_error {
+                Some(e) => format!("Pad failed: {e}"),
+                None => format!(
+                    "Assignment pad applied to {} photo{} → {} files",
+                    self.total, s, self.files
+                ),
+            },
+            BulkKind::Rotate { dir } => match self.failed {
+                0 => format!("Rotated {} photo{} {dir}", self.ok, s),
+                f => format!(
+                    "Rotated {} {dir}; {f} could not be written (see log)",
+                    self.ok
+                ),
+            },
+        }
+    }
+}
+
+/// A single caption save running on the mark-writer thread. The draft was
+/// marked clean when the save was queued; if the write fails, the draft's
+/// original fields are restored here so the caption goes dirty again
+/// instead of silently vanishing.
+struct CaptionWrite {
+    seq: u64,
+    idx: usize,
+    original: crate::ui::caption::DraftFields,
+    announce: bool,
 }
 
 impl App {
@@ -693,6 +812,8 @@ impl App {
             key_once: Default::default(),
             mark_writer: Default::default(),
             mark_status: None,
+            bulk_write: None,
+            caption_write: None,
             export_jobs: crate::export_job::ExportJobs::new(cc.egui_ctx.clone()),
             deliver_jobs: DeliverJobs::new(cc.egui_ctx.clone()),
             ingest_jobs: IngestJobs::new(cc.egui_ctx.clone(), ledger_path),
@@ -2141,31 +2262,28 @@ impl App {
     /// through the undo stack; IPTC is written in place (not undoable, the
     /// status says how many files).
     fn paste_metadata(&mut self) {
-        self.flush_marks();
         let Some((m, iptc)) = self.meta_clip.clone() else {
             self.status = "Nothing copied yet (⌥⌘C copies the focused photo's metadata)".into();
             return;
         };
         let targets = self.selection.targets(self.cursor);
         self.mark("paste marks", move |x| *x = m);
-        let mut files = 0;
-        let mut failed = 0;
-        for &i in &targets {
-            match items::write_iptc(&self.items[i], &iptc, self.prefs.jpeg_marks()) {
-                Ok(w) => files += w.len(),
-                Err(_) => failed += 1,
-            }
-        }
+        // The IPTC half goes through the mark writer with the marks, in
+        // queue order, so the window never blocks on a slow volume even
+        // across hundreds of photos.
+        let policy = self.prefs.jpeg_marks();
+        let items: Vec<PhotoItem> = targets.iter().map(|&i| self.items[i].clone()).collect();
+        let seqs: Vec<u64> = items
+            .into_iter()
+            .map(|item| self.mark_writer.submit_iptc(item, iptc.clone(), policy))
+            .collect();
+        let total = targets.len();
+        self.bulk_write = Some(BulkWrite::new(seqs, total, BulkKind::Paste));
+        self.mark_status = None;
         self.inspector_iptc = None;
         self.status = format!(
-            "Pasted metadata onto {} photo{} ({files} files{})",
-            targets.len(),
-            if targets.len() == 1 { "" } else { "s" },
-            if failed > 0 {
-                format!(", {failed} failed")
-            } else {
-                String::new()
-            }
+            "Pasting metadata onto {total} photo{}…",
+            if total == 1 { "" } else { "s" }
         );
     }
 
@@ -2316,7 +2434,6 @@ impl App {
 
     /// Write the draft's changed fields. Returns true when something was written.
     fn save_caption(&mut self, announce: bool) -> bool {
-        self.flush_marks();
         let Some(draft) = self.caption_draft.as_ref() else {
             return false;
         };
@@ -2325,28 +2442,30 @@ impl App {
         }
         let changes = draft.fields.changes_from(&draft.original);
         let idx = draft.idx;
-        match items::write_iptc(&self.items[idx], &changes, self.prefs.jpeg_marks()) {
-            Ok(w) => {
-                self.remember_caption_history(&changes);
-                if let Some(d) = self.caption_draft.as_mut() {
-                    d.original = d.fields.clone();
-                }
-                self.inspector_iptc = None;
-                if announce {
-                    self.status = format!(
-                        "Caption saved: {} → {} file{}",
-                        self.items[idx].display_name(),
-                        w.len(),
-                        if w.len() == 1 { "" } else { "s" }
-                    );
-                }
-                true
-            }
-            Err(e) => {
-                self.status = format!("Could not save caption: {e}");
-                false
-            }
+        let original = draft.original.clone();
+        // Queue the write instead of blocking on it: the file lands on the
+        // writer thread, in order behind any pending marks. If it fails,
+        // the draft goes dirty again (see poll_mark_writes).
+        let seq = self.mark_writer.submit_iptc(
+            self.items[idx].clone(),
+            changes.clone(),
+            self.prefs.jpeg_marks(),
+        );
+        self.caption_write = Some(CaptionWrite {
+            seq,
+            idx,
+            original,
+            announce,
+        });
+        self.remember_caption_history(&changes);
+        if let Some(d) = self.caption_draft.as_mut() {
+            d.original = d.fields.clone();
         }
+        self.inspector_iptc = None;
+        if announce {
+            self.status = format!("Saving caption: {}…", self.items[idx].display_name());
+        }
+        true
     }
 
     /// Feed the ▾ recent-values menus from what was just written.
@@ -2390,7 +2509,6 @@ impl App {
     /// in the draft go to every selected photo; untouched fields stay as each
     /// photo had them.
     fn save_caption_to_selection(&mut self) {
-        self.flush_marks();
         let Some(draft) = self.caption_draft.as_ref() else {
             return;
         };
@@ -2399,26 +2517,24 @@ impl App {
         }
         let changes = draft.fields.changes_from(&draft.original);
         let targets = self.selection.targets(self.cursor);
-        let mut written = 0usize;
-        let mut failed: Option<String> = None;
-        for &i in &targets {
-            match items::write_iptc(&self.items[i], &changes, self.prefs.jpeg_marks()) {
-                Ok(_) => written += 1,
-                Err(e) => failed = Some(e.to_string()),
-            }
-        }
+        let policy = self.prefs.jpeg_marks();
+        let items: Vec<PhotoItem> = targets.iter().map(|&i| self.items[i].clone()).collect();
+        let seqs: Vec<u64> = items
+            .into_iter()
+            .map(|item| self.mark_writer.submit_iptc(item, changes.clone(), policy))
+            .collect();
+        let total = targets.len();
+        self.bulk_write = Some(BulkWrite::new(seqs, total, BulkKind::Caption));
+        self.mark_status = None;
         self.remember_caption_history(&changes);
         if let Some(d) = self.caption_draft.as_mut() {
             d.original = d.fields.clone();
         }
         self.inspector_iptc = None;
-        self.status = match failed {
-            None => format!("Caption fields saved to {written} photos"),
-            Some(e) => format!(
-                "Saved to {written} of {} photos; last error: {e}",
-                targets.len()
-            ),
-        };
+        self.status = format!(
+            "Saving caption to {total} photo{}…",
+            if total == 1 { "" } else { "s" }
+        );
     }
 
     /// Send the last export's files to the named target on a worker thread.
@@ -2550,54 +2666,44 @@ impl App {
 
     /// Store (or remove) the crop in the sidecar; previews re-render.
     fn write_crop(&mut self, idx: usize, crop: Option<edits::Crop>) {
-        self.flush_marks();
-        let sidecar = self.items[idx].sidecar_path();
         let change = edits::Change {
             crop: Some(crop),
             ..Default::default()
         };
-        match edits::write(&sidecar, &change) {
-            Ok(()) => {
-                self.inspector_iptc = None;
-                self.status = match crop {
-                    Some(c) => format!(
-                        "Crop saved: {:.0}% × {:.0}% of the frame · applied on export",
-                        (c.right - c.left) * 100.0,
-                        (c.bottom - c.top) * 100.0
-                    ),
-                    None => "Crop removed".into(),
-                };
-                log::info!("crop {} → {:?}", self.items[idx].display_name(), crop);
-            }
-            Err(e) => {
-                self.status = format!("Could not save crop: {e}");
-                self.toast(ui::toasts::Kind::Error, self.status.clone());
-            }
-        }
+        // Queue the write: the crop lands on the writer thread, in order
+        // behind any pending marks. A failure surfaces in poll_mark_writes.
+        self.mark_writer
+            .submit_edits(self.items[idx].clone(), change);
+        self.inspector_iptc = None;
+        self.status = match crop {
+            Some(c) => format!(
+                "Crop saved: {:.0}% × {:.0}% of the frame · applied on export",
+                (c.right - c.left) * 100.0,
+                (c.bottom - c.top) * 100.0
+            ),
+            None => "Crop removed".into(),
+        };
+        log::info!("crop {} → {:?}", self.items[idx].display_name(), crop);
     }
 
     fn apply_stationery(&mut self) {
-        self.flush_marks();
         let Some(pad) = self.assignment.as_ref().map(|a| a.iptc()) else {
             return;
         };
         let targets = self.selection.targets(self.cursor);
-        let mut written = 0;
-        let mut failed = None;
-        for &i in &targets {
-            match items::write_iptc(&self.items[i], &pad, self.prefs.jpeg_marks()) {
-                Ok(w) => written += w.len(),
-                Err(e) => failed = Some(e.to_string()),
-            }
-        }
-        self.status = match failed {
-            Some(e) => format!("Pad failed: {e}"),
-            None => format!(
-                "Assignment pad applied to {} photo{} → {written} files",
-                targets.len(),
-                if targets.len() == 1 { "" } else { "s" }
-            ),
-        };
+        let policy = self.prefs.jpeg_marks();
+        let items: Vec<PhotoItem> = targets.iter().map(|&i| self.items[i].clone()).collect();
+        let seqs: Vec<u64> = items
+            .into_iter()
+            .map(|item| self.mark_writer.submit_iptc(item, pad.clone(), policy))
+            .collect();
+        let total = targets.len();
+        self.bulk_write = Some(BulkWrite::new(seqs, total, BulkKind::Stationery));
+        self.mark_status = None;
+        self.status = format!(
+            "Applying pad to {total} photo{}…",
+            if total == 1 { "" } else { "s" }
+        );
         self.caption_draft = None;
         self.inspector_iptc = None;
         self.sync_caption_draft();
@@ -2660,11 +2766,13 @@ impl App {
     /// files (by path), so new arrivals from an ingest slot in without
     /// disturbing a cull in progress.
     pub fn refresh_folder(&mut self) {
-        self.flush_marks();
         let Some(dir) = self.folder.clone() else {
             return;
         };
         self.save_caption(false);
+        // The caption save is queued now: wait for it before the rescan
+        // reads the sidecars, or the rescan would show the old caption.
+        self.flush_marks();
         let cursor_path = self.items.get(self.cursor).map(|i| i.path().to_path_buf());
         let selected: Vec<PathBuf> = self
             .selection
@@ -2850,11 +2958,13 @@ impl App {
     }
 
     pub fn switch_tab(&mut self, i: usize) {
-        self.flush_marks();
         if i >= self.tabs.len() || i == self.active {
             return;
         }
         self.save_caption(false);
+        // The caption save is queued now: wait for it before the tab
+        // changes, so the parked tab's photo is on disk as saved.
+        self.flush_marks();
         let parked = self.take_tab();
         let cur = self.active;
         self.tabs[cur].count = parked.items.len();
@@ -3540,13 +3650,15 @@ impl App {
     /// sidecar; the files themselves are never touched. Turning the other way
     /// undoes it.
     fn rotate(&mut self, cw: bool) {
-        self.flush_marks();
-        use apature_metadata::edits;
         if self.items.is_empty() {
             return;
         }
         let targets = self.selection.targets(self.cursor);
-        let (mut done, mut failed) = (0usize, 0usize);
+        // Work out each photo's next orientation (reads the EXIF cache and
+        // the sidecar), then queue the writes: the files land on the
+        // writer thread, in order behind any pending marks.
+        let mut jobs: Vec<(PhotoItem, edits::Change)> = Vec::with_capacity(targets.len());
+        let (mut failed, mut last_error) = (0usize, None);
         for &i in &targets {
             let item = &self.items[i];
             let file_o = self.exif[i]
@@ -3558,45 +3670,51 @@ impl App {
                         .map(|e| e.orientation)
                 })
                 .unwrap_or(1);
-            let sidecar = item.sidecar_path();
-            let result = edits::read(&sidecar).and_then(|e| {
-                let now = e.orientation_or(file_o);
-                let next = if cw {
-                    edits::rotate_cw(now)
-                } else {
-                    edits::rotate_ccw(now)
-                };
-                // Back at the camera's own orientation: drop the override.
-                let value = (next != file_o).then_some(next as u8);
-                edits::write(
-                    &sidecar,
-                    &edits::Change {
-                        orientation: Some(value),
-                        ..Default::default()
-                    },
-                )
-            });
-            match result {
-                Ok(()) => {
-                    done += 1;
-                    // Re-render this photo with the new orientation.
-                    self.thumbs[i] = None;
-                    self.thumb_err[i] = None;
-                    self.native[i] = None;
-                    self.previews.remove(&i);
-                    self.preview_lru.retain(|&p| p != i);
+            match edits::read(&item.sidecar_path()) {
+                Ok(e) => {
+                    let now = e.orientation_or(file_o);
+                    let next = if cw {
+                        edits::rotate_cw(now)
+                    } else {
+                        edits::rotate_ccw(now)
+                    };
+                    // Back at the camera's own orientation: drop the override.
+                    let value = (next != file_o).then_some(next as u8);
+                    jobs.push((
+                        item.clone(),
+                        edits::Change {
+                            orientation: Some(value),
+                            ..Default::default()
+                        },
+                    ));
                 }
                 Err(e) => {
                     failed += 1;
+                    last_error = Some(e.to_string());
                     log::warn!("rotate {}: {e}", item.display_name());
                 }
             }
         }
+        let total = targets.len();
         let dir = if cw { "right" } else { "left" };
-        self.status = match (done, failed) {
-            (n, 0) => format!("Rotated {n} photo{} {dir}", if n == 1 { "" } else { "s" }),
-            (n, f) => format!("Rotated {n} {dir}; {f} could not be written (see log)"),
-        };
+        let seqs: Vec<u64> = jobs
+            .into_iter()
+            .map(|(item, change)| self.mark_writer.submit_edits(item, change))
+            .collect();
+        let mut bulk = BulkWrite::new(seqs, total, BulkKind::Rotate { dir });
+        bulk.failed = failed;
+        bulk.last_error = last_error;
+        if bulk.remaining.is_empty() {
+            self.status = bulk.finish_text();
+            self.status_since = Some(Instant::now());
+        } else {
+            self.bulk_write = Some(bulk);
+            self.mark_status = None;
+            self.status = format!(
+                "Rotating {total} photo{} {dir}…",
+                if total == 1 { "" } else { "s" }
+            );
+        }
     }
 
     /// Set marks in memory and queue the file writes; never waits for disk.
@@ -3633,13 +3751,73 @@ impl App {
     fn poll_mark_writes(&mut self) {
         for d in self.mark_writer.poll() {
             let idx = self.items.iter().position(|it| it.path() == d.path);
-            match d.result {
-                Ok(n) => {
+            if d.result.is_ok() {
+                if let Some(i) = idx {
+                    if let Some(c) = self.conflicts.get_mut(i) {
+                        c.clear();
+                    }
+                }
+            }
+            // A bulk write finishing: a rotate re-renders each photo as
+            // its file lands, and the final status is set when the last
+            // file reports in.
+            if self
+                .bulk_write
+                .as_ref()
+                .is_some_and(|b| b.remaining.contains(&d.seq))
+            {
+                let is_rotate = self
+                    .bulk_write
+                    .as_ref()
+                    .is_some_and(|b| matches!(b.kind, BulkKind::Rotate { .. }));
+                if is_rotate && d.result.is_ok() {
                     if let Some(i) = idx {
-                        if let Some(c) = self.conflicts.get_mut(i) {
-                            c.clear();
+                        self.invalidate_thumb(i);
+                    }
+                }
+                let mut bulk = self.bulk_write.take().unwrap();
+                if let Some(text) = bulk.record(d.seq, &d.result) {
+                    self.status = text;
+                    self.status_since = Some(Instant::now());
+                } else {
+                    self.bulk_write = Some(bulk);
+                }
+                continue;
+            }
+            // A single caption save finishing: on failure the draft goes
+            // dirty again so the caption is not silently lost.
+            if let Some(cw) = &self.caption_write {
+                if cw.seq == d.seq {
+                    let cw = self.caption_write.take().unwrap();
+                    match &d.result {
+                        Ok(n) => {
+                            if cw.announce {
+                                let name = self
+                                    .items
+                                    .get(cw.idx)
+                                    .map(|it| it.display_name())
+                                    .unwrap_or_default();
+                                self.status = format!(
+                                    "Caption saved: {name} → {n} file{}",
+                                    if *n == 1 { "" } else { "s" }
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(draft) = self.caption_draft.as_mut() {
+                                if draft.idx == cw.idx {
+                                    draft.original = cw.original;
+                                }
+                            }
+                            self.status = format!("Could not save caption: {e}");
+                            self.status_since = Some(Instant::now());
                         }
                     }
+                    continue;
+                }
+            }
+            match d.result {
+                Ok(n) => {
                     if let Some((seq, text)) = &self.mark_status {
                         if *seq == d.seq && self.status == *text {
                             self.status =
@@ -3648,17 +3826,35 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    log::warn!("marks for {}: {e}", d.path.display());
-                    self.status = format!("Could not write marks: {e}");
+                    log::warn!("{} for {}: {e}", d.label, d.path.display());
+                    if d.label == "edits" {
+                        // The only single edits job is a crop save.
+                        self.status = format!("Could not save crop: {e}");
+                        self.toast(ui::toasts::Kind::Error, self.status.clone());
+                    } else {
+                        self.status = format!("Could not write {}: {e}", d.label);
+                    }
                     self.status_since = Some(Instant::now());
                 }
             }
         }
     }
 
-    /// Wait for queued mark writes before anything else touches sidecars
-    /// (captions, crops, turns, a rescan, copies), so none of them races a
-    /// pending write. Instant when nothing is queued.
+    /// Drop a photo's decoded pixels so the next frame re-reads them with
+    /// the sidecar's new orientation.
+    fn invalidate_thumb(&mut self, i: usize) {
+        self.thumbs[i] = None;
+        self.thumb_err[i] = None;
+        self.native[i] = None;
+        self.previews.remove(&i);
+        self.preview_lru.retain(|&p| p != i);
+    }
+
+    /// Wait for queued sidecar writes before anything reads a sidecar from
+    /// disk (a rescan, opening a folder, a command that touches files) or
+    /// before the app quits, so none of them reads stale data. Instant when
+    /// nothing is queued. Writes themselves no longer need it: they go
+    /// through the mark writer, which runs them one at a time in order.
     pub fn flush_marks(&mut self) {
         if self.mark_writer.pending() > 0
             && !self
@@ -5232,5 +5428,87 @@ mod crop_tests {
         assert_eq!(parse_latlon("40.4461 -79.8955"), Some((40.4461, -79.8955)));
         assert_eq!(parse_latlon("91, 0"), None);
         assert_eq!(parse_latlon("abc"), None);
+    }
+}
+
+#[cfg(test)]
+mod bulk_write_tests {
+    use super::*;
+
+    fn bulk(kind: BulkKind, total: usize) -> BulkWrite {
+        BulkWrite::new((1..=total as u64).collect(), total, kind)
+    }
+
+    #[test]
+    fn paste_finishes_with_file_counts() {
+        let mut b = bulk(BulkKind::Paste, 3);
+        assert_eq!(b.record(1, &Ok(1)), None);
+        assert_eq!(b.record(2, &Ok(2)), None);
+        assert_eq!(
+            b.record(3, &Err("disk full".into())),
+            Some("Pasted metadata onto 3 photos (3 files, 1 failed)".into())
+        );
+    }
+
+    #[test]
+    fn caption_counts_photos_not_files() {
+        let mut b = bulk(BulkKind::Caption, 2);
+        assert_eq!(b.record(1, &Ok(2)), None);
+        assert_eq!(
+            b.record(2, &Ok(1)),
+            Some("Caption fields saved to 2 photos".into())
+        );
+        let mut b = bulk(BulkKind::Caption, 2);
+        assert_eq!(b.record(1, &Ok(1)), None);
+        assert_eq!(
+            b.record(2, &Err("boom".into())),
+            Some("Saved to 1 of 2 photos; last error: boom".into())
+        );
+    }
+
+    #[test]
+    fn rotate_keeps_its_direction() {
+        let mut b = bulk(BulkKind::Rotate { dir: "right" }, 2);
+        assert_eq!(b.record(1, &Ok(1)), None);
+        assert_eq!(b.record(2, &Ok(1)), Some("Rotated 2 photos right".into()));
+        let mut b = bulk(BulkKind::Rotate { dir: "left" }, 2);
+        assert_eq!(b.record(1, &Ok(1)), None);
+        assert_eq!(
+            b.record(2, &Err("boom".into())),
+            Some("Rotated 1 left; 1 could not be written (see log)".into())
+        );
+    }
+
+    #[test]
+    fn stationery_failure_reports_the_error() {
+        let mut b = bulk(BulkKind::Stationery, 1);
+        assert_eq!(
+            b.record(1, &Err("boom".into())),
+            Some("Pad failed: boom".into())
+        );
+    }
+
+    #[test]
+    fn unknown_seq_is_ignored() {
+        let mut b = bulk(BulkKind::Paste, 1);
+        assert_eq!(b.record(99, &Ok(1)), None);
+        assert_eq!(b.ok, 0);
+        assert_eq!(
+            b.record(1, &Ok(1)),
+            Some("Pasted metadata onto 1 photo (1 files)".into())
+        );
+    }
+
+    #[test]
+    fn read_failures_before_any_job_still_finish() {
+        // Rotate where every sidecar read failed at submit time: no jobs,
+        // the counts were set up front, and the text still reads right.
+        let mut b = bulk(BulkKind::Rotate { dir: "right" }, 2);
+        b.failed = 2;
+        b.last_error = Some("no sidecar".into());
+        assert_eq!(
+            b.finish_text(),
+            "Rotated 0 right; 2 could not be written (see log)"
+        );
     }
 }
