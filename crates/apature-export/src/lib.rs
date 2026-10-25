@@ -20,7 +20,6 @@
 pub mod extract;
 
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use apature_core::{Kind, PhotoItem};
@@ -197,6 +196,63 @@ pub enum ExportError {
 /// different folders — must never render into the same temp file.
 #[cfg(target_os = "macos")]
 static RAW_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Sequence for export temp names: exports run in parallel (the desktop's
+/// export pool), and two jobs writing the same output — or the same stem
+/// in different folders — must never share a temp file.
+static EXPORT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Reserve a unique temporary file in the output directory, created
+/// exclusively: an existing file at the name — or a source photo that
+/// happens to carry the temp suffix — is never truncated. Returns the
+/// path and the open handle; the caller keeps the handle through the
+/// write and releases it before publishing.
+fn reserve_temp(out: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let parent = out.parent().unwrap_or_else(|| Path::new("."));
+    let stem = out
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let pid = std::process::id();
+    for _ in 0..100 {
+        let n = EXPORT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let name = format!(".{stem}.apature-export.tmp.{pid}.{n}.jpg");
+        let path = parent.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not reserve a unique export temp file",
+    ))
+}
+
+/// Publish `tmp` at `out`. When overwrite is disabled the publish refuses
+/// an existing destination instead of replacing it: `hard_link` fails
+/// with EEXIST where `rename` would silently replace the file. The temp
+/// file is removed either way.
+fn publish(tmp: &Path, out: &Path, overwrite: bool) -> Result<(), ExportError> {
+    if overwrite {
+        std::fs::rename(tmp, out).map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+    } else {
+        match std::fs::hard_link(tmp, out) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(ExportError::Exists(out.to_path_buf()));
+            }
+            Err(e) => return Err(ExportError::Io(out.to_path_buf(), e)),
+        }
+    }
+    let _ = std::fs::remove_file(tmp);
+    Ok(())
+}
 
 /// Render a RAW with the macOS RAW engine (ImageIO via `sips`) to a JPEG at
 /// quality 100, matched to sRGB, optionally resampled so the long side is
@@ -489,27 +545,39 @@ pub fn export(
         out.to_path_buf()
     };
     let out = out_path.as_path();
-    let tmp = out.with_extension("apature-export.tmp.jpg");
-    let write = || -> std::io::Result<()> {
+    // The temp file is reserved exclusively, so it can never be the source
+    // photo (or an unrelated file) under another name, and two parallel
+    // jobs never share one. Publishing refuses an existing destination
+    // when overwrite is off instead of replacing it.
+    let (tmp, mut f) = reserve_temp(out).map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+    let mut part: Option<PathBuf> = None;
+    let result: Result<(), ExportError> = (|| {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&file)?;
-        f.sync_all()?;
-        if out.exists() && !settings.overwrite {
-            return Err(std::io::Error::other("destination appeared during export"));
-        }
+        f.write_all(&file)
+            .map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+        f.sync_all()
+            .map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+        Ok(())
+    })();
+    drop(f);
+    let result = result.and_then(|()| {
         if settings.format == Format::JpegXl {
-            let part = out.with_extension("jxl.part");
-            transcode_jxl(&tmp, &part).map_err(std::io::Error::other)?;
+            let p = tmp.with_extension("jxl.part");
+            part = Some(p.clone());
+            transcode_jxl(&tmp, &p)
+                .map_err(|e| ExportError::Io(out.to_path_buf(), std::io::Error::other(e)))?;
             let _ = std::fs::remove_file(&tmp);
-            std::fs::rename(&part, out)
+            publish(&p, out, settings.overwrite)
         } else {
-            std::fs::rename(&tmp, out)
+            publish(&tmp, out, settings.overwrite)
         }
-    };
-    if let Err(e) = write() {
+    });
+    if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp);
-        return Err(ExportError::Io(out.to_path_buf(), e));
+        if let Some(p) = &part {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err(e);
     }
     let bytes_written = std::fs::metadata(out)
         .map(|m| m.len())
@@ -787,9 +855,123 @@ mod tests {
             export(&item_for(&src), &sample_iptc(), &Settings::default(), &out),
             Err(ExportError::Exists(_))
         ));
-        assert!(!dir
-            .path()
-            .join("out/wide-export.apature-export.tmp")
-            .exists());
+        // No temp file is left behind: temp names are unique per export.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("out"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("apature-export.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn temp_file_never_consumes_the_source() {
+        // Finding #1: a source named like the old temp file. Exporting
+        // `photo.apature-export.tmp.jpg` to `photo.jpg` used to truncate
+        // the source and rename it away while reporting success.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("photo.apature-export.tmp.jpg");
+        half_and_half(&src);
+        let before = std::fs::read(&src).unwrap();
+        let out = dir.path().join("photo.jpg");
+        let o = export(
+            &item_for(&src),
+            &Iptc::default(),
+            &Settings::default(),
+            &out,
+        )
+        .unwrap();
+        assert_eq!((o.width, o.height), (400, 200));
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            before,
+            "the source must survive the export byte for byte"
+        );
+        assert!(out.exists());
+        // Overwrite still publishes through the same path.
+        let o2 = export(
+            &item_for(&src),
+            &Iptc::default(),
+            &Settings {
+                overwrite: true,
+                ..Default::default()
+            },
+            &out,
+        )
+        .unwrap();
+        assert_eq!((o2.width, o2.height), (400, 200));
+    }
+
+    #[test]
+    fn unrelated_file_at_the_old_temp_name_survives() {
+        // Finding #1: the old deterministic temp name truncated whatever
+        // sat at it. Temp names are unique now, so a bystander is untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0001.jpg");
+        half_and_half(&src);
+        let bystander = dir.path().join("other.apature-export.tmp.jpg");
+        std::fs::write(&bystander, b"do not touch").unwrap();
+        let out = dir.path().join("other.jpg");
+        export(
+            &item_for(&src),
+            &Iptc::default(),
+            &Settings::default(),
+            &out,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&bystander).unwrap(), b"do not touch");
+    }
+
+    #[test]
+    fn parallel_exports_to_the_same_output_do_not_corrupt_each_other() {
+        // Finding #1: parallel jobs to the same output shared one temp
+        // file. Now exactly one wins; the rest are refused, and the file
+        // left behind is a whole, decodable export.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0001.jpg");
+        half_and_half(&src);
+        let out = dir.path().join("same.jpg");
+        let results: Vec<_> = std::thread::scope(|s| {
+            (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        export(
+                            &item_for(&src),
+                            &Iptc::default(),
+                            &Settings::default(),
+                            &out,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect()
+        });
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok, 1, "exactly one export wins: {results:?}");
+        assert!(
+            results
+                .iter()
+                .filter(|r| r.is_err())
+                .all(|r| matches!(r, Err(ExportError::Exists(_)))),
+            "losers are refused, not corrupted: {results:?}"
+        );
+        let back = decode_jpeg(&std::fs::read(&out).unwrap(), None).unwrap();
+        assert_eq!((back.width, back.height), (400, 200));
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("apature-export.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 }

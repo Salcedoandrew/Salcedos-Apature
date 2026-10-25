@@ -3,6 +3,21 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.1.1] — 2026-10-25
+
+Bugfix release for six findings from the Freebuff implementation audit.
+
+### Fixed
+- Export no longer truncates its own source: temp files are reserved exclusively with unique names, and publishing refuses to replace an existing destination when overwrite is off.
+- Ingesting into a folder no longer rewrites the captions of photos from earlier shoots — the assignment pad now applies only to the photos this ingest copied.
+- A verified copy can no longer replace a destination that appears mid-copy; the publish step refuses an existing file.
+- Collision suffixes no longer split RAW+JPEG pairs — all variants and sidecars of a photo now share one stem.
+- Export names are sanitized to a single path component, so EXIF metadata can no longer escape the chosen destination; duplicate export names are suffixed instead of sharing one file.
+- Testing a folder connection no longer deletes an existing `.apature-write-test` file — the probe is uniquely named and exclusively created.
+
+### Tests
+- 16 new regression tests mirroring the audit's reproductions, including the FIFO mid-copy race and the RAW+JPEG suffix scenario. Full workspace suite: 215 passed, 0 failed.
+
 ## [0.1.0] — 2026-10-25
 
 First full release: the build 178 tree with every finding from the ponytail audit fixed, plus the stronger implementations of the same fixes from the 188 tree. Ad-hoc signed: on first launch right-click › Open, or allow it under System Settings › Privacy & Security.

@@ -6,7 +6,8 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -295,6 +296,27 @@ fn verify_host_key(
     )
 }
 
+/// Counter so two probes in one process never share a name even if the
+/// clock has not moved between calls.
+static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A probe name unique to this call: process id, wall-clock time, and a
+/// per-process counter. The folder test must never touch a file that was
+/// already there, so the name cannot be fixed.
+fn unique_probe_path(dir: &Path) -> PathBuf {
+    let n = PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    dir.join(format!(
+        ".apature-write-test-{}-{}-{}",
+        std::process::id(),
+        nanos,
+        n
+    ))
+}
+
 fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverError> {
     let addr = format!("{}:{}", target.host, target.port);
     match target.kind {
@@ -308,10 +330,40 @@ fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverErro
             }
             std::fs::create_dir_all(dir)
                 .map_err(|e| DeliverError::Folder(target.dir.clone(), e.to_string()))?;
-            // Writable? A read-only share fails here, not mid-send.
-            let probe = dir.join(".apature-write-test");
-            std::fs::write(&probe, b"")
-                .map_err(|e| DeliverError::Folder(target.dir.clone(), e.to_string()))?;
+            // Writable? A read-only share fails here, not mid-send. The
+            // probe is created exclusively under a unique name, so a file
+            // that was already there (or a symlink to one) is never
+            // truncated or removed; only this call's probe is deleted.
+            // A collision on the unique name is retried with a fresh one.
+            let mut probe = None;
+            let mut last_err = None;
+            for _ in 0..8 {
+                let candidate = unique_probe_path(dir);
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&candidate)
+                {
+                    Ok(_) => {
+                        probe = Some(candidate);
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        last_err = Some(e);
+                    }
+                    Err(e) => {
+                        return Err(DeliverError::Folder(target.dir.clone(), e.to_string()));
+                    }
+                }
+            }
+            let Some(probe) = probe else {
+                return Err(DeliverError::Folder(
+                    target.dir.clone(),
+                    last_err
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "could not create probe file".into()),
+                ));
+            };
             let _ = std::fs::remove_file(&probe);
             Ok(Box::new(LocalFolder))
         }
@@ -560,6 +612,68 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["IMG_0001.JPG", "IMG_0002.JPG"]);
+    }
+
+    fn folder_target(dir: &std::path::Path) -> Target {
+        Target {
+            name: "folder test".into(),
+            kind: Kind::Folder,
+            host: String::new(),
+            port: Target::default_port(Kind::Folder),
+            user: String::new(),
+            dir: dir.to_string_lossy().into_owned(),
+            key_file: None,
+        }
+    }
+
+    #[test]
+    fn folder_probe_leaves_an_existing_probe_file_alone() {
+        let out = tempfile::tempdir().unwrap();
+        let probe = out.path().join(".apature-write-test");
+        std::fs::write(&probe, b"someone else's file").unwrap();
+        let target = folder_target(out.path());
+        assert!(test_connection(&target, "").is_ok());
+        assert_eq!(
+            std::fs::read(&probe).unwrap(),
+            b"someone else's file",
+            "the preexisting probe file must survive the connection test"
+        );
+        // And no probe of ours is left behind either.
+        let names: Vec<String> = std::fs::read_dir(out.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![".apature-write-test"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn folder_probe_does_not_follow_a_symlink() {
+        let out = tempfile::tempdir().unwrap();
+        let victim = out.path().join("victim.txt");
+        std::fs::write(&victim, b"do not truncate me").unwrap();
+        std::os::unix::fs::symlink(&victim, out.path().join(".apature-write-test")).unwrap();
+        let target = folder_target(out.path());
+        assert!(test_connection(&target, "").is_ok());
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"do not truncate me",
+            "the symlink target must survive the connection test"
+        );
+        assert!(
+            std::fs::symlink_metadata(out.path().join(".apature-write-test"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn folder_probe_leaves_nothing_behind() {
+        let out = tempfile::tempdir().unwrap();
+        let target = folder_target(out.path());
+        assert!(test_connection(&target, "").is_ok());
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     }
 
     /// Runs only with a local FTP server: `APATURE_FTP_TEST=host:port:user:pass:dir`.

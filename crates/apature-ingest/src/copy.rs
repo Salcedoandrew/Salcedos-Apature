@@ -1,10 +1,11 @@
 //! The verified copy primitive: never overwrite, write to a temporary name,
-//! rename only after the copy is flushed and its SHA-256 matches the
-//! source, never delete the source.
+//! publish by hard link only after the copy is flushed and its SHA-256
+//! matches the source, never delete the source.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -49,10 +50,11 @@ fn copy_impl(src: &Path, dst: &Path, verify: bool) -> Result<CopyReport, IngestE
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = temp_name(dst);
+    // Reserve the temp name up front, exclusively: two concurrent copies
+    // to the same destination must never share one file.
+    let (tmp, mut output) = reserve_temp(dst)?;
     let result = (|| {
         let mut input = File::open(src)?;
-        let mut output = File::create(&tmp)?;
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
         let mut total = 0u64;
@@ -71,7 +73,7 @@ fn copy_impl(src: &Path, dst: &Path, verify: bool) -> Result<CopyReport, IngestE
         if verify {
             check_copy(&tmp, src, &src_hash)?;
         }
-        fs::rename(&tmp, dst)?;
+        publish(&tmp, dst)?;
         Ok(CopyReport {
             source: src.to_path_buf(),
             destination: dst.to_path_buf(),
@@ -83,6 +85,24 @@ fn copy_impl(src: &Path, dst: &Path, verify: bool) -> Result<CopyReport, IngestE
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// Publish the verified temp file at `dst` without ever replacing an
+/// existing file. A hard link fails when the name is taken, so a
+/// destination that appeared after the initial check is left untouched
+/// and the copy reports `DestinationExists`. The temp file is in the
+/// destination's directory, so the link is always on one filesystem.
+fn publish(tmp: &Path, dst: &Path) -> Result<(), IngestError> {
+    if let Err(e) = fs::hard_link(tmp, dst) {
+        // A link fails when the name is taken; a dangling symlink at the
+        // destination reads the same way, so check the name itself.
+        if e.kind() == io::ErrorKind::AlreadyExists || fs::symlink_metadata(dst).is_ok() {
+            return Err(IngestError::DestinationExists(dst.to_path_buf()));
+        }
+        return Err(e.into());
+    }
+    let _ = fs::remove_file(tmp);
+    Ok(())
 }
 
 /// The verification step of a copy: the file written at `tmp` must hash to
@@ -112,12 +132,36 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn temp_name(dst: &Path) -> PathBuf {
+/// Counter that makes every reserved temp name in this process unique, so
+/// two concurrent copies to the same destination never share a file. The
+/// process id keeps names distinct across processes; `create_new` retries
+/// past stale names left behind by a crashed run.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Reserve a temp file next to `dst` with exclusive creation and return it
+/// (path plus open handle) so the caller writes through the reserved file.
+fn reserve_temp(dst: &Path) -> io::Result<(PathBuf, File)> {
     let name = dst
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    dst.with_file_name(format!(".{name}.part{}", std::process::id()))
+    for _ in 0..100 {
+        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = dst.with_file_name(format!(".{name}.part{}-{n}", std::process::id()));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(f) => return Ok((candidate, f)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not reserve a temporary copy name",
+    ))
 }
 
 #[cfg(test)]
@@ -200,5 +244,111 @@ mod tests {
             copy_unverified(&src, &dst),
             Err(IngestError::DestinationExists(_))
         ));
+    }
+
+    #[test]
+    fn reserved_temp_names_are_unique_per_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("DSC_0001.NEF");
+        let (p1, f1) = reserve_temp(&dst).unwrap();
+        let (p2, f2) = reserve_temp(&dst).unwrap();
+        assert_ne!(p1, p2, "two reservations must not share a name");
+        assert!(p1.exists() && p2.exists());
+        drop(f1);
+        drop(f2);
+        fs::remove_file(&p1).unwrap();
+        fs::remove_file(&p2).unwrap();
+    }
+
+    #[test]
+    fn a_destination_created_during_the_copy_is_not_replaced() {
+        // Audit finding #3, reproduced the way the audit did: a FIFO
+        // source blocks the copy after its first chunk, so the test can
+        // create the destination mid-copy. The copy must refuse and the
+        // preexisting file must survive intact.
+        use std::io::Write as _;
+        use std::sync::mpsc::channel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("DSC_0001.NEF");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let dst = dir.path().join("out/DSC_0001.NEF");
+        let (first_tx, first_rx) = channel::<()>();
+        let (go_tx, go_rx) = channel::<()>();
+        let chunk = vec![0xABu8; 1 << 20];
+        let fifo_w = fifo.clone();
+        let chunk_w = chunk.clone();
+        let writer = std::thread::spawn(move || {
+            let mut w = File::create(&fifo_w).unwrap();
+            w.write_all(&chunk_w).unwrap();
+            w.flush().unwrap();
+            first_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            w.write_all(&chunk_w).unwrap();
+            w.flush().unwrap();
+            // Dropping `w` closes the FIFO: the reader sees EOF.
+        });
+        let fifo_r = fifo.clone();
+        let dst_r = dst.clone();
+        let copier = std::thread::spawn(move || copy_verified(&fifo_r, &dst_r));
+        first_rx.recv().unwrap();
+        // The destination appears while the copy is still in flight.
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        fs::write(&dst, b"someone else's photo").unwrap();
+        go_tx.send(()).unwrap();
+        writer.join().unwrap();
+        let result = copier.join().unwrap();
+        assert!(matches!(result, Err(IngestError::DestinationExists(p)) if p == dst));
+        assert_eq!(fs::read(&dst).unwrap(), b"someone else's photo");
+        assert!(!dir.path().join("out").read_dir().unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".part")));
+    }
+
+    #[test]
+    fn concurrent_copies_to_the_same_destination_do_not_share_a_temp() {
+        // Two copies racing to one destination: exactly one wins, the
+        // other refuses, and the winner's bytes are intact. With the old
+        // PID-only temp name both shared one file and both failed with a
+        // hash mismatch.
+        let dir = tempfile::tempdir().unwrap();
+        let data_a: Vec<u8> = (0..4 * 1024 * 1024)
+            .map(|i| ((i * 31 + 7) % 251) as u8)
+            .collect();
+        let data_b: Vec<u8> = (0..4 * 1024 * 1024)
+            .map(|i| ((i * 17 + 3) % 241) as u8)
+            .collect();
+        let src_a = dir.path().join("A.NEF");
+        let src_b = dir.path().join("B.NEF");
+        fs::write(&src_a, &data_a).unwrap();
+        fs::write(&src_b, &data_b).unwrap();
+        let dst = dir.path().join("out/DSC.NEF");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let spawn = |src: PathBuf, dst: PathBuf, b: std::sync::Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                b.wait();
+                copy_verified(&src, &dst)
+            })
+        };
+        let h1 = spawn(src_a, dst.clone(), barrier.clone());
+        let h2 = spawn(src_b, dst.clone(), barrier);
+        let r1 = h1.join().unwrap();
+        let r2 = h2.join().unwrap();
+        assert!(r1.is_ok() ^ r2.is_ok(), "r1={r1:?} r2={r2:?}");
+        let winner = if r1.is_ok() { &data_a } else { &data_b };
+        assert_eq!(fs::read(&dst).unwrap(), *winner);
+        let loser = if r1.is_ok() { &r2 } else { &r1 };
+        assert!(matches!(loser, Err(IngestError::DestinationExists(_))));
+        assert!(!dir.path().join("out").read_dir().unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".part")));
     }
 }

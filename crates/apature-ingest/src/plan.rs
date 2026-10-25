@@ -363,6 +363,60 @@ fn place(
     });
 }
 
+/// One variant that survived the ledger check, with the base name it
+/// would take before any collision suffix.
+struct PendingVariant {
+    source: PathBuf,
+    size: u64,
+    fingerprint: Option<String>,
+    stem: String,
+    ext: String,
+}
+
+/// Smallest suffix `k` (0 = the plain names) whose names are free at every
+/// destination and in this plan for every variant of the item and every
+/// companion, so a pair keeps one common stem. Returns 0 when no suffix
+/// up to 10000 is free; the entries are still placed and `place` reports
+/// the collisions, so the plan is refused.
+fn free_suffix(
+    pending: &[PendingVariant],
+    companion_exts: &[String],
+    opts: &Options,
+    folder_rel: &Path,
+    seen_dest: &BTreeMap<PathBuf, PathBuf>,
+) -> u32 {
+    let is_taken = |n: &String| {
+        let p = opts.primary.join(folder_rel).join(n);
+        let s = opts.secondary.as_ref().map(|s| s.join(folder_rel).join(n));
+        p.exists()
+            || seen_dest.contains_key(&p)
+            || s.as_ref()
+                .is_some_and(|s| s.exists() || seen_dest.contains_key(s))
+    };
+    for k in 0..=10_000 {
+        let mut names: Vec<String> = pending
+            .iter()
+            .map(|p| {
+                if k == 0 {
+                    format!("{}{}", p.stem, p.ext)
+                } else {
+                    format!("{}-{}{}", p.stem, k, p.ext)
+                }
+            })
+            .collect();
+        let cand_stem = if k == 0 {
+            pending[0].stem.clone()
+        } else {
+            format!("{}-{k}", pending[0].stem)
+        };
+        names.extend(companion_exts.iter().map(|e| format!("{cand_stem}.{e}")));
+        if names.iter().all(|n| !is_taken(n)) {
+            return k;
+        }
+    }
+    0
+}
+
 pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
     if opts.primary.starts_with(&opts.source) || opts.source.starts_with(&opts.primary) {
         return Err(PlanError::Nested);
@@ -465,6 +519,10 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
                     .unwrap_or_default()
             })
             .collect();
+        // Decide which variants are actually placed (ledger check) and
+        // their base names first: the suffix is chosen once for the whole
+        // item below, so a RAW+JPEG pair never splits across stems.
+        let mut pending: Vec<PendingVariant> = Vec::new();
         for v in &variants {
             // Read once: the ledger check and the entry share it.
             let fp = fingerprint(&v.path);
@@ -507,68 +565,54 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
                     format!("{stem}.{}", facts.ext)
                 }
             };
-            // With the suffix policy, walk `name`, `stem-1.ext`, `stem-2.ext`…
-            // until the name is free at every destination and in this plan.
-            // The first photo file fixes the stem its companions take, so
-            // their names must be free under it too.
-            let (name, suffixed) = if opts.on_collision == CollisionPolicy::Suffix {
-                let (stem, ext) = match name.rfind('.') {
-                    Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
-                    _ => (name.clone(), String::new()),
-                };
-                let mut k = 0u32;
-                loop {
-                    let cand = if k == 0 {
-                        name.clone()
-                    } else {
-                        format!("{stem}-{k}{ext}")
-                    };
-                    let cand_stem = if k == 0 {
-                        stem.clone()
-                    } else {
-                        format!("{stem}-{k}")
-                    };
-                    let mut names = vec![cand.clone()];
-                    if placed_stem.is_none() {
-                        names.extend(companion_exts.iter().map(|e| format!("{cand_stem}.{e}")));
-                    }
-                    let is_taken = |n: &String| {
-                        let p = opts.primary.join(&folder_rel).join(n);
-                        let s = opts.secondary.as_ref().map(|s| s.join(&folder_rel).join(n));
-                        p.exists()
-                            || seen_dest.contains_key(&p)
-                            || s.as_ref()
-                                .is_some_and(|s| s.exists() || seen_dest.contains_key(s))
-                    };
-                    let taken = names.iter().any(is_taken);
-                    if !taken || k > 9999 {
-                        break (cand, k > 0);
-                    }
-                    k += 1;
-                }
-            } else {
-                (name, false)
+            let (stem, ext) = match name.rfind('.') {
+                Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
+                _ => (name.clone(), String::new()),
             };
-            if suffixed {
+            pending.push(PendingVariant {
+                source: v.path.clone(),
+                size: v.size,
+                fingerprint: fp.ok(),
+                stem,
+                ext,
+            });
+        }
+        // With the suffix policy, one suffix for the whole item: walk
+        // `stem`, `stem-1`, `stem-2`… until every variant's name and every
+        // companion's name is free at every destination and in this plan.
+        // The old per-variant walk let the JPEG half keep the plain stem
+        // while the RAW took `-1`, splitting the pair.
+        let suffix_k = if opts.on_collision == CollisionPolicy::Suffix && !pending.is_empty() {
+            free_suffix(&pending, &companion_exts, opts, &folder_rel, &seen_dest)
+        } else {
+            0
+        };
+        for p in &pending {
+            let name = if suffix_k == 0 {
+                format!("{}{}", p.stem, p.ext)
+            } else {
+                format!("{}-{}{}", p.stem, suffix_k, p.ext)
+            };
+            if suffix_k > 0 {
                 plan.suffixed += 1;
             }
             if placed_stem.is_none() {
-                placed_stem = Some(match name.rfind('.') {
-                    Some(i) if i > 0 => name[..i].to_string(),
-                    _ => name.clone(),
+                placed_stem = Some(if suffix_k == 0 {
+                    p.stem.clone()
+                } else {
+                    format!("{}-{suffix_k}", p.stem)
                 });
             }
-            let fp = fp.ok();
             place(
                 &mut plan,
                 &mut seen_dest,
                 opts,
                 &folder_rel,
                 &name,
-                &v.path,
-                v.size,
+                &p.source,
+                p.size,
                 i,
-                fp,
+                p.fingerprint.clone(),
                 false,
             );
             added_any = true;
@@ -806,6 +850,42 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["DSC_0001-1.JPG", "DSC_0001-1.WAV"]);
+    }
+
+    #[test]
+    fn a_suffixed_pair_keeps_one_common_stem() {
+        // Audit finding #4: with only SHOT.NEF at the destination, the
+        // plan used to produce SHOT-1.NEF, SHOT.JPG, SHOT-1.XMP, splitting
+        // the pair so the JPEG no longer scanned with its sidecar.
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        for n in ["SHOT.NEF", "SHOT.JPG", "SHOT.XMP"] {
+            fs::write(src.path().join(n), format!("data-{n}")).unwrap();
+        }
+        fs::write(dst.path().join("SHOT.NEF"), b"old raw").unwrap();
+        let opts = Options {
+            source: src.path().to_path_buf(),
+            primary: dst.path().to_path_buf(),
+            folder_template: String::new(),
+            only_new: false,
+            on_collision: CollisionPolicy::Suffix,
+            ..Default::default()
+        };
+        let plan = build_plan(&opts, &Ledger::in_memory()).unwrap();
+        assert!(plan.can_run(), "{:?}", plan.collisions);
+        let names: Vec<String> = plan
+            .entries
+            .iter()
+            .map(|e| {
+                e.primary
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["SHOT-1.NEF", "SHOT-1.JPG", "SHOT-1.XMP"]);
+        assert_eq!(plan.suffixed, 2);
     }
 
     #[test]
