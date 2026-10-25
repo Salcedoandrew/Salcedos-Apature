@@ -228,7 +228,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apature"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ab_glyph",
  "apature-core",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "apature-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "apature-core",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "apature-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "directories",
  "log",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "apature-deliver"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "log",
  "serde",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "apature-export"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "apature-core",
  "apature-metadata",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "apature-ingest"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "apature-core",
  "apature-metadata",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "apature-metadata"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "apature-core",
  "memmap2",
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "apature-preview"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "apature-core",
  "image",
