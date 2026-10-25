@@ -664,7 +664,7 @@ mod tests {
         };
         let r = run_copy(&p, &AtomicBool::new(false), Some(&pad), |_| {});
         assert_eq!((r.pad_written, r.pad_failed), (1, 0));
-        let sc = fs::read_to_string(d.path().join("out/A.xmp")).unwrap();
+        let sc = fs::read_to_string(d.path().join("out/A.XMP")).unwrap();
         assert!(sc.contains("Opening day"));
         assert_eq!(
             fs::read(d.path().join("out/A.JPG")).unwrap(),
