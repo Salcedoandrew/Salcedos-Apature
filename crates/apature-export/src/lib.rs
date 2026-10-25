@@ -20,9 +20,10 @@
 pub mod extract;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use apature_core::{Kind, PhotoItem};
-use apature_metadata::jpeg_xmp::{header_segments, is_exif_segment};
+use apature_metadata::jpeg_xmp::{header_segments, is_exif_segment, segment as jpeg_segment};
 use apature_metadata::{edits, exif, exif_write, iim, iptc, Iptc};
 use apature_preview::{decode_jpeg, find_embedded_jpegs, rotate, Rgb};
 
@@ -180,10 +181,71 @@ pub enum ExportError {
     Encode(image::ImageError),
     #[error("metadata: {0}")]
     Xmp(#[from] apature_metadata::xmp::XmpError),
+    #[error("metadata: {0}")]
+    Iim(#[from] apature_metadata::iim::IimError),
+    #[error("JPEG segment of {0} bytes exceeds the 65,535-byte segment limit")]
+    SegmentTooLarge(usize),
     #[error("{0}")]
     Jpeg(#[from] apature_metadata::jpeg_xmp::JpegXmpError),
     #[error("system RAW decode of {0} failed: {1}")]
     RawDecode(PathBuf, String),
+}
+
+/// Sequence for export temp names: exports run in parallel (the desktop's
+/// export pool), and two jobs writing the same output — or the same stem
+/// in different folders — must never share a temp file.
+static EXPORT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Reserve a unique temporary file in the output directory, created
+/// exclusively: an existing file at the name — or a source photo that
+/// happens to carry the temp suffix — is never truncated. Returns the
+/// path and the open handle; the caller keeps the handle through the
+/// write and releases it before publishing.
+fn reserve_temp(out: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let parent = out.parent().unwrap_or_else(|| Path::new("."));
+    let stem = out
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let pid = std::process::id();
+    for _ in 0..100 {
+        let n = EXPORT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let name = format!(".{stem}.apature-export.tmp.{pid}.{n}.jpg");
+        let path = parent.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not reserve a unique export temp file",
+    ))
+}
+
+/// Publish `tmp` at `out`. When overwrite is disabled the publish refuses
+/// an existing destination instead of replacing it: `hard_link` fails
+/// with EEXIST where `rename` would silently replace the file. The temp
+/// file is removed either way.
+fn publish(tmp: &Path, out: &Path, overwrite: bool) -> Result<(), ExportError> {
+    if overwrite {
+        std::fs::rename(tmp, out).map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+    } else {
+        match std::fs::hard_link(tmp, out) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(ExportError::Exists(out.to_path_buf()));
+            }
+            Err(e) => return Err(ExportError::Io(out.to_path_buf(), e)),
+        }
+    }
+    let _ = std::fs::remove_file(tmp);
+    Ok(())
 }
 
 /// Render a RAW with the macOS RAW engine (ImageIO via `sips`) to a JPEG at
@@ -278,7 +340,36 @@ fn crop_to(img: Rgb, c: edits::Crop) -> Rgb {
     Rgb::from_image(image::imageops::crop_imm(&src, x, y, w, h).to_image())
 }
 
-pub(crate) use apature_metadata::jpeg_xmp::segment;
+/// One APP1 segment (marker included), built by the shared guard in
+/// `apature_metadata::jpeg_xmp`: a body too big for the 16-bit length is an
+/// error, never a wrapped length that would silently corrupt the JPEG.
+pub(crate) fn app1(sig: &[u8], body: &[u8]) -> Result<Vec<u8>, ExportError> {
+    jpeg_segment(0xE1, "APP1", sig, body).map_err(|e| match e {
+        // The shared guard counts sig + body; our error counts the whole
+        // length field, which is two bytes more.
+        apature_metadata::jpeg_xmp::JpegXmpError::SegmentTooLarge(_, n) => {
+            ExportError::SegmentTooLarge(n + 2)
+        }
+        other => ExportError::Jpeg(other),
+    })
+}
+
+/// `encoded` with `segs` spliced in right after SOI and the encoder's
+/// APP0 (JFIF header) when it comes first.
+pub(crate) fn splice_after_app0(encoded: &[u8], segs: &[Vec<u8>]) -> Vec<u8> {
+    let mut ins = 2;
+    if encoded.len() > 4 && encoded[2] == 0xFF && encoded[3] == 0xE0 {
+        let len = u16::from_be_bytes([encoded[4], encoded[5]]) as usize;
+        ins = 2 + 2 + len;
+    }
+    let mut file = Vec::with_capacity(encoded.len() + segs.iter().map(Vec::len).sum::<usize>());
+    file.extend_from_slice(&encoded[..ins]);
+    for s in segs {
+        file.extend_from_slice(s);
+    }
+    file.extend_from_slice(&encoded[ins..]);
+    file
+}
 
 /// Export `item` to `out` with `settings`, embedding `iptc` as XMP and IIM.
 pub fn export(
@@ -325,7 +416,12 @@ pub fn export(
             Some(((n as f32) / keep).ceil() as u32)
         }
     };
+    // The RAW's own orientation, read from the bytes already in memory;
+    // a system decode replaces `data` with the render, whose summary
+    // alone can't always supply it (see `file_orientation` below).
+    let mut raw_orientation = 1;
     if !is_jpeg && settings.raw == RawPixels::SystemDecode {
+        raw_orientation = exif::from_bytes(&data).map(|s| s.orientation).unwrap_or(1);
         match system_decode_raw(&src_path, target.unwrap_or(0)) {
             Ok(rendered) => {
                 data = rendered;
@@ -346,12 +442,10 @@ pub fn export(
             .ok_or_else(|| ExportError::NoPixels(src_path.clone()))?;
         best.bytes(&data)
     };
-    let summary = if pixels == PixelSource::SystemRawDecode {
-        exif::from_bytes(&data).unwrap_or_default()
-    } else {
-        // `data` is the source file already in memory; don't map it again.
-        exif::from_bytes(&data).unwrap_or_default()
-    };
+    // Parse the summary from the bytes already loaded: `exif::read` would
+    // map the file and run this same parser over it, a second full read
+    // of a file `data` already holds (the source, or the system render).
+    let summary = exif::from_bytes(&data).unwrap_or_default();
     let mut img =
         decode_jpeg(jpeg_bytes, target).map_err(|e| ExportError::Decode(src_path.clone(), e))?;
     // The crop is in the stored frame, so it comes before the rotation. A
@@ -359,10 +453,12 @@ pub fn export(
     // it back to the RAW's stored frame first so crop and turn mean the same
     // thing for every pixel source.
     let file_orientation = if pixels == PixelSource::SystemRawDecode {
-        let raw = exif::read(&src_path).map(|e| e.orientation).unwrap_or(1);
         if edits.is_edited() {
-            img = rotate(rotate(img, summary.orientation), edits::inverse(raw));
-            raw
+            img = rotate(
+                rotate(img, summary.orientation),
+                edits::inverse(raw_orientation),
+            );
+            raw_orientation
         } else {
             summary.orientation
         }
@@ -401,7 +497,7 @@ pub fn export(
         match copied {
             Some(mut block) => {
                 exif_write::patch_for_export(&mut block, width, height);
-                segs.push(segment(0xE1, "Exif", b"Exif\0\0", &block)?);
+                segs.push(app1(b"Exif\0\0", &block)?);
                 exif_source = ExifSource::Copied;
             }
             None => {
@@ -415,14 +511,14 @@ pub fn export(
                         .map(String::as_str),
                     iptc.copyright.as_deref(),
                 );
-                segs.push(segment(0xE1, "Exif", b"Exif\0\0", &block)?);
+                segs.push(app1(b"Exif\0\0", &block)?);
                 exif_source = ExifSource::Minimal;
             }
         }
     }
     if settings.write_xmp {
         let packet = iptc::apply("", iptc)?;
-        segs.push(segment(0xE1, "XMP", b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes())?);
+        segs.push(app1(b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes())?);
     }
     if settings.keep_icc {
         for s in src_segs
@@ -437,17 +533,7 @@ pub fn export(
     }
 
     // ---- splice after SOI (and the encoder's APP0 when present) ----
-    let mut ins = 2;
-    if encoded.len() > 4 && encoded[2] == 0xFF && encoded[3] == 0xE0 {
-        let len = u16::from_be_bytes([encoded[4], encoded[5]]) as usize;
-        ins = 2 + 2 + len;
-    }
-    let mut file = Vec::with_capacity(encoded.len() + segs.iter().map(Vec::len).sum::<usize>());
-    file.extend_from_slice(&encoded[..ins]);
-    for s in &segs {
-        file.extend_from_slice(s);
-    }
-    file.extend_from_slice(&encoded[ins..]);
+    let file = splice_after_app0(&encoded, &segs);
 
     // ---- atomic write ----
     if let Some(parent) = out.parent() {
@@ -461,27 +547,39 @@ pub fn export(
         out.to_path_buf()
     };
     let out = out_path.as_path();
-    let tmp = out.with_extension("apature-export.tmp.jpg");
-    let write = || -> std::io::Result<()> {
+    // The temp file is reserved exclusively, so it can never be the source
+    // photo (or an unrelated file) under another name, and two parallel
+    // jobs never share one. Publishing refuses an existing destination
+    // when overwrite is off instead of replacing it.
+    let (tmp, mut f) = reserve_temp(out).map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+    let mut part: Option<PathBuf> = None;
+    let result: Result<(), ExportError> = (|| {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&file)?;
-        f.sync_all()?;
-        if out.exists() && !settings.overwrite {
-            return Err(std::io::Error::other("destination appeared during export"));
-        }
+        f.write_all(&file)
+            .map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+        f.sync_all()
+            .map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+        Ok(())
+    })();
+    drop(f);
+    let result = result.and_then(|()| {
         if settings.format == Format::JpegXl {
-            let part = out.with_extension("jxl.part");
-            transcode_jxl(&tmp, &part).map_err(std::io::Error::other)?;
+            let p = tmp.with_extension("jxl.part");
+            part = Some(p.clone());
+            transcode_jxl(&tmp, &p)
+                .map_err(|e| ExportError::Io(out.to_path_buf(), std::io::Error::other(e)))?;
             let _ = std::fs::remove_file(&tmp);
-            std::fs::rename(&part, out)
+            publish(&p, out, settings.overwrite)
         } else {
-            std::fs::rename(&tmp, out)
+            publish(&tmp, out, settings.overwrite)
         }
-    };
-    if let Err(e) = write() {
+    });
+    if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp);
-        return Err(ExportError::Io(out.to_path_buf(), e));
+        if let Some(p) = &part {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err(e);
     }
     let bytes_written = std::fs::metadata(out)
         .map(|m| m.len())
@@ -516,6 +614,30 @@ mod tests {
             },
             secondary: Vec::new(),
         }
+    }
+
+    /// Test-local IIM dataset walker: unpack the Photoshop resource in
+    /// an APP13 payload and walk its datasets (the production read-back
+    /// pair in apature-metadata was deleted as dead code).
+    fn iim_sets(payload: &[u8]) -> Vec<(u8, u8, Vec<u8>)> {
+        let p = payload.strip_prefix(b"Photoshop 3.0\0").unwrap();
+        assert_eq!(&p[..4], b"8BIM");
+        assert_eq!(u16::from_be_bytes([p[4], p[5]]), 0x0404);
+        let name_len = p[6] as usize;
+        let name_total = (1 + name_len + 1) & !1; // Pascal string padded to even
+        let len_at = 6 + name_total;
+        let len = u32::from_be_bytes(p[len_at..len_at + 4].try_into().unwrap()) as usize;
+        let mut d = &p[len_at + 4..len_at + 4 + len];
+        let mut out = Vec::new();
+        while d.len() >= 5 && d[0] == 0x1C {
+            let n = u16::from_be_bytes([d[3], d[4]]) as usize;
+            if d.len() < 5 + n {
+                break;
+            }
+            out.push((d[1], d[2], d[5..5 + n].to_vec()));
+            d = &d[5 + n..];
+        }
+        out
     }
 
     fn sample_iptc() -> Iptc {
@@ -626,6 +748,25 @@ mod tests {
     }
 
     #[test]
+    fn oversized_xmp_packet_errors_instead_of_wrapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("big.jpg");
+        half_and_half(&src);
+        // A 70 KB caption makes the XMP APP1 pass the 65,535-byte segment
+        // limit; the export must fail, not write a wrapped length.
+        let big = Iptc {
+            description: Some("x".repeat(70_000)),
+            ..Default::default()
+        };
+        let out = dir.path().join("big-out.jpg");
+        assert!(matches!(
+            export(&item_for(&src), &big, &Settings::default(), &out),
+            Err(ExportError::SegmentTooLarge(_))
+        ));
+        assert!(!out.exists(), "no wrapped file was written");
+    }
+
+    #[test]
     fn a_tight_crop_still_reaches_the_long_side() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("DSC_0002.jpg");
@@ -704,7 +845,7 @@ mod tests {
             Some("A caption. Photog/Example Press")
         );
         let app13 = segs.iter().find(|s| s.marker == 0xED).unwrap();
-        let sets = iim::parse(iim::from_app13(app13.payload(&bytes)).unwrap());
+        let sets = iim_sets(app13.payload(&bytes));
         assert!(sets
             .iter()
             .any(|(r, s, v)| *r == 2 && *s == 110 && v == b"Example Press"));
@@ -716,10 +857,124 @@ mod tests {
             export(&item_for(&src), &sample_iptc(), &Settings::default(), &out),
             Err(ExportError::Exists(_))
         ));
-        assert!(!dir
-            .path()
-            .join("out/wide-export.apature-export.tmp")
-            .exists());
+        // No temp file is left behind: temp names are unique per export.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("out"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("apature-export.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn temp_file_never_consumes_the_source() {
+        // Finding #1: a source named like the old temp file. Exporting
+        // `photo.apature-export.tmp.jpg` to `photo.jpg` used to truncate
+        // the source and rename it away while reporting success.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("photo.apature-export.tmp.jpg");
+        half_and_half(&src);
+        let before = std::fs::read(&src).unwrap();
+        let out = dir.path().join("photo.jpg");
+        let o = export(
+            &item_for(&src),
+            &Iptc::default(),
+            &Settings::default(),
+            &out,
+        )
+        .unwrap();
+        assert_eq!((o.width, o.height), (400, 200));
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            before,
+            "the source must survive the export byte for byte"
+        );
+        assert!(out.exists());
+        // Overwrite still publishes through the same path.
+        let o2 = export(
+            &item_for(&src),
+            &Iptc::default(),
+            &Settings {
+                overwrite: true,
+                ..Default::default()
+            },
+            &out,
+        )
+        .unwrap();
+        assert_eq!((o2.width, o2.height), (400, 200));
+    }
+
+    #[test]
+    fn unrelated_file_at_the_old_temp_name_survives() {
+        // Finding #1: the old deterministic temp name truncated whatever
+        // sat at it. Temp names are unique now, so a bystander is untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0001.jpg");
+        half_and_half(&src);
+        let bystander = dir.path().join("other.apature-export.tmp.jpg");
+        std::fs::write(&bystander, b"do not touch").unwrap();
+        let out = dir.path().join("other.jpg");
+        export(
+            &item_for(&src),
+            &Iptc::default(),
+            &Settings::default(),
+            &out,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&bystander).unwrap(), b"do not touch");
+    }
+
+    #[test]
+    fn parallel_exports_to_the_same_output_do_not_corrupt_each_other() {
+        // Finding #1: parallel jobs to the same output shared one temp
+        // file. Now exactly one wins; the rest are refused, and the file
+        // left behind is a whole, decodable export.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0001.jpg");
+        half_and_half(&src);
+        let out = dir.path().join("same.jpg");
+        let results: Vec<_> = std::thread::scope(|s| {
+            (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        export(
+                            &item_for(&src),
+                            &Iptc::default(),
+                            &Settings::default(),
+                            &out,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect()
+        });
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok, 1, "exactly one export wins: {results:?}");
+        assert!(
+            results
+                .iter()
+                .filter(|r| r.is_err())
+                .all(|r| matches!(r, Err(ExportError::Exists(_)))),
+            "losers are refused, not corrupted: {results:?}"
+        );
+        let back = decode_jpeg(&std::fs::read(&out).unwrap(), None).unwrap();
+        assert_eq!((back.width, back.height), (400, 200));
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("apature-export.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -737,12 +992,7 @@ mod tests {
         let out = dir.path().join("out/long.jpg");
         let r = export(&item_for(&src), &iptc, &Settings::default(), &out);
         assert!(
-            matches!(
-                r,
-                Err(ExportError::Jpeg(
-                    apature_metadata::jpeg_xmp::JpegXmpError::SegmentTooLarge("XMP", _)
-                ))
-            ),
+            matches!(r, Err(ExportError::SegmentTooLarge(_))),
             "{r:?}"
         );
         assert!(!out.exists(), "no corrupt file is left behind");

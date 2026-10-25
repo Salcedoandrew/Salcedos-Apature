@@ -47,8 +47,8 @@ pub struct Report {
     pub bytes_copied: u64,
     pub elapsed_secs: f64,
     pub cancelled: bool,
-    /// The ledger of already-ingested photos couldn't be saved: the copies
-    /// are fine, but "only new" may offer these photos again.
+    /// Saving the ledger at the end failed; the copies themselves are fine,
+    /// but "only new" will offer these files again next time.
     pub ledger_error: Option<String>,
 }
 
@@ -234,6 +234,32 @@ mod tests {
         let report = run(&plan, &mut ledger, &AtomicBool::new(false), |_| {});
         assert_eq!(report.files_ok(), 1, "the copy itself succeeded");
         assert!(report.ledger_error.is_some(), "{report:?}");
+    }
+
+    #[test]
+    fn a_failed_ledger_save_is_reported_not_swallowed() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("CARD");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("A.JPG"), b"photo").unwrap();
+        // The ledger path sits under a regular file, so saving it must fail.
+        let blocker = t.path().join("blocker");
+        fs::write(&blocker, b"not a folder").unwrap();
+        let mut ledger = Ledger::load(&blocker.join("ledger.json"));
+        let opts = Options {
+            source: src.clone(),
+            primary: t.path().join("P"),
+            folder_template: String::new(),
+            only_new: true,
+            ..Default::default()
+        };
+        let plan = build_plan(&opts, &ledger).unwrap();
+        let report = run(&plan, &mut ledger, &AtomicBool::new(false), |_| {});
+        assert!(report.all_verified(&plan), "the copy itself succeeded");
+        assert!(
+            report.ledger_error.is_some(),
+            "the save failure is in the report: {report:?}"
+        );
     }
 
     #[test]

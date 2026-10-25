@@ -72,9 +72,49 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - If Apature can't save its list of already-imported photos after an ingest, it now says so (a warning in the app, a line in the command-line output) instead of staying silent. The copies themselves are fine, but "Only new" may offer those photos again.
 - In the IPTC-IIM block of exported and extracted JPEGs, a field longer than IIM's 32,767-byte limit is now cut at a whole character, so an accented letter or other non-English character at the cut no longer turns into garbage.
 
-## [0.1.0] — 2026-10-21
 
-First shareable build, ad-hoc signed: on first launch right-click › Open, or allow it under System Settings › Privacy & Security. Everything below is new.
+## [0.1.1] — 2026-10-25
+
+Bugfix release for six findings from the Freebuff implementation audit.
+
+### Fixed
+- Export no longer truncates its own source: temp files are reserved exclusively with unique names, and publishing refuses to replace an existing destination when overwrite is off.
+- Ingesting into a folder no longer rewrites the captions of photos from earlier shoots — the assignment pad now applies only to the photos this ingest copied.
+- A verified copy can no longer replace a destination that appears mid-copy; the publish step refuses an existing file.
+- Collision suffixes no longer split RAW+JPEG pairs — all variants and sidecars of a photo now share one stem.
+- Export names are sanitized to a single path component, so EXIF metadata can no longer escape the chosen destination; duplicate export names are suffixed instead of sharing one file.
+- Testing a folder connection no longer deletes an existing `.apature-write-test` file — the probe is uniquely named and exclusively created.
+
+### Tests
+- 16 new regression tests mirroring the audit's reproductions, including the FIFO mid-copy race and the RAW+JPEG suffix scenario. Full workspace suite: 215 passed, 0 failed.
+
+
+## [0.1.0] — 2026-10-25
+
+First full release: the build 178 tree with every finding from the ponytail audit fixed, plus the stronger implementations of the same fixes from the 188 tree. Ad-hoc signed: on first launch right-click › Open, or allow it under System Settings › Privacy & Security.
+
+### Security
+- SFTP delivery now verifies the server's host key against `~/.ssh/known_hosts` and refuses unknown or mismatched keys. It handles hashed `known_hosts` entries and negotiates the key type the server saved, with a dedicated test covering match, mismatch, unknown hosts and port sensitivity.
+- Export no longer writes corrupt JPEGs when an XMP or IIM segment exceeds 64 KB — oversized payloads now fail with an error instead. All segment writers go through one shared length guard, so a future writer cannot forget the check.
+
+### Fixed
+- Parallel RAW exports can no longer swap photos through a shared `sips` temp file — each export gets a unique temp name.
+- Case-only renames are no longer refused as self-collisions on case-insensitive filesystems; renames are now decided by file identity.
+- A corrupt TIFF entry count can no longer freeze preview scanning — the work is capped at the bytes present.
+- A failed ingest ledger save is now reported instead of swallowed, and reaches the user as a warning toast in the desktop app and a warning on the command line.
+- A sidecar test that only passed on case-insensitive filesystems now reads the sidecar name the code actually writes; the birth-time assertion is limited to macOS, the only platform where creation-time preservation is implemented.
+
+### Faster
+- IPTC field regexes are compiled once into a static cache instead of on every photo read, and sidecar text is parsed once per read.
+- Bulk planning reads and preview extraction run in parallel; copy loops stay sequential by design (the card reader is the bottleneck).
+- Export reads each file from disk once and parses EXIF from the bytes already in memory.
+- Quadratic directory scans are fixed in the sidecar lookup, the ingest caption pass and planner, the export free-name picker, and the CLI item lookup.
+- Volume polling and the Live Ingest scan moved off the desktop UI thread onto a background worker.
+
+### Tests and cleanup
+- New tests for verified copies (3 MiB patterned file plus the mismatch path), trash, end-to-end delivery, big-endian EXIF reading and patching, TIFF counts, the date algorithm (epoch, leap day, 2100), and the SFTP host-key check. The full workspace suite is green: 202 passed, 0 failed.
+- Dead code removed (unused IIM parsers, an unused helper, duplicated segment writers) and unused dependencies dropped; one shared `project_dirs()` helper replaces 11 copies of the same call.
+- IIM field truncation now respects UTF-8 character boundaries.
 
 ### Ingest
 - Card detection on mount, Ingest in its own window, day chips, a live
@@ -122,3 +162,32 @@ First shareable build, ad-hoc signed: on first launch right-click › Open, or a
 - JPEG XL needs Homebrew's jpeg-xl installed.
 - Rotation and crop are applied on export, not shown as a crop on the sheet.
 - macOS only.
+
+
+## [0.1.0-test.178-muse-checked.2] — 2026-10-24
+
+Combined edition: the Muse-checked build plus the stronger implementations of the same fixes from upstream's 188 tree.
+
+### Improved
+- SFTP host-key verification now handles hashed `known_hosts` entries and negotiates the key type the server saved, with a dedicated test covering match, mismatch, unknown hosts and port sensitivity.
+- A failed ingest ledger save now reaches the user: a warning toast in the desktop app and a warning on the command line.
+- All JPEG segment writers now go through one shared length guard, so a future writer cannot forget the 64 KB check.
+- Case-only renames are now decided by file identity (inode) instead of lowercased names.
+
+
+## [0.1.0-test.178-muse-checked] — 2026-10-24
+
+Muse-checked edition of the build 178 tree: all 20 findings from the ponytail audit of build 178 are fixed.
+
+### Security
+- SFTP delivery now verifies the server's host key against `~/.ssh/known_hosts` and refuses unknown or mismatched keys.
+- Export no longer writes corrupt JPEGs when an XMP or IIM segment exceeds 64 KB — oversized payloads now fail with an error instead.
+
+### Fixed
+- Parallel RAW exports can no longer swap photos through a shared `sips` temp file.
+- Case-only renames are no longer refused as self-collisions on case-insensitive filesystems.
+- A corrupt TIFF entry count can no longer freeze preview scanning.
+- A failed ingest ledger save is now reported instead of swallowed, and verified copies, trash, delivery and EXIF paths have new tests.
+- IPTC field regexes are compiled once, bulk planning reads and preview extraction run in parallel, and export reads each file from disk once.
+- Volume polling and the Live Ingest scan moved off the desktop UI thread.
+- Dead code and unused dependencies removed; one shared `project_dirs()` helper.

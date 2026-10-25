@@ -6,10 +6,11 @@
 //! the first `rdf:Description` and edited in place, and missing ones are
 //! inserted as attributes. The file is written atomically.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use regex::Regex;
 
@@ -79,6 +80,25 @@ pub enum XmpError {
 
 fn re(cache: &'static OnceLock<Regex>, pat: &str) -> &'static Regex {
     cache.get_or_init(|| Regex::new(pat).expect("valid regex"))
+}
+
+/// Patterns built from property names and document prefixes repeat across
+/// parses and edits, so compiled regexes are kept by pattern text. The set
+/// of prefixes a document can bind is small in practice; the cap keeps a
+/// pathological run from growing the cache without bound.
+static PATTERN_CACHE: OnceLock<Mutex<HashMap<String, Regex>>> = OnceLock::new();
+
+pub(crate) fn cached_re(pat: &str) -> Result<Regex, regex::Error> {
+    let cache = PATTERN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(re) = map.get(pat) {
+        return Ok(re.clone());
+    }
+    let compiled = Regex::new(pat)?;
+    if map.len() < 256 {
+        map.insert(pat.to_string(), compiled.clone());
+    }
+    Ok(compiled)
 }
 
 static RE_RATING: OnceLock<Regex> = OnceLock::new();
@@ -165,7 +185,7 @@ pub(crate) fn empty_sidecar() -> String {
 
 /// Find the prefix a document binds to a namespace URI, if any.
 pub(crate) fn declared_prefix(text: &str, ns: &str) -> Option<String> {
-    let pat = Regex::new(&format!(
+    let pat = cached_re(&format!(
         r#"xmlns:([A-Za-z_][\w.-]*)\s*=\s*"{}""#,
         regex::escape(ns)
     ))
@@ -188,7 +208,7 @@ pub(crate) fn set_prop(
     name: &str,
     value: Option<&str>,
 ) -> Result<(), XmpError> {
-    let pat = Regex::new(&prop_pattern(&prefixes.join("|"), name)).expect("valid regex");
+    let pat = cached_re(&prop_pattern(&prefixes.join("|"), name)).expect("valid regex");
     if let Some(c) = pat.captures(text) {
         let whole = c.get(0).expect("group 0");
         let replacement = match value {

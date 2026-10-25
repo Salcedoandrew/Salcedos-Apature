@@ -117,7 +117,9 @@ fn is_one_of(p: &Path, sources: &HashSet<PathBuf>) -> bool {
     #[cfg(not(unix))]
     {
         let low = p.to_string_lossy().to_lowercase();
-        sources.iter().any(|s| s.to_string_lossy().to_lowercase() == low)
+        sources
+            .iter()
+            .any(|s| s.to_string_lossy().to_lowercase() == low)
     }
 }
 
@@ -249,24 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn case_only_rename_is_not_a_collision() {
-        let d = tempfile::tempdir().unwrap();
-        let a = item(d.path(), "shot", &["JPG"]);
-        let plan = plan_rename(&[(&a, "SHOT".into())]).unwrap();
-        assert!(plan.collisions.is_empty(), "{:?}", plan.collisions);
-        rename(&plan).unwrap();
-        let names: Vec<String> = std::fs::read_dir(d.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, ["SHOT.JPG"]);
-        // A different file under the new name is still a collision.
-        let b = item(d.path(), "other", &["JPG"]);
-        let plan = plan_rename(&[(&b, "SHOT".into())]).unwrap();
-        assert_eq!(plan.collisions.len(), 1);
-    }
-
-    #[test]
     fn pair_and_sidecar_move_together_and_collisions_refuse() {
         let d = tempfile::tempdir().unwrap();
         let a = item(d.path(), "DSC_0001", &["NEF", "JPG"]);
@@ -325,5 +309,61 @@ mod tests {
             plan_rename(&[(&a, "x/y".into())]),
             Err(FileOpError::BadName(_))
         ));
+    }
+
+    #[test]
+    fn case_only_rename_is_not_a_collision() {
+        // On a case-insensitive disk (APFS, ExFAT) `SHOT.JPG` "exists" the
+        // moment `shot.JPG` does; the plan must treat the target as the same
+        // source (same inode), not as a file already using the name. (On
+        // this case-sensitive test filesystem the differently-cased target
+        // does not exist, so this pins the plan-level behavior: one move,
+        // no collision, and the two-phase rename carries it out.)
+        let d = tempfile::tempdir().unwrap();
+        let a = item(d.path(), "shot", &["JPG"]);
+        let plan = plan_rename(&[(&a, "SHOT".into())]).unwrap();
+        assert!(plan.collisions.is_empty(), "{:?}", plan.collisions);
+        rename(&plan).unwrap();
+        let names: Vec<String> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["SHOT.JPG"]);
+        // A different file under the new name is still a collision.
+        let b = item(d.path(), "other", &["JPG"]);
+        let plan = plan_rename(&[(&b, "SHOT".into())]).unwrap();
+        assert_eq!(plan.collisions.len(), 1);
+    }
+
+    #[test]
+    fn trash_removes_files_and_reports_missing_paths() {
+        let d = tempfile::tempdir().unwrap();
+        let a = item(d.path(), "DSC_0001", &["NEF", "JPG"]);
+        let files = item_files(&a);
+        assert_eq!(files.len(), 2);
+        match trash(&files) {
+            Ok(()) => {
+                for f in &files {
+                    assert!(!f.exists(), "{f:?} should have been trashed");
+                }
+            }
+            Err(e) => {
+                // No working Trash in this environment: the failure must
+                // surface as an error, never as a panic or silent success.
+                assert!(
+                    matches!(e, FileOpError::Trash(_)),
+                    "unexpected error: {e:?}"
+                );
+                for f in &files {
+                    assert!(f.exists(), "{f:?} must stay put when trash fails");
+                }
+            }
+        }
+        // A path that does not exist is reported, not silently accepted.
+        let missing = d.path().join("DSC_9999.NEF");
+        assert!(
+            matches!(trash(&[missing]), Err(FileOpError::Trash(_))),
+            "trashing a missing path must report an error"
+        );
     }
 }

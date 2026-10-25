@@ -596,6 +596,42 @@ mod tests {
         v
     }
 
+    /// The big-endian ("MM") twin of the TIFF built in
+    /// `reads_fields_from_tiff_and_jpeg_wrapper`: IFD0 holds Model (data at
+    /// 100), Orientation 6 and the Exif IFD pointer (at 150); the Exif IFD
+    /// holds the same DateTimeOriginal, ExposureTime and ISO 800.
+    fn tiff_be() -> Vec<u8> {
+        let mut v = b"MM\0\x2A".to_vec();
+        v.extend(8u32.to_be_bytes()); // IFD0 at 8
+        v.extend(3u16.to_be_bytes());
+        let entry = |v: &mut Vec<u8>, tag: u16, typ: u16, count: u32, val: [u8; 4]| {
+            v.extend_from_slice(&tag.to_be_bytes());
+            v.extend_from_slice(&typ.to_be_bytes());
+            v.extend_from_slice(&count.to_be_bytes());
+            v.extend_from_slice(&val);
+        };
+        entry(&mut v, tag::MODEL, 2, 6, 100u32.to_be_bytes());
+        // A big-endian SHORT sits in the first two bytes of the value field.
+        entry(&mut v, tag::ORIENTATION, 3, 1, [0, 6, 0, 0]);
+        entry(&mut v, tag::EXIF_IFD, 4, 1, 150u32.to_be_bytes());
+        v.extend(0u32.to_be_bytes()); // no next IFD
+        assert_eq!(v.len(), 50);
+        v.resize(100, 0);
+        v.extend_from_slice(b"Z 6_2\0");
+        v.resize(150, 0);
+        v.extend(3u16.to_be_bytes());
+        entry(&mut v, tag::DATE_TIME_ORIGINAL, 2, 20, 200u32.to_be_bytes());
+        entry(&mut v, tag::EXPOSURE_TIME, 5, 1, 220u32.to_be_bytes());
+        entry(&mut v, tag::ISO, 3, 1, [0x03, 0x20, 0, 0]); // 800
+        v.extend(0u32.to_be_bytes());
+        v.resize(200, 0);
+        v.extend_from_slice(b"2026:10:06 14:03:11\0");
+        v.resize(220, 0);
+        v.extend(1u32.to_be_bytes());
+        v.extend(640u32.to_be_bytes());
+        v
+    }
+
     #[test]
     fn cr3_reads_camera_and_date_from_cmt_boxes() {
         let mut f = bmff(b"ftyp", b"crx \0\0\0\x01crx isom");
@@ -672,6 +708,37 @@ mod tests {
         let r = from_bytes(&raf).unwrap();
         assert_eq!(r.orientation, 6);
         assert_eq!(r.model.as_deref(), Some("Z 6_2"));
+    }
+
+    #[test]
+    fn big_endian_tiff_reads_the_same_fields() {
+        let data = tiff_be();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("be.tiff");
+        std::fs::write(&path, &data).unwrap();
+        let s = read(&path).unwrap();
+        // The same values the little-endian fixture asserts.
+        assert_eq!(s.model.as_deref(), Some("Z 6_2"));
+        assert_eq!(s.orientation, 6);
+        assert_eq!(s.date_time_original.as_deref(), Some("2026:10:06 14:03:11"));
+        assert_eq!(s.iso, Some(800));
+        assert_eq!(s.exposure_line(), "1/640 · ISO 800");
+    }
+
+    #[test]
+    fn truncated_files_never_panic() {
+        let fixtures = [tiff_be(), tiff_ascii(tag::MAKE, "Canon")];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cut.tiff");
+        for data in &fixtures {
+            for n in 0..=data.len() {
+                let cut = &data[..n];
+                std::fs::write(&path, cut).unwrap();
+                // Ok, Err and None are all acceptable; panicking is not.
+                let _ = read(&path);
+                let _ = from_bytes(cut);
+            }
+        }
     }
 
     #[test]

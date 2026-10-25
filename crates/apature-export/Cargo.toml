@@ -10,6 +10,7 @@ apature-core.workspace = true
 apature-preview.workspace = true
 apature-metadata.workspace = true
 thiserror.workspace = true
+rayon.workspace = true
 image.workspace = true
 log.workspace = true
 serde.workspace = true
