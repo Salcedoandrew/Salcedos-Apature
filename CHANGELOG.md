@@ -3,6 +3,16 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.1.0-test.178-muse-checked.2] — 2026-10-24
+
+Combined edition: the Muse-checked build plus the stronger implementations of the same fixes from upstream's 188 tree.
+
+### Improved
+- SFTP host-key verification now handles hashed `known_hosts` entries and negotiates the key type the server saved, with a dedicated test covering match, mismatch, unknown hosts and port sensitivity.
+- A failed ingest ledger save now reaches the user: a warning toast in the desktop app and a warning on the command line.
+- All JPEG segment writers now go through one shared length guard, so a future writer cannot forget the 64 KB check.
+- Case-only renames are now decided by file identity (inode) instead of lowercased names.
+
 ## [0.1.0-test.178-muse-checked] — 2026-10-24
 
 Muse-checked edition of the build 178 tree: all 20 findings from the ponytail audit of build 178 are fixed.
