@@ -3,6 +3,23 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.1.0-test.178-muse-checked] — 2026-10-24
+
+Muse-checked edition of the build 178 tree: all 20 findings from the ponytail audit of build 178 are fixed.
+
+### Security
+- SFTP delivery now verifies the server's host key against `~/.ssh/known_hosts` and refuses unknown or mismatched keys.
+- Export no longer writes corrupt JPEGs when an XMP or IIM segment exceeds 64 KB — oversized payloads now fail with an error instead.
+
+### Fixed
+- Parallel RAW exports can no longer swap photos through a shared `sips` temp file.
+- Case-only renames are no longer refused as self-collisions on case-insensitive filesystems.
+- A corrupt TIFF entry count can no longer freeze preview scanning.
+- A failed ingest ledger save is now reported instead of swallowed, and verified copies, trash, delivery and EXIF paths have new tests.
+- IPTC field regexes are compiled once, bulk planning reads and preview extraction run in parallel, and export reads each file from disk once.
+- Volume polling and the Live Ingest scan moved off the desktop UI thread.
+- Dead code and unused dependencies removed; one shared `project_dirs()` helper.
+
 ## [Unreleased]
 
 ### Docs
