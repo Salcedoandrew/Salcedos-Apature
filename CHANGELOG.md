@@ -3,6 +3,33 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.1.0] — 2026-10-25
+
+First full release: the build 178 tree with every finding from the ponytail audit fixed, plus the stronger implementations of the same fixes from the 188 tree. Ad-hoc signed: on first launch right-click › Open, or allow it under System Settings › Privacy & Security.
+
+### Security
+- SFTP delivery now verifies the server's host key against `~/.ssh/known_hosts` and refuses unknown or mismatched keys. It handles hashed `known_hosts` entries and negotiates the key type the server saved, with a dedicated test covering match, mismatch, unknown hosts and port sensitivity.
+- Export no longer writes corrupt JPEGs when an XMP or IIM segment exceeds 64 KB — oversized payloads now fail with an error instead. All segment writers go through one shared length guard, so a future writer cannot forget the check.
+
+### Fixed
+- Parallel RAW exports can no longer swap photos through a shared `sips` temp file — each export gets a unique temp name.
+- Case-only renames are no longer refused as self-collisions on case-insensitive filesystems; renames are now decided by file identity.
+- A corrupt TIFF entry count can no longer freeze preview scanning — the work is capped at the bytes present.
+- A failed ingest ledger save is now reported instead of swallowed, and reaches the user as a warning toast in the desktop app and a warning on the command line.
+- A sidecar test that only passed on case-insensitive filesystems now reads the sidecar name the code actually writes; the birth-time assertion is limited to macOS, the only platform where creation-time preservation is implemented.
+
+### Faster
+- IPTC field regexes are compiled once into a static cache instead of on every photo read, and sidecar text is parsed once per read.
+- Bulk planning reads and preview extraction run in parallel; copy loops stay sequential by design (the card reader is the bottleneck).
+- Export reads each file from disk once and parses EXIF from the bytes already in memory.
+- Quadratic directory scans are fixed in the sidecar lookup, the ingest caption pass and planner, the export free-name picker, and the CLI item lookup.
+- Volume polling and the Live Ingest scan moved off the desktop UI thread onto a background worker.
+
+### Tests and cleanup
+- New tests for verified copies (3 MiB patterned file plus the mismatch path), trash, end-to-end delivery, big-endian EXIF reading and patching, TIFF counts, the date algorithm (epoch, leap day, 2100), and the SFTP host-key check. The full workspace suite is green: 202 passed, 0 failed.
+- Dead code removed (unused IIM parsers, an unused helper, duplicated segment writers) and unused dependencies dropped; one shared `project_dirs()` helper replaces 11 copies of the same call.
+- IIM field truncation now respects UTF-8 character boundaries.
+
 ## [0.1.0-test.178-muse-checked.2] — 2026-10-24
 
 Combined edition: the Muse-checked build plus the stronger implementations of the same fixes from upstream's 188 tree.
