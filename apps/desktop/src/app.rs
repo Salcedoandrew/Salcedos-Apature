@@ -446,6 +446,97 @@ fn number_commands(i: &egui::InputState, rates: bool, out: &mut Vec<Command>) {
     }
 }
 
+/// What one background poll sends back: the fresh volume list and, when
+/// Live Ingest is on, its scan results.
+struct PollResult {
+    volumes: Vec<(String, PathBuf)>,
+    volume_kinds: HashMap<PathBuf, crate::platform::VolumeKind>,
+    volume_devs: HashMap<PathBuf, u64>,
+    live: Option<LivePoll>,
+}
+
+/// The Live Ingest half of a background poll, computed on the worker.
+struct LivePoll {
+    /// The source folder that was scanned; results are dropped when the
+    /// user has repointed Live Ingest since the poll launched.
+    src: PathBuf,
+    /// Pending size counters, advanced by the scan.
+    pending: HashMap<PathBuf, (u64, u8)>,
+    /// Files whose size held for two polls.
+    ready: Vec<PathBuf>,
+    /// The plan for `ready`, built on the worker from the tick's options
+    /// snapshot; `None` when nothing was ready.
+    plan: Option<Result<apature_ingest::Plan, String>>,
+}
+
+/// The filesystem half of a volume refresh: list `/Volumes`, classify each
+/// entry and note its device id. Pure I/O against the passed-in kind cache,
+/// so the 2 s poll can run it on a worker thread; `App::refresh_volumes`
+/// (startup, folder open) runs it in place.
+fn scan_volumes(
+    kinds: &mut HashMap<PathBuf, crate::platform::VolumeKind>,
+) -> (Vec<(String, PathBuf)>, HashMap<PathBuf, u64>) {
+    let mut v = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/Volumes") {
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if p.is_dir() && !name.starts_with('.') {
+                let kind = *kinds
+                    .entry(p.clone())
+                    .or_insert_with(|| Platform::volume_kind(&p));
+                if kind != crate::platform::VolumeKind::System {
+                    v.push((name, p));
+                }
+            }
+        }
+    }
+    v.sort();
+    let present: Vec<PathBuf> = v.iter().map(|(_, p)| p.clone()).collect();
+    let devs = present
+        .iter()
+        .map(|p| (p.clone(), crate::folder_tree::device_of(p)))
+        .collect();
+    kinds.retain(|p, _| present.contains(p) || p.join("DCIM").is_dir());
+    (v, devs)
+}
+
+/// The filesystem half of one Live Ingest poll: scan the source folder,
+/// stat each file not yet handed over and advance the pending counters.
+/// Returns the updated counters and the files whose size held for two
+/// polls; `None` when the source is gone or unreadable, in which case the
+/// caller leaves Live Ingest state untouched, as the old tick did.
+fn live_scan(
+    src: &Path,
+    recursive: bool,
+    mut pending: HashMap<PathBuf, (u64, u8)>,
+    handed: &HashSet<PathBuf>,
+) -> Option<(HashMap<PathBuf, (u64, u8)>, Vec<PathBuf>)> {
+    if !src.is_dir() {
+        return None;
+    }
+    let items = apature_core::scan(src, &apature_core::ScanOptions { recursive }).ok()?;
+    let mut ready: Vec<PathBuf> = Vec::new();
+    for it in &items {
+        for v in it.variants() {
+            if handed.contains(&v.path) {
+                continue;
+            }
+            let size = std::fs::metadata(&v.path).map(|m| m.len()).unwrap_or(0);
+            let e = pending.entry(v.path.clone()).or_insert((size, 0));
+            if e.0 == size {
+                e.1 = e.1.saturating_add(1);
+            } else {
+                *e = (size, 0);
+            }
+            if e.1 >= 2 && size > 0 {
+                ready.push(v.path.clone());
+            }
+        }
+    }
+    Some((pending, ready))
+}
+
 pub struct App {
     pub folder: Option<PathBuf>,
     pub items: Vec<PhotoItem>,
@@ -593,6 +684,9 @@ pub struct App {
     pub status_since: Option<Instant>,
     /// `/Volumes` is polled every 2 s so a card shows up when it mounts.
     volumes_checked: Instant,
+    /// The in-flight background poll (volume list + Live Ingest scan), if
+    /// any; a tick that finds one still running is skipped.
+    poll_rx: Option<std::sync::mpsc::Receiver<PollResult>>,
     last_status: String,
     launch: Launch,
     quit_after_frame: bool,
@@ -845,6 +939,7 @@ impl App {
             focus_from: None,
             focus_since: None,
             volumes_checked: Instant::now(),
+            poll_rx: None,
             status_since: None,
             last_status: String::new(),
             launch: launch.clone(),
@@ -1563,20 +1658,13 @@ impl App {
         }
         let template = self.prefs.export.rename.trim().to_string();
         let mut names = Vec::with_capacity(targets.len());
+        let mut used: HashSet<String> = HashSet::new();
         for (i, &idx) in targets.iter().enumerate() {
             let it = &self.items[idx];
             let mut facts = apature_ingest::plan::facts_for(it, it.path(), headline.as_deref());
             facts.ext = "jpg".into();
-            let name = if template.is_empty() {
-                format!("{}.jpg", facts.stem)
-            } else {
-                apature_ingest::template::expand(&template, &facts, (i + 1) as u32)
-            };
-            let name = if name.to_lowercase().ends_with(".jpg") {
-                name
-            } else {
-                format!("{name}.jpg")
-            };
+            let name = export_file_name(&template, &facts, (i + 1) as u32);
+            let name = dedup_export_name(&name, &mut used);
             names.push((idx, dest.join(name)));
         }
         self.export.names = names.clone();
@@ -1942,52 +2030,20 @@ impl App {
             .plan(self.ingest.opts.clone(), self.ingest.generation);
     }
 
-    /// One Live Ingest poll: note new files, promote the ones whose size held
-    /// for two polls, and run them as a batch when no ingest is running.
-    fn live_tick(&mut self) {
-        if !self.ingest.live.on {
+    /// Apply a finished background Live Ingest poll: take over the
+    /// pending counters the worker advanced, and hand any settled batch to
+    /// a normal ingest. Results for a source the user has since repointed
+    /// (or with Live Ingest switched off) are dropped. The plan was built
+    /// on the worker from the tick's options snapshot, as the old
+    /// synchronous tick built it; the only difference is that a batch
+    /// planned while an ingest is running is discarded here instead of
+    /// never being built.
+    fn apply_live_poll(&mut self, live: LivePoll) {
+        if !self.ingest.live.on || self.ingest.opts.source != live.src {
             return;
         }
-        let src = self.ingest.opts.source.clone();
-        if !src.is_dir() {
-            return;
-        }
-        let depth = if self.ingest.opts.include_subfolders {
-            8
-        } else {
-            1
-        };
-        let Ok(items) = apature_core::scan(
-            &src,
-            &apature_core::ScanOptions {
-                recursive: depth > 1,
-            },
-        ) else {
-            return;
-        };
-        let mut ready: Vec<PathBuf> = Vec::new();
-        for it in &items {
-            for v in it.variants() {
-                if self.ingest.live.handed.contains(&v.path) {
-                    continue;
-                }
-                let size = std::fs::metadata(&v.path).map(|m| m.len()).unwrap_or(0);
-                let e = self
-                    .ingest
-                    .live
-                    .pending
-                    .entry(v.path.clone())
-                    .or_insert((size, 0));
-                if e.0 == size {
-                    e.1 = e.1.saturating_add(1);
-                } else {
-                    *e = (size, 0);
-                }
-                if e.1 >= 2 && size > 0 {
-                    ready.push(v.path.clone());
-                }
-            }
-        }
+        self.ingest.live.pending = live.pending;
+        let ready = live.ready;
         if ready.is_empty()
             || self
                 .ingest
@@ -1997,12 +2053,8 @@ impl App {
         {
             return;
         }
-        // Hand the settled files to a normal ingest.
-        let mut opts = self.ingest.opts.clone();
-        opts.only_paths = Some(ready.clone());
-        opts.day = None;
-        let ledger = apature_ingest::Ledger::load(&self.ledger_path());
-        match apature_ingest::build_plan(&opts, &ledger) {
+        let Some(plan) = live.plan else { return };
+        match plan {
             Ok(plan) if plan.can_run() && !plan.entries.is_empty() => {
                 for p in &ready {
                     self.ingest.live.pending.remove(p);
@@ -2735,31 +2787,9 @@ impl App {
     // ----- folders -----------------------------------------------------------
 
     fn refresh_volumes(&mut self) {
-        let mut v = Vec::new();
-        if let Ok(rd) = std::fs::read_dir("/Volumes") {
-            for e in rd.flatten() {
-                let p = e.path();
-                let name = e.file_name().to_string_lossy().into_owned();
-                if p.is_dir() && !name.starts_with('.') {
-                    let kind = *self
-                        .volume_kinds
-                        .entry(p.clone())
-                        .or_insert_with(|| Platform::volume_kind(&p));
-                    if kind != crate::platform::VolumeKind::System {
-                        v.push((name, p));
-                    }
-                }
-            }
-        }
-        v.sort();
-        let present: Vec<PathBuf> = v.iter().map(|(_, p)| p.clone()).collect();
-        self.volume_devs = present
-            .iter()
-            .map(|p| (p.clone(), crate::folder_tree::device_of(p)))
-            .collect();
-        self.volume_kinds
-            .retain(|p, _| present.contains(p) || p.join("DCIM").is_dir());
+        let (v, devs) = scan_volumes(&mut self.volume_kinds);
         self.volumes = v;
+        self.volume_devs = devs;
     }
 
     /// Rescan the open folder and keep the cursor and selection on the same
@@ -3884,11 +3914,101 @@ impl App {
         }
     }
 
-    /// Re-read `/Volumes`; a newly mounted volume with a DCIM folder is a
-    /// camera card: say so, and open Ingest on it when the pref is on.
-    fn poll_volumes(&mut self, ctx: &egui::Context) {
+    /// One 2 s poll, launched off the UI thread: the worker lists
+    /// `/Volumes` and, when Live Ingest is on, scans its source folder and
+    /// builds the plan for any settled files; `drain_poll` applies what it
+    /// sends back. A tick that finds the previous poll still running is
+    /// skipped, so scans never pile up on a slow card.
+    fn poll_tick(&mut self, ctx: &egui::Context) {
+        if self.poll_rx.is_some() {
+            return;
+        }
+        let kinds = self.volume_kinds.clone();
+        let live = self.ingest.live.on.then(|| {
+            (
+                self.ingest.opts.source.clone(),
+                self.ingest.opts.include_subfolders,
+                self.ingest.live.pending.clone(),
+                self.ingest.live.handed.clone(),
+                self.ingest.opts.clone(),
+                self.ledger_path(),
+            )
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.poll_rx = Some(rx);
+        let ctx = ctx.clone();
+        let _ = std::thread::Builder::new()
+            .name("volume-poll".into())
+            .spawn(move || {
+                let mut kinds = kinds;
+                let (volumes, volume_devs) = scan_volumes(&mut kinds);
+                let live = live.and_then(|(src, subfolders, pending, handed, opts, ledger_path)| {
+                    let (pending, ready) = live_scan(&src, subfolders, pending, &handed)?;
+                    let plan = if ready.is_empty() {
+                        None
+                    } else {
+                        let mut opts = opts;
+                        opts.only_paths = Some(ready.clone());
+                        opts.day = None;
+                        let ledger = apature_ingest::Ledger::load(&ledger_path);
+                        Some(apature_ingest::build_plan(&opts, &ledger).map_err(|e| e.to_string()))
+                    };
+                    Some(LivePoll {
+                        src,
+                        pending,
+                        ready,
+                        plan,
+                    })
+                });
+                let _ = tx.send(PollResult {
+                    volumes,
+                    volume_kinds: kinds,
+                    volume_devs,
+                    live,
+                });
+                ctx.request_repaint();
+            });
+    }
+
+    /// Apply a finished background poll, volume changes first and Live
+    /// Ingest second — the order the old synchronous tick ran them.
+    fn drain_poll(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.poll_rx else { return };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.poll_rx = None;
+                let PollResult {
+                    volumes,
+                    volume_kinds,
+                    volume_devs,
+                    live,
+                } = result;
+                self.apply_volume_poll(ctx, volumes, volume_kinds, volume_devs);
+                if let Some(live) = live {
+                    self.apply_live_poll(live);
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.poll_rx = None;
+            }
+        }
+    }
+
+    /// Apply a finished background volume poll: the worker's fresh list
+    /// replaces the old one, then mounts and unplugs are announced and
+    /// acted on exactly as the old synchronous poll did them.
+    fn apply_volume_poll(
+        &mut self,
+        ctx: &egui::Context,
+        volumes: Vec<(String, PathBuf)>,
+        volume_kinds: HashMap<PathBuf, crate::platform::VolumeKind>,
+        volume_devs: HashMap<PathBuf, u64>,
+    ) {
         let before: Vec<(String, PathBuf)> = self.volumes.clone();
-        self.refresh_volumes();
+        self.volumes = volumes;
+        self.volume_kinds = volume_kinds;
+        self.volume_devs = volume_devs;
         // Anything that vanished: say so, and mark a tab whose folder went with it.
         let now: Vec<PathBuf> = self.volumes.iter().map(|(_, p)| p.clone()).collect();
         for (name, path) in before.iter().filter(|(_, p)| !now.contains(p)) {
@@ -5147,8 +5267,7 @@ impl eframe::App for App {
         }
         if self.volumes_checked.elapsed().as_secs_f32() >= 2.0 {
             self.volumes_checked = Instant::now();
-            self.poll_volumes(ctx);
-            self.live_tick();
+            self.poll_tick(ctx);
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(2));
         if let Some(c) = self.dispatch_later.take() {
@@ -5157,6 +5276,7 @@ impl eframe::App for App {
 
         self.drain_results(ctx);
         self.drain_ingest();
+        self.drain_poll(ctx);
         self.drain_copy();
         self.drain_extract();
         self.drain_export();
@@ -5335,6 +5455,47 @@ fn same_folder(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// One planned export filename for a photo: the template expansion
+/// reduced to a single path component. Template fields come from metadata
+/// (EXIF Model, …) and may contain separators, `..`, or be absolute, so
+/// the expansion is sanitized before it is joined to the destination —
+/// never the raw text. Falls back to the photo stem, then to
+/// `export-<seq>`, so the name is never empty.
+fn export_file_name(template: &str, facts: &apature_ingest::template::Facts, seq: u32) -> String {
+    let expanded = if template.trim().is_empty() {
+        format!("{}.jpg", facts.stem)
+    } else {
+        apature_ingest::template::expand(template, facts, seq)
+    };
+    let name = apature_ingest::template::sanitize_component(&expanded)
+        .or_else(|| apature_ingest::template::sanitize_component(&facts.stem))
+        .unwrap_or_else(|| format!("export-{seq}"));
+    if name.to_lowercase().ends_with(".jpg") {
+        name
+    } else {
+        format!("{name}.jpg")
+    }
+}
+
+/// Suffix a planned name until it is unused in this run. The comparison
+/// is case-insensitive: the destination may live on a case-insensitive
+/// volume. Two photos expanding to the same name must not share one
+/// output file — the export pool runs them in parallel.
+fn dedup_export_name(name: &str, used: &mut HashSet<String>) -> String {
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
+        _ => (name.to_string(), String::new()),
+    };
+    let mut candidate = name.to_string();
+    let mut k = 1;
+    while used.contains(&candidate.to_lowercase()) {
+        candidate = format!("{stem}-{k}{ext}");
+        k += 1;
+    }
+    used.insert(candidate.to_lowercase());
+    candidate
+}
+
 /// Upload RGB; `gain_stops` brightens for viewing only (culling dark frames),
 /// the file is untouched.
 fn upload(ctx: &egui::Context, name: &str, rgb: &Rgb, gain_stops: u8) -> TextureHandle {
@@ -5510,5 +5671,108 @@ mod bulk_write_tests {
             b.finish_text(),
             "Rotated 0 right; 2 could not be written (see log)"
         );
+    }
+}
+
+#[cfg(test)]
+mod export_names_tests {
+    use super::*;
+    use apature_core::item::Variant;
+    use apature_core::{Kind, PhotoItem};
+    use apature_ingest::template::Facts;
+
+    fn facts_with(camera: Option<&str>, stem: &str) -> Facts {
+        Facts {
+            stem: stem.to_string(),
+            ext: "jpg".into(),
+            camera: camera.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn export_names_keep_metadata_inside_the_destination() {
+        // Finding #5: a `{camera}` template with a hostile EXIF Model.
+        let dest = Path::new("/tmp/chosen");
+        let name = export_file_name("{camera}", &facts_with(Some("../outside"), "DSC_0001"), 1);
+        assert!(
+            !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+            "traversal must not survive sanitizing: {name}"
+        );
+        assert!(dest.join(&name).starts_with(dest));
+        // An absolute model value must not discard the destination.
+        let name = export_file_name("{camera}", &facts_with(Some("/etc/passwd"), "DSC_0001"), 1);
+        assert!(dest.join(&name).starts_with(dest));
+        // A model that sanitizes to nothing falls back to the stem.
+        assert_eq!(
+            export_file_name("{camera}", &facts_with(Some(".."), "DSC_0001"), 1),
+            "DSC_0001.jpg"
+        );
+        // A missing model falls back too, and the name is never empty.
+        let name = export_file_name("{camera}", &facts_with(None, "DSC_0001"), 1);
+        assert!(!name.is_empty());
+        assert!(dest.join(&name).starts_with(dest));
+        // A real camera string with a slash becomes a flat filename.
+        let name = export_file_name("{camera}", &facts_with(Some("Canon/EOS R5"), "DSC_0001"), 1);
+        assert_eq!(name, "Canon-EOS R5.jpg");
+    }
+
+    #[test]
+    fn duplicate_export_names_are_suffixed() {
+        let mut used = HashSet::new();
+        assert_eq!(dedup_export_name("same.jpg", &mut used), "same.jpg");
+        assert_eq!(dedup_export_name("same.jpg", &mut used), "same-1.jpg");
+        // Case-insensitive: SAME.jpg collides with same.jpg on APFS.
+        assert_eq!(dedup_export_name("SAME.jpg", &mut used), "SAME-2.jpg");
+        assert_eq!(dedup_export_name("other.jpg", &mut used), "other.jpg");
+    }
+
+    /// Synthetic JPEG carrying EXIF Model `../outside`, read through the
+    /// real `facts_for` and named through the real helper: the planned
+    /// output must stay inside the chosen destination.
+    #[test]
+    fn hostile_exif_model_stays_inside_via_facts_for() {
+        let d = std::env::temp_dir().join(format!("apature-export-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let img = Rgb {
+            width: 40,
+            height: 20,
+            data: vec![128; 40 * 20 * 3],
+        };
+        let mut bytes = apature_preview::decode::encode_jpeg(&img, 90).unwrap();
+        let summary = apature_metadata::exif::ExifSummary {
+            model: Some("../outside".into()),
+            ..Default::default()
+        };
+        let block = apature_metadata::exif_write::minimal(&summary, 40, 20, None, None);
+        let seg = apature_metadata::jpeg_xmp::segment(0xE1, "APP1", b"Exif\0\0", &block).unwrap();
+        let mut with_exif = bytes[..2].to_vec();
+        with_exif.extend_from_slice(&seg);
+        with_exif.extend_from_slice(&bytes[2..]);
+        bytes = with_exif;
+        let src = d.join("DSC_0001.jpg");
+        std::fs::write(&src, &bytes).unwrap();
+        let item = PhotoItem {
+            id: 0,
+            stem: "DSC_0001".to_string(),
+            primary: Variant {
+                path: src.clone(),
+                kind: Kind::Jpeg,
+                size: 0,
+                modified: None,
+            },
+            secondary: Vec::new(),
+        };
+        let facts = apature_ingest::plan::facts_for(&item, item.path(), None);
+        assert_eq!(facts.camera.as_deref(), Some("../outside"));
+        let dest = d.join("chosen");
+        let name = export_file_name("{camera}", &facts, 1);
+        assert!(
+            dest.join(&name).starts_with(&dest),
+            "planned {name} escapes {dest:?}"
+        );
+        assert!(!name.contains('/') && !name.contains(".."));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

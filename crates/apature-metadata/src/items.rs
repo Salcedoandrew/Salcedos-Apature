@@ -184,7 +184,7 @@ pub fn read_iptc(item: &PhotoItem) -> Iptc {
             // Sidecar fields win, including ones cleared on purpose.
             let side = iptc::parse(&t);
             let mut m = j.overlay(&side);
-            for f in iptc::cleared_in(&t, &side) {
+            for f in iptc::cleared_with(&t, &side) {
                 m.clear(f);
             }
             m
@@ -410,6 +410,9 @@ mod tests {
         let jpg = dir.path().join("IMG_2.JPG");
         fs::write(&jpg, jpeg_skeleton()).unwrap();
         let old = age(&jpg);
+        // Birth-time preservation is macOS-only by design (see
+        // `jpeg_xmp::keep_dates`), so sample it only where it can be checked.
+        #[cfg(target_os = "macos")]
         let created = fs::metadata(&jpg).unwrap().created().ok();
         let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
         let scheme = ColorClassScheme::default();
@@ -422,6 +425,10 @@ mod tests {
         assert_ne!(fs::read(&jpg).unwrap(), jpeg_skeleton(), "marks went in");
         let m = fs::metadata(&jpg).unwrap();
         assert_eq!(m.modified().unwrap(), old);
+        // `keep_dates` sets creation time on macOS only; elsewhere the
+        // atomic temp-file-and-rename yields a new inode with a fresh birth
+        // time, so assert it only where the behavior is implemented.
+        #[cfg(target_os = "macos")]
         if let (Some(c), Ok(now)) = (created, m.created()) {
             assert_eq!(now, c);
         }

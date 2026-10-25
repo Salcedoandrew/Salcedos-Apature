@@ -348,6 +348,63 @@ mod tests {
         assert_eq!(t.uint(ex.get(PIXEL_Y).unwrap(), 0), Some(1365));
     }
 
+    /// A hand-built big-endian ("MM") block, the shape a camera writes:
+    /// IFD0 { Make (data at 50), Orientation 6, ExifIFD → 56 }, and an
+    /// Exif IFD { PixelXDimension 6000, PixelYDimension 4000 }.
+    fn be_block() -> Vec<u8> {
+        let mut b = b"MM\0\x2A".to_vec();
+        b.extend_from_slice(&8u32.to_be_bytes());
+        b.extend_from_slice(&3u16.to_be_bytes());
+        let entry = |b: &mut Vec<u8>, tag: u16, typ: u16, count: u32, val: [u8; 4]| {
+            b.extend_from_slice(&tag.to_be_bytes());
+            b.extend_from_slice(&typ.to_be_bytes());
+            b.extend_from_slice(&count.to_be_bytes());
+            b.extend_from_slice(&val);
+        };
+        entry(&mut b, tag::MAKE, 2, 6, 50u32.to_be_bytes());
+        entry(&mut b, tag::ORIENTATION, 3, 1, [0, 6, 0, 0]);
+        entry(&mut b, EXIF_IFD, 4, 1, 56u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(b.len(), 50);
+        b.extend_from_slice(b"Canon\0");
+        assert_eq!(b.len(), 56);
+        b.extend_from_slice(&2u16.to_be_bytes());
+        entry(&mut b, PIXEL_X, 4, 1, 6000u32.to_be_bytes());
+        entry(&mut b, PIXEL_Y, 4, 1, 4000u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b
+    }
+
+    #[test]
+    fn patch_a_big_endian_block_touches_only_the_patched_fields() {
+        let mut block = be_block();
+        let before = block.clone();
+        // The fixture parses and says what was built into it.
+        let s = exif::from_bytes(&block).expect("fixture parses");
+        assert_eq!(s.make.as_deref(), Some("Canon"));
+        assert_eq!(s.orientation, 6);
+
+        assert!(patch_for_export(&mut block, 1365, 2048));
+
+        let s = exif::from_bytes(&block).expect("still parses");
+        assert_eq!(s.orientation, 1);
+        let (t, first) = Tiff::parse(&block).unwrap();
+        let ifd0 = t.read_ifd(first).unwrap();
+        let p = t.uint(ifd0.get(EXIF_IFD).unwrap(), 0).unwrap() as u32;
+        let ex = t.read_ifd(p).unwrap();
+        assert_eq!(t.uint(ex.get(PIXEL_X).unwrap(), 0), Some(1365));
+        assert_eq!(t.uint(ex.get(PIXEL_Y).unwrap(), 0), Some(2048));
+        // Only the three patched value fields may differ: Orientation's
+        // SHORT at 30..32, PixelXDimension at 66..70, PixelYDimension at
+        // 78..82. Every other byte is untouched.
+        let patched = [30..32, 66..70, 78..82];
+        for (i, (a, b)) in before.iter().zip(&block).enumerate() {
+            if !patched.iter().any(|r| r.contains(&i)) {
+                assert_eq!(a, b, "byte {i} changed");
+            }
+        }
+    }
+
     #[test]
     fn patch_resets_orientation_and_dimensions() {
         let mut block = minimal(&summary(), 6000, 4000, None, None);

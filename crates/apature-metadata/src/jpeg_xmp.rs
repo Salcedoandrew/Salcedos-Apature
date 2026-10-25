@@ -19,6 +19,9 @@ pub const XMP_SIG: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 /// bytes - 29 signature bytes). Bigger packets need Extended XMP, which we
 /// do not write.
 pub const MAX_PACKET: usize = 65_504;
+/// Most bytes after the marker and length that one JPEG segment can hold
+/// (the 2-byte length counts itself, so 65535 - 2).
+pub const MAX_SEGMENT_BODY: usize = 65_533;
 /// Whitespace padding appended to a freshly created packet so later edits
 /// by other tools can grow it in place (the XMP spec's recommendation).
 const PADDING: usize = 2048;
@@ -123,10 +126,6 @@ pub fn packet(data: &[u8]) -> Result<Option<&str>, JpegXmpError> {
     }
     Ok(None)
 }
-
-/// Most bytes after the marker and length that one JPEG segment can hold
-/// (the 2-byte length counts itself, so 65535 - 2).
-pub const MAX_SEGMENT_BODY: usize = 65_533;
 
 /// One marker segment: FF `marker`, length, `sig`, `body`. A body too big
 /// for the 16-bit length is an error, never a wrapped length (which would

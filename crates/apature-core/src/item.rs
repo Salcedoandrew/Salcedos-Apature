@@ -87,18 +87,21 @@ impl PhotoItem {
         } else {
             (lower, upper)
         };
-        if preferred.is_file() || other.is_file() {
-            // On a case-insensitive volume (APFS default, ExFAT cards) both
-            // probes succeed whatever the real name is, so answer with the
-            // entry the directory actually holds.
-            if let Some(real) = existing_with_case(&preferred) {
-                return real;
-            }
-            return if preferred.is_file() {
-                preferred
-            } else {
-                other
-            };
+        // Exact probes first: on a case-sensitive filesystem a hit *is* the
+        // real spelling, and on a case-insensitive one any spelling opens
+        // the same file, so either hit can be answered directly.
+        if preferred.is_file() {
+            return preferred;
+        }
+        if other.is_file() {
+            return other;
+        }
+        // Neither spelling is there. A sidecar can still exist under a
+        // third spelling (IMG.Xmp) that only a directory scan finds; the
+        // scan used to run for every item that *has* a sidecar, and now
+        // runs only on this miss path.
+        if let Some(real) = existing_with_case(&preferred) {
+            return real;
         }
         preferred
     }

@@ -21,9 +21,7 @@
 
 use std::path::Path;
 
-use regex::Regex;
-
-use crate::xmp::{prop_pattern, set_prop, value_of, write_sidecar_with, XmpError};
+use crate::xmp::{cached_re, prop_pattern, set_prop, value_of, write_sidecar_with, XmpError};
 
 pub const NS_TIFF: &str = "http://ns.adobe.com/tiff/1.0/";
 pub const NS_CRS: &str = "http://ns.adobe.com/camera-raw-settings/1.0/";
@@ -127,11 +125,6 @@ pub fn inverse(o: u32) -> u32 {
     }
 }
 
-/// True when the orientation swaps width and height.
-pub fn swaps_axes(o: u32) -> bool {
-    matches!(o, 5..=8)
-}
-
 const CROP_NAMES: [&str; 4] = ["CropTop", "CropLeft", "CropBottom", "CropRight"];
 
 /// The prefixes a property of `ns` may appear under in `text`: the usual
@@ -153,7 +146,7 @@ fn prop(text: &str, prefixes: &[String], name: &str) -> Option<String> {
         .map(|p| regex::escape(p))
         .collect::<Vec<_>>()
         .join("|");
-    value_of(&Regex::new(&prop_pattern(&alt, name)).ok()?, text)
+    value_of(&cached_re(&prop_pattern(&alt, name)).ok()?, text)
 }
 
 /// Parse rotation and crop out of sidecar text.
@@ -306,7 +299,6 @@ mod tests {
         for o in 1..=8 {
             assert_eq!(rotate_ccw(rotate_cw(o)), o);
             assert_eq!(rotate_cw(rotate_cw(rotate_cw(rotate_cw(o)))), o);
-            assert_ne!(swaps_axes(o), swaps_axes(rotate_cw(o)));
             assert_eq!(inverse(inverse(o)), o);
         }
         assert_eq!(rotate_cw(1), 6);

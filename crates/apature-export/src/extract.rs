@@ -5,17 +5,22 @@
 //! the start marker. A free name is always found (`name-1.jpg`…); no file
 //! is ever replaced, and the RAWs are only read.
 
-use std::collections::BTreeSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rayon::prelude::*;
 
 use apature_core::{ColorClassScheme, Kind, PhotoItem};
 use apature_metadata::jpeg_xmp::{header_segments, is_exif_segment};
 use apature_metadata::{edits, exif, exif_write, iim, iptc, items, xmp, XmpMarks};
 use apature_preview::embedded::Prefer;
+
+use crate::app1;
 
 /// The dialog's checkboxes; all on by default except Extract to source folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -70,47 +75,84 @@ pub fn raw_of(item: &PhotoItem) -> Option<&Path> {
 
 /// Extract every photo's preview; non-RAW photos are skipped. `dest` is
 /// the folder for all of them, or `None` for each RAW's own folder.
+///
+/// Photos extract in parallel: the per-photo work (preview extraction,
+/// metadata splice, write) is independent, and only the free-name
+/// handout ([`FreeNames`]) and the progress callback are serialised.
+/// Results are collected in input order, so the outcome lists read as
+/// they did sequentially. Progress is reported as each photo finishes
+/// (`done` = photos completed) instead of as each one starts.
 pub fn run_extract(
     photos: &[PhotoItem],
     dest: Option<&Path>,
     opts: &ExtractOptions,
     scheme: &ColorClassScheme,
     cancel: &AtomicBool,
-    mut on_progress: impl FnMut(&ExtractProgress),
+    on_progress: impl FnMut(&ExtractProgress) + Send,
 ) -> ExtractOutcome {
-    let mut out = ExtractOutcome::default();
-    let mut taken: BTreeSet<String> = BTreeSet::new();
     let total = photos.len();
-    for (i, item) in photos.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            out.cancelled = true;
-            break;
-        }
-        on_progress(&ExtractProgress {
-            done: i,
-            total,
-            current: item.path().to_path_buf(),
-        });
-        let Some(raw) = raw_of(item) else {
-            out.skipped
-                .push((item.path().to_path_buf(), "not a RAW photo".into()));
-            continue;
-        };
-        let dir = match dest {
-            Some(d) => d.to_path_buf(),
-            None => raw.parent().map(Path::to_path_buf).unwrap_or_default(),
-        };
-        match extract_one(item, raw, &dir, opts, scheme, &mut taken) {
-            Ok(jpg) => out.extracted.push((raw.to_path_buf(), jpg)),
-            Err(why) => out.skipped.push((raw.to_path_buf(), why)),
+    let names = FreeNames::new();
+    let done = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
+    let on_progress = Mutex::new(on_progress);
+
+    enum One {
+        Done(PathBuf, PathBuf),
+        Skipped(PathBuf, String),
+        /// Never started: Cancel was already set when its turn came.
+        NotStarted,
+    }
+
+    let results: Vec<One> = photos
+        .par_iter()
+        .map(|item| {
+            let item_path = item.path().to_path_buf();
+            if cancel.load(Ordering::Relaxed) {
+                cancelled.store(true, Ordering::Relaxed);
+                return One::NotStarted;
+            }
+            let one = match raw_of(item) {
+                None => One::Skipped(item_path.clone(), "not a RAW photo".into()),
+                Some(raw) => {
+                    let dir = match dest {
+                        Some(d) => d.to_path_buf(),
+                        None => raw.parent().map(Path::to_path_buf).unwrap_or_default(),
+                    };
+                    match extract_one(item, raw, &dir, opts, scheme, &names) {
+                        Ok(jpg) => One::Done(raw.to_path_buf(), jpg),
+                        Err(why) => One::Skipped(raw.to_path_buf(), why),
+                    }
+                }
+            };
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Ok(mut cb) = on_progress.lock() {
+                cb(&ExtractProgress {
+                    done: n,
+                    total,
+                    current: item_path,
+                });
+            }
+            one
+        })
+        .collect();
+
+    let mut out = ExtractOutcome::default();
+    for one in results {
+        match one {
+            One::Done(raw, jpg) => out.extracted.push((raw, jpg)),
+            One::Skipped(p, why) => out.skipped.push((p, why)),
+            One::NotStarted => {}
         }
     }
+    out.cancelled = cancelled.load(Ordering::Relaxed);
     if !out.cancelled {
-        on_progress(&ExtractProgress {
-            done: total,
-            total,
-            current: PathBuf::new(),
-        });
+        if let Ok(mut cb) = on_progress.lock() {
+            cb(&ExtractProgress {
+                done: total,
+                total,
+                current: PathBuf::new(),
+            });
+        }
     }
     out
 }
@@ -122,7 +164,7 @@ pub fn extract_one(
     dir: &Path,
     opts: &ExtractOptions,
     scheme: &ColorClassScheme,
-    taken: &mut BTreeSet<String>,
+    names: &FreeNames,
 ) -> Result<PathBuf, String> {
     let (_, jpeg) = apature_preview::extract(raw, Prefer::Largest, usize::MAX)
         .map_err(|_| "no JPEG preview inside".to_string())?;
@@ -135,7 +177,7 @@ pub fn extract_one(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "preview".into());
-    let (path, mut f) = create_free(dir, &stem, taken)?;
+    let (path, mut f) = create_free(dir, &stem, names)?;
     let written = f.write_all(&file).and_then(|_| f.sync_all());
     if let Err(e) = written {
         drop(f);
@@ -162,39 +204,69 @@ pub fn extract_one(
     Ok(path)
 }
 
+/// Free output names for one extraction run, shared across the parallel
+/// workers. Each folder's listing is read ONCE, on first use, into a set
+/// of lowercased names; every name handed out joins its folder's set, so
+/// picking a name never rescans the folder (the old per-file `read_dir`
+/// made bulk extraction quadratic in folder size).
+pub struct FreeNames {
+    state: Mutex<HashMap<PathBuf, HashSet<String>>>,
+}
+
+impl FreeNames {
+    pub fn new() -> Self {
+        FreeNames {
+            state: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for FreeNames {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// `stem.jpg`, else `stem-1.jpg`…: created with create_new, so an existing
 /// file (any case, on a case-insensitive disk) is never opened for writing.
-fn create_free(
-    dir: &Path,
-    stem: &str,
-    taken: &mut BTreeSet<String>,
-) -> Result<(PathBuf, File), String> {
-    // Names already in the folder, ignoring case even on a case-sensitive
-    // disk, so name.jpg never lands beside a camera's NAME.JPG.
-    let present: BTreeSet<String> = fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(Result::ok)
-                .map(|e| e.file_name().to_string_lossy().to_lowercase())
-                .collect()
-        })
-        .unwrap_or_default();
+/// The lock is held only for this check-and-create, not for the per-photo
+/// decode and metadata work around it.
+fn create_free(dir: &Path, stem: &str, names: &FreeNames) -> Result<(PathBuf, File), String> {
+    let mut state = names.state.lock().unwrap();
+    // Names unavailable in this folder, ignoring case even on a
+    // case-sensitive disk, so name.jpg never lands beside a camera's
+    // NAME.JPG: the on-disk snapshot plus this run's handouts.
+    let used = state.entry(dir.to_path_buf()).or_insert_with(|| {
+        fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().to_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
     for k in 0..10_000u32 {
         let name = if k == 0 {
             format!("{stem}.jpg")
         } else {
             format!("{stem}-{k}.jpg")
         };
-        let path = dir.join(&name);
-        let key = path.to_string_lossy().to_lowercase();
-        if taken.contains(&key) || present.contains(&name.to_lowercase()) || path.exists() {
+        let lower = name.to_lowercase();
+        if used.contains(&lower) {
             continue;
         }
+        let path = dir.join(&name);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(f) => {
-                taken.insert(key);
+                used.insert(lower);
                 return Ok((path, f));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Appeared since the snapshot (or a case twin of it);
+                // remember it and try the next suffix.
+                used.insert(lower);
+                continue;
+            }
             Err(e) => return Err(format!("can't create {name}: {e}")),
         }
     }
@@ -250,7 +322,7 @@ fn with_metadata(
         // No camera data, but the picture must still stand the right way up.
         exif_write::orientation_only(orientation)
     };
-    add.push(crate::segment(0xE1, "Exif", b"Exif\0\0", &exif_block).map_err(|e| e.to_string())?);
+    add.push(app1(b"Exif\0\0", &exif_block).map_err(|e| e.to_string())?);
 
     let mut packet = String::new();
     if opts.copy_iptc && !fields.is_empty() {
@@ -264,7 +336,7 @@ fn with_metadata(
     let write_xmp = !packet.is_empty();
     if write_xmp {
         add.push(
-            crate::segment(0xE1, "XMP", b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes())
+            app1(b"http://ns.adobe.com/xap/1.0/\0", packet.as_bytes())
                 .map_err(|e| e.to_string())?,
         );
     }
@@ -309,7 +381,6 @@ fn with_metadata(
     out.extend_from_slice(&jpeg[at..]);
     Ok(out)
 }
-
 
 fn icc_segment(profile: &[u8]) -> Vec<u8> {
     let len = 2 + 12 + 2 + profile.len();

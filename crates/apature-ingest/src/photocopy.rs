@@ -5,17 +5,18 @@
 //! of that every copy gets its original's modified, accessed and (on macOS)
 //! created dates, so the copy sorts and reads exactly like the source.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File, FileTimes};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use apature_core::PhotoItem;
 use apature_metadata::{iptc, xmp, Iptc};
+use rayon::prelude::*;
 
 use crate::copy::{copy_verified, IngestError};
-use crate::plan::{facts_for, PlanError, Skip};
-use crate::template::{expand, sanitize_component};
+use crate::plan::{civil_from_days, facts_for, PlanError, Skip};
+use crate::template::{expand, sanitize_component, Facts};
 
 /// What to do when a file of that name is already at the destination.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -160,12 +161,13 @@ pub struct CopyPlan {
 }
 
 /// Civil date (UTC) of a file time, for photos without an EXIF date.
+/// The days-to-civil conversion itself is `plan`'s, shared with `today`.
 fn civil(t: std::time::SystemTime) -> (i32, u32, u32) {
     let secs = t
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    crate::plan::civil_from_secs(secs)
+    civil_from_days(secs.div_euclid(86_400))
 }
 
 fn ext_of(p: &Path) -> String {
@@ -202,8 +204,17 @@ pub fn plan_copy(items: &[&PhotoItem], opts: &CopyOptions) -> Result<CopyPlan, P
     let mut planned: BTreeSet<PathBuf> = BTreeSet::new();
     let mut seq = opts.seq_start.max(1);
 
+    // The EXIF read behind `facts_for` is independent per photo, so it
+    // runs in parallel; the planning itself stays sequential, in the
+    // order the photos were handed over (`{seqn}` follows it, and the
+    // collision state builds on it).
+    let facts_all: Vec<Facts> = items
+        .par_iter()
+        .map(|item| facts_for(item, item.path(), opts.headline.as_deref()))
+        .collect();
+
     for (idx, item) in items.iter().enumerate() {
-        let facts = facts_for(item, item.path(), opts.headline.as_deref());
+        let facts = &facts_all[idx];
         let folder = match opts.date_folders {
             DateFolders::None => PathBuf::new(),
             mode => {
@@ -248,7 +259,7 @@ pub fn plan_copy(items: &[&PhotoItem], opts: &CopyOptions) -> Result<CopyPlan, P
         let stem = if opts.rename_template.trim().is_empty() {
             item.stem.clone()
         } else {
-            let mut s = expand(&opts.rename_template, &facts, seq);
+            let mut s = expand(&opts.rename_template, facts, seq);
             for (p, _, _) in &files {
                 let suffix = format!(".{}", ext_of(p)).to_lowercase();
                 if suffix.len() > 1 && s.to_lowercase().ends_with(&suffix) {
@@ -388,12 +399,12 @@ pub struct CopyOutcome {
     pub pad_failed: usize,
 }
 
-/// The sidecar beside a copied photo: the copied one if there is one,
-/// otherwise `stem.xmp` (`.XMP` when the photo's extension is upper case).
-fn dest_sidecar(plan: &CopyPlan, item: usize) -> Option<PathBuf> {
-    let mut mine = plan.entries.iter().filter(|e| e.item == item).peekable();
-    let first = (*mine.peek()?).clone();
-    if let Some(e) = mine.find(|e| e.sidecar) {
+/// The sidecar beside a copied photo, from that photo's entries (in plan
+/// order): the copied one if there is one, otherwise `stem.xmp` (`.XMP`
+/// when the photo's extension is upper case).
+fn dest_sidecar(entries: &[&CopyEntry]) -> Option<PathBuf> {
+    let first = entries.first()?;
+    if let Some(e) = entries.iter().find(|e| e.sidecar) {
         return Some(e.destination.clone());
     }
     let ext = ext_of(&first.destination);
@@ -436,18 +447,24 @@ pub fn run_copy(
         }
     }
     if let Some(fields) = pad {
-        let items: BTreeSet<usize> = plan.entries.iter().map(|e| e.item).collect();
-        for item in items {
+        // Group the entries per photo and index the copied destinations
+        // once: testing every photo against the whole plan and the whole
+        // copied list made this pass quadratic in the number of photos.
+        let copied: HashSet<&Path> =
+            out.copied.iter().map(|(_, d)| d.as_path()).collect();
+        let mut by_item: BTreeMap<usize, Vec<&CopyEntry>> = BTreeMap::new();
+        for e in &plan.entries {
+            by_item.entry(e.item).or_default().push(e);
+        }
+        for entries in by_item.values() {
             // Only photos whose every file arrived.
-            let all_done = plan
-                .entries
+            if !entries
                 .iter()
-                .filter(|e| e.item == item)
-                .all(|e| out.copied.iter().any(|(_, d)| *d == e.destination));
-            if !all_done {
+                .all(|e| copied.contains(e.destination.as_path()))
+            {
                 continue;
             }
-            let Some(p) = dest_sidecar(plan, item) else {
+            let Some(p) = dest_sidecar(entries) else {
                 continue;
             };
             let r = xmp::write_sidecar_with(
@@ -647,7 +664,7 @@ mod tests {
         };
         let r = run_copy(&p, &AtomicBool::new(false), Some(&pad), |_| {});
         assert_eq!((r.pad_written, r.pad_failed), (1, 0));
-        let sc = fs::read_to_string(d.path().join("out/A.xmp")).unwrap();
+        let sc = fs::read_to_string(d.path().join("out/A.XMP")).unwrap();
         assert!(sc.contains("Opening day"));
         assert_eq!(
             fs::read(d.path().join("out/A.JPG")).unwrap(),

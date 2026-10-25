@@ -23,7 +23,7 @@ pub mod plan;
 pub mod run;
 pub mod template;
 
-pub use copy::{copy_verified, sha256_file, CopyReport, IngestError};
+pub use copy::{copy_unverified, copy_verified, sha256_file, CopyReport, IngestError};
 pub use ledger::Ledger;
 pub use photocopy::{
     dest_base, plan_copy, run_copy, CopyOptions, CopyOutcome, CopyPlan, CopyProgress, DateFolders,

@@ -9,7 +9,8 @@ use crate::Iptc;
 /// One dataset: 0x1C, record, dataset, big-endian length, bytes.
 fn ds(out: &mut Vec<u8>, rec: u8, set: u8, data: &[u8]) {
     let mut n = data.len().min(32767);
-    // Never cut a UTF-8 character in half: step back to its first byte.
+    // Never cut a multi-byte UTF-8 character in half: walk back past any
+    // continuation bytes (10xx xxxx) the cut landed inside.
     while n > 0 && n < data.len() && data[n] & 0xC0 == 0x80 {
         n -= 1;
     }
@@ -112,10 +113,23 @@ pub fn datasets(iptc: &Iptc) -> Vec<u8> {
     o
 }
 
+/// Largest segment this writer emits: the JPEG length field is a u16 that
+/// counts its own two bytes, so nothing past 65,535 can be represented.
+pub const MAX_SEGMENT: usize = u16::MAX as usize;
+
+#[derive(Debug, thiserror::Error)]
+pub enum IimError {
+    #[error("IIM segment is {0} bytes; a JPEG segment holds at most {MAX_SEGMENT}")]
+    SegmentTooLarge(usize),
+    #[error("metadata: {0}")]
+    Jpeg(crate::jpeg_xmp::JpegXmpError),
+}
+
 /// A complete APP13 segment (marker included) holding the IIM block as
-/// Photoshop image resource 0x0404.
-/// Errors when the fields are too long for one segment.
-pub fn app13_segment(iptc: &Iptc) -> Result<Vec<u8>, crate::jpeg_xmp::JpegXmpError> {
+/// Photoshop image resource 0x0404. Built by the shared guard in
+/// `crate::jpeg_xmp::segment`, so an oversized block is an error, never a
+/// wrapped length.
+pub fn app13_segment(iptc: &Iptc) -> Result<Vec<u8>, IimError> {
     let payload = datasets(iptc);
     let mut irb = Vec::with_capacity(payload.len() + 16);
     irb.extend_from_slice(b"8BIM");
@@ -126,7 +140,12 @@ pub fn app13_segment(iptc: &Iptc) -> Result<Vec<u8>, crate::jpeg_xmp::JpegXmpErr
     if payload.len() % 2 == 1 {
         irb.push(0);
     }
-    crate::jpeg_xmp::segment(0xED, "IPTC-IIM", b"Photoshop 3.0\0", &irb)
+    crate::jpeg_xmp::segment(0xED, "IPTC-IIM", b"Photoshop 3.0\0", &irb).map_err(|e| match e {
+        // The shared guard counts sig + body; our error counts the whole
+        // length field, which is two bytes more.
+        crate::jpeg_xmp::JpegXmpError::SegmentTooLarge(_, n) => IimError::SegmentTooLarge(n + 2),
+        other => IimError::Jpeg(other),
+    })
 }
 
 /// Parse datasets back into (record, dataset, bytes); for tests and readers.
@@ -165,6 +184,33 @@ pub fn from_app13(payload: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test-local dataset walker: the production read-back pair was
+    /// deleted as dead code, but the round-trip checks still need one.
+    fn sets_of(mut d: &[u8]) -> Vec<(u8, u8, Vec<u8>)> {
+        let mut out = Vec::new();
+        while d.len() >= 5 && d[0] == 0x1C {
+            let n = u16::from_be_bytes([d[3], d[4]]) as usize;
+            if d.len() < 5 + n {
+                break;
+            }
+            out.push((d[1], d[2], d[5..5 + n].to_vec()));
+            d = &d[5 + n..];
+        }
+        out
+    }
+
+    /// Test-local APP13 payload → IIM bytes (the single 0x0404 resource).
+    fn iim_of(payload: &[u8]) -> &[u8] {
+        let p = payload.strip_prefix(b"Photoshop 3.0\0").unwrap();
+        assert_eq!(&p[..4], b"8BIM");
+        assert_eq!(u16::from_be_bytes([p[4], p[5]]), 0x0404);
+        let name_len = p[6] as usize;
+        let name_total = (1 + name_len + 1) & !1; // Pascal string padded to even
+        let len_at = 6 + name_total;
+        let len = u32::from_be_bytes(p[len_at..len_at + 4].try_into().unwrap()) as usize;
+        &p[len_at + 4..len_at + 4 + len]
+    }
 
     fn sample() -> Iptc {
         Iptc {
@@ -218,8 +264,8 @@ mod tests {
             "segment length counts everything after the marker"
         );
         let payload = &seg[4..];
-        let iim = from_app13(payload).expect("8BIM 0x0404 found");
-        let sets = parse(iim);
+        let iim = iim_of(payload);
+        let sets = sets_of(iim);
         let get = |r: u8, s: u8| -> Vec<String> {
             sets.iter()
                 .filter(|(a, b, _)| *a == r && *b == s)
@@ -251,13 +297,47 @@ mod tests {
 
     #[test]
     fn empty_fields_are_skipped_and_order_is_record_sorted() {
-        let sets = parse(&datasets(&Iptc::default()));
+        let sets = sets_of(&datasets(&Iptc::default()));
         assert_eq!(sets.len(), 2, "charset and version only");
         let d = datasets(&sample());
-        let sets = parse(&d);
+        let sets = sets_of(&d);
         let keys: Vec<(u8, u8)> = sets.iter().map(|(r, s, _)| (*r, *s)).collect();
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted);
+    }
+
+    #[test]
+    fn oversized_segment_is_an_error_not_a_wrapped_length() {
+        // Three 30 KB keywords: each dataset is legal on its own, but
+        // together they pass the 65,535-byte segment limit.
+        let big = Iptc {
+            keywords: Some(vec!["k".repeat(30_000); 3]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            app13_segment(&big),
+            Err(IimError::SegmentTooLarge(_))
+        ));
+        assert!(app13_segment(&sample()).is_ok());
+    }
+
+    #[test]
+    fn truncation_never_splits_a_utf8_character() {
+        // 2-byte characters: 16,384 × "ü" is 32,768 bytes, so the raw cut
+        // at 32,767 lands on a continuation byte.
+        let two = "ü".repeat(16_384);
+        let mut out = Vec::new();
+        ds(&mut out, 2, 120, two.as_bytes());
+        let n = u16::from_be_bytes([out[3], out[4]]) as usize;
+        assert_eq!(n, 32_766);
+        assert_eq!(std::str::from_utf8(&out[5..]).unwrap(), "ü".repeat(16_383));
+        // 3-byte characters: 10,923 × "€" is 32,769 bytes.
+        let three = "€".repeat(10_923);
+        let mut out = Vec::new();
+        ds(&mut out, 2, 120, three.as_bytes());
+        let n = u16::from_be_bytes([out[3], out[4]]) as usize;
+        assert_eq!(n, 32_766);
+        assert_eq!(std::str::from_utf8(&out[5..]).unwrap(), "€".repeat(10_922));
     }
 }

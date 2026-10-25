@@ -6,7 +6,8 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -163,6 +164,161 @@ impl Remote for LocalFolder {
     }
 }
 
+/// Base64 without padding, the way ssh prints SHA256 fingerprints.
+fn base64_nopad(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let byte = |i: usize| chunk.get(i).copied().unwrap_or(0) as u32;
+        let n = (byte(0) << 16) | (byte(1) << 8) | byte(2);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(n >> 6) as usize & 63] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[n as usize & 63] as char);
+        }
+    }
+    out
+}
+
+/// Host-key algorithms for the key types `known_hosts` lists for this
+/// host and port (hashed entries too), in OpenSSH's order; empty if none.
+fn host_key_algorithms(sess: &ssh2::Session, known_hosts: &str, host: &str, port: u16) -> String {
+    let mut types = Vec::new();
+    for line in known_hosts.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with('@') {
+            continue;
+        }
+        let Some(ty) = line.split_whitespace().nth(1) else {
+            continue;
+        };
+        let Ok(mut one) = sess.known_hosts() else {
+            continue;
+        };
+        // With a dummy key, a listed host reads as a mismatch, not unknown.
+        if one.read_str(line, ssh2::KnownHostFileKind::OpenSSH).is_ok()
+            && !matches!(
+                one.check_port(host, port, &[0]),
+                ssh2::CheckResult::NotFound
+            )
+        {
+            types.push(ty.to_string());
+        }
+    }
+    const ORDER: [(&str, &str); 6] = [
+        ("ssh-ed25519", "ssh-ed25519"),
+        ("ecdsa-sha2-nistp256", "ecdsa-sha2-nistp256"),
+        ("ecdsa-sha2-nistp384", "ecdsa-sha2-nistp384"),
+        ("ecdsa-sha2-nistp521", "ecdsa-sha2-nistp521"),
+        ("ssh-rsa", "rsa-sha2-512,rsa-sha2-256,ssh-rsa"),
+        ("ssh-dss", "ssh-dss"),
+    ];
+    ORDER
+        .iter()
+        .filter(|(t, _)| types.iter().any(|x| x == t))
+        .map(|(_, a)| *a)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Check an SFTP server's host key against `known_hosts` text (the user's
+/// `~/.ssh/known_hosts`, the file `ssh` itself uses). Fails closed: a
+/// server that isn't listed, or whose key changed, is refused. Hashed
+/// entries work: each line is fed to libssh2 on its own, markers and
+/// unreadable lines are skipped rather than failing the whole file.
+fn check_host_key(
+    sess: &ssh2::Session,
+    known_hosts: &str,
+    host: &str,
+    port: u16,
+    key: &[u8],
+    user: &str,
+    fingerprint: &str,
+) -> Result<(), DeliverError> {
+    let addr = format!("{host}:{port}");
+    let err = |m: String| DeliverError::Connect(addr.clone(), m);
+    let mut kh = sess.known_hosts().map_err(|e| err(e.to_string()))?;
+    for line in known_hosts.lines().map(str::trim) {
+        // Markers (@cert-authority, @revoked) and lines libssh2 can't read
+        // are skipped rather than failing the whole file.
+        if !line.is_empty() && !line.starts_with('#') && !line.starts_with('@') {
+            let _ = kh.read_str(line, ssh2::KnownHostFileKind::OpenSSH);
+        }
+    }
+    let ssh_cmd = if port == 22 {
+        format!("ssh {user}@{host}")
+    } else {
+        format!("ssh -p {port} {user}@{host}")
+    };
+    match kh.check_port(host, port, key) {
+        ssh2::CheckResult::Match => Ok(()),
+        ssh2::CheckResult::NotFound => Err(err(format!(
+            "{host} is not in ~/.ssh/known_hosts (server key {fingerprint}); \
+             connect to it once with `{ssh_cmd}` to record the key, then retry"
+        ))),
+        ssh2::CheckResult::Mismatch => Err(err(format!(
+            "host key for {host} does NOT match ~/.ssh/known_hosts (server key {fingerprint}); \
+             refusing to connect — if the server was replaced on purpose, update known_hosts first"
+        ))),
+        ssh2::CheckResult::Failure => Err(err(format!(
+            "could not check the host key for {host} against ~/.ssh/known_hosts"
+        ))),
+    }
+}
+
+/// Check the SFTP server's host key against ~/.ssh/known_hosts before any
+/// login. A mismatch fails, and so does an unknown host: the first trust has
+/// to come from a real ssh client recording the key, not from us accepting
+/// whatever a first connection presents.
+fn verify_host_key(
+    sess: &ssh2::Session,
+    target: &Target,
+    known_hosts: &str,
+) -> Result<(), DeliverError> {
+    let (key, _) = sess.host_key().ok_or_else(|| {
+        DeliverError::Connect(
+            format!("{}:{}", target.host, target.port),
+            "server presented no host key".into(),
+        )
+    })?;
+    let fingerprint = sess
+        .host_key_hash(ssh2::HashType::Sha256)
+        .map(|h| format!("SHA256:{}", base64_nopad(h)))
+        .unwrap_or_else(|| "SHA256:unknown".into());
+    check_host_key(
+        sess,
+        known_hosts,
+        &target.host,
+        target.port,
+        key,
+        &target.user,
+        &fingerprint,
+    )
+}
+
+/// Counter so two probes in one process never share a name even if the
+/// clock has not moved between calls.
+static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A probe name unique to this call: process id, wall-clock time, and a
+/// per-process counter. The folder test must never touch a file that was
+/// already there, so the name cannot be fixed.
+fn unique_probe_path(dir: &Path) -> PathBuf {
+    let n = PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    dir.join(format!(
+        ".apature-write-test-{}-{}-{}",
+        std::process::id(),
+        nanos,
+        n
+    ))
+}
+
 fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverError> {
     let addr = format!("{}:{}", target.host, target.port);
     match target.kind {
@@ -176,10 +332,40 @@ fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverErro
             }
             std::fs::create_dir_all(dir)
                 .map_err(|e| DeliverError::Folder(target.dir.clone(), e.to_string()))?;
-            // Writable? A read-only share fails here, not mid-send.
-            let probe = dir.join(".apature-write-test");
-            std::fs::write(&probe, b"")
-                .map_err(|e| DeliverError::Folder(target.dir.clone(), e.to_string()))?;
+            // Writable? A read-only share fails here, not mid-send. The
+            // probe is created exclusively under a unique name, so a file
+            // that was already there (or a symlink to one) is never
+            // truncated or removed; only this call's probe is deleted.
+            // A collision on the unique name is retried with a fresh one.
+            let mut probe = None;
+            let mut last_err = None;
+            for _ in 0..8 {
+                let candidate = unique_probe_path(dir);
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&candidate)
+                {
+                    Ok(_) => {
+                        probe = Some(candidate);
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        last_err = Some(e);
+                    }
+                    Err(e) => {
+                        return Err(DeliverError::Folder(target.dir.clone(), e.to_string()));
+                    }
+                }
+            }
+            let Some(probe) = probe else {
+                return Err(DeliverError::Folder(
+                    target.dir.clone(),
+                    last_err
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "could not create probe file".into()),
+                ));
+            };
             let _ = std::fs::remove_file(&probe);
             Ok(Box::new(LocalFolder))
         }
@@ -222,11 +408,7 @@ fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverErro
             }
             sess.handshake()
                 .map_err(|e| DeliverError::Connect(addr.clone(), e.to_string()))?;
-            // Before any password or key goes out: is this the real server?
-            let (key, _) = sess.host_key().ok_or_else(|| {
-                DeliverError::HostKey(target.host.clone(), "sent no host key".into())
-            })?;
-            check_host_key(&sess, &known, &target.host, target.port, key, &target.user)?;
+            verify_host_key(&sess, target, &known)?;
             match &target.key_file {
                 Some(key) => sess
                     .userauth_pubkey_file(
@@ -255,81 +437,6 @@ fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverErro
                 sftp,
             }))
         }
-    }
-}
-
-/// Host-key algorithms for the key types `known_hosts` lists for this
-/// host and port (hashed entries too), in OpenSSH's order; empty if none.
-fn host_key_algorithms(sess: &ssh2::Session, known_hosts: &str, host: &str, port: u16) -> String {
-    let mut types = Vec::new();
-    for line in known_hosts.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') || line.starts_with('@') {
-            continue;
-        }
-        let Some(ty) = line.split_whitespace().nth(1) else { continue };
-        let Ok(mut one) = sess.known_hosts() else { continue };
-        // With a dummy key, a listed host reads as a mismatch, not unknown.
-        if one.read_str(line, ssh2::KnownHostFileKind::OpenSSH).is_ok()
-            && !matches!(one.check_port(host, port, &[0]), ssh2::CheckResult::NotFound)
-        {
-            types.push(ty.to_string());
-        }
-    }
-    const ORDER: [(&str, &str); 6] = [
-        ("ssh-ed25519", "ssh-ed25519"),
-        ("ecdsa-sha2-nistp256", "ecdsa-sha2-nistp256"),
-        ("ecdsa-sha2-nistp384", "ecdsa-sha2-nistp384"),
-        ("ecdsa-sha2-nistp521", "ecdsa-sha2-nistp521"),
-        ("ssh-rsa", "rsa-sha2-512,rsa-sha2-256,ssh-rsa"),
-        ("ssh-dss", "ssh-dss"),
-    ];
-    ORDER
-        .iter()
-        .filter(|(t, _)| types.iter().any(|x| x == t))
-        .map(|(_, a)| *a)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// Check an SFTP server's host key against `known_hosts` text (the user's
-/// `~/.ssh/known_hosts`, the file `ssh` itself uses). Fails closed: a
-/// server that isn't listed, or whose key changed, is refused.
-fn check_host_key(
-    sess: &ssh2::Session,
-    known_hosts: &str,
-    host: &str,
-    port: u16,
-    key: &[u8],
-    user: &str,
-) -> Result<(), DeliverError> {
-    let err = |m: String| DeliverError::HostKey(host.to_string(), m);
-    let mut kh = sess.known_hosts().map_err(|e| err(e.to_string()))?;
-    for line in known_hosts.lines().map(str::trim) {
-        // Markers (@cert-authority, @revoked) and lines libssh2 can't read
-        // are skipped rather than failing the whole file.
-        if !line.is_empty() && !line.starts_with('#') && !line.starts_with('@') {
-            let _ = kh.read_str(line, ssh2::KnownHostFileKind::OpenSSH);
-        }
-    }
-    let ssh_cmd = if port == 22 {
-        format!("ssh {user}@{host}")
-    } else {
-        format!("ssh -p {port} {user}@{host}")
-    };
-    match kh.check_port(host, port, key) {
-        ssh2::CheckResult::Match => Ok(()),
-        ssh2::CheckResult::NotFound => Err(err(format!(
-            "not in ~/.ssh/known_hosts, so Apature can't confirm it is the real server. \
-             Connect once in Terminal with `{ssh_cmd}`, check the fingerprint with the desk, \
-             answer yes, then try again."
-        ))),
-        ssh2::CheckResult::Mismatch => Err(err(
-            "its host key does NOT match ~/.ssh/known_hosts. Someone may be intercepting \
-             the connection, or the server was reinstalled. Nothing was sent; check with \
-             the desk before updating known_hosts."
-                .into(),
-        )),
-        ssh2::CheckResult::Failure => Err(err("the host key could not be checked".into())),
     }
 }
 
@@ -463,25 +570,35 @@ mod tests {
             garbage line\n";
         let sess = ssh2::Session::new().unwrap();
         let check = |host: &str, port: u16, key: &[u8]| {
-            check_host_key(&sess, known, host, port, key, "me")
+            check_host_key(&sess, known, host, port, key, "me", "SHA256:test")
         };
         assert!(check("desk.example", 22, &blob(1)).is_ok());
         assert!(check("alt.example", 2222, &blob(1)).is_ok());
         let changed = check("desk.example", 22, &blob(2)).unwrap_err().to_string();
         assert!(changed.contains("does NOT match"), "{changed}");
-        let unknown = check("other.example", 22, &blob(1)).unwrap_err().to_string();
+        let unknown = check("other.example", 22, &blob(1))
+            .unwrap_err()
+            .to_string();
         assert!(unknown.contains("ssh me@other.example"), "{unknown}");
         // The port matters: alt.example on 22 isn't the listed server.
         assert!(check("alt.example", 22, &blob(1)).is_err());
         // The algorithms asked for follow what is listed for that host.
-        assert_eq!(host_key_algorithms(&sess, known, "desk.example", 22), "ssh-ed25519");
+        assert_eq!(
+            host_key_algorithms(&sess, known, "desk.example", 22),
+            "ssh-ed25519"
+        );
         assert_eq!(host_key_algorithms(&sess, known, "other.example", 22), "");
         let rsa = "desk.example ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC7\n";
         let both = format!("{known}{rsa}");
         let a = host_key_algorithms(&sess, &both, "desk.example", 22);
-        assert!(a == "ssh-ed25519" || a.starts_with("ssh-ed25519,rsa-sha2-512"), "{a}");
+        assert!(
+            a == "ssh-ed25519" || a.starts_with("ssh-ed25519,rsa-sha2-512"),
+            "{a}"
+        );
         // No known_hosts at all: refused.
-        assert!(check_host_key(&sess, "", "desk.example", 22, &blob(1), "me").is_err());
+        assert!(
+            check_host_key(&sess, "", "desk.example", 22, &blob(1), "me", "SHA256:test").is_err()
+        );
     }
 
     #[test]
@@ -492,6 +609,106 @@ mod tests {
             "/incoming/X.JPG"
         );
         assert_eq!(remote_path("photos", Path::new("X.JPG")), "photos/X.JPG");
+    }
+
+    #[test]
+    fn folder_send_lands_files_under_final_names() {
+        let src = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let a = src.path().join("IMG_0001.JPG");
+        let b = src.path().join("IMG_0002.JPG");
+        std::fs::write(&a, vec![3u8; 10_000]).unwrap();
+        std::fs::write(&b, vec![9u8; 2_500]).unwrap();
+        let target = Target {
+            name: "folder test".into(),
+            kind: Kind::Folder,
+            host: String::new(),
+            port: Target::default_port(Kind::Folder),
+            user: String::new(),
+            dir: out.path().to_string_lossy().into_owned(),
+            key_file: None,
+        };
+        let rep = send(&target, "", &[a, b], |_| {}).unwrap();
+        assert_eq!(rep.sent, 2);
+        assert!(rep.failed.is_empty(), "failures: {:?}", rep.failed);
+        assert_eq!(rep.bytes, 12_500);
+        assert_eq!(
+            std::fs::read(out.path().join("IMG_0001.JPG")).unwrap(),
+            vec![3u8; 10_000]
+        );
+        assert_eq!(
+            std::fs::read(out.path().join("IMG_0002.JPG")).unwrap(),
+            vec![9u8; 2_500]
+        );
+        // Only the two final names: no `.part` file is left behind.
+        let mut names: Vec<String> = std::fs::read_dir(out.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["IMG_0001.JPG", "IMG_0002.JPG"]);
+    }
+
+    fn folder_target(dir: &std::path::Path) -> Target {
+        Target {
+            name: "folder test".into(),
+            kind: Kind::Folder,
+            host: String::new(),
+            port: Target::default_port(Kind::Folder),
+            user: String::new(),
+            dir: dir.to_string_lossy().into_owned(),
+            key_file: None,
+        }
+    }
+
+    #[test]
+    fn folder_probe_leaves_an_existing_probe_file_alone() {
+        let out = tempfile::tempdir().unwrap();
+        let probe = out.path().join(".apature-write-test");
+        std::fs::write(&probe, b"someone else's file").unwrap();
+        let target = folder_target(out.path());
+        assert!(test_connection(&target, "").is_ok());
+        assert_eq!(
+            std::fs::read(&probe).unwrap(),
+            b"someone else's file",
+            "the preexisting probe file must survive the connection test"
+        );
+        // And no probe of ours is left behind either.
+        let names: Vec<String> = std::fs::read_dir(out.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![".apature-write-test"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn folder_probe_does_not_follow_a_symlink() {
+        let out = tempfile::tempdir().unwrap();
+        let victim = out.path().join("victim.txt");
+        std::fs::write(&victim, b"do not truncate me").unwrap();
+        std::os::unix::fs::symlink(&victim, out.path().join(".apature-write-test")).unwrap();
+        let target = folder_target(out.path());
+        assert!(test_connection(&target, "").is_ok());
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"do not truncate me",
+            "the symlink target must survive the connection test"
+        );
+        assert!(
+            std::fs::symlink_metadata(out.path().join(".apature-write-test"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn folder_probe_leaves_nothing_behind() {
+        let out = tempfile::tempdir().unwrap();
+        let target = folder_target(out.path());
+        assert!(test_connection(&target, "").is_ok());
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     }
 
     /// Runs only with a local FTP server: `APATURE_FTP_TEST=host:port:user:pass:dir`.

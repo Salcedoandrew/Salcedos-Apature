@@ -1,9 +1,10 @@
 //! Build the plan: which files, where they go, what collides.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use apature_core::{Kind, PhotoItem, ScanOptions};
+use apature_core::{Kind, PhotoItem, ScanOptions, Variant};
+use rayon::prelude::*;
 
 use crate::ledger::{fingerprint, Ledger};
 use crate::template::{expand, sanitize_component, Facts};
@@ -284,18 +285,11 @@ fn card_subfolder(source: &Path, file: &Path) -> PathBuf {
     rel
 }
 
-/// Today's civil date (UTC) for the example line when no photo date is known.
-pub fn today() -> (i32, u32, u32) {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    civil_from_secs(secs)
-}
-
-/// Civil date (UTC) of seconds since 1970 (Howard Hinnant's days-to-civil).
-pub(crate) fn civil_from_secs(secs: i64) -> (i32, u32, u32) {
-    let z = secs.div_euclid(86_400) + 719_468;
+/// (year, month, day) for a count of days since 1970-01-01 — Howard
+/// Hinnant's days-to-civil. The one implementation in the crate: `today`
+/// and photocopy's file-time conversion both go through it.
+pub(crate) fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -305,6 +299,15 @@ pub(crate) fn civil_from_secs(secs: i64) -> (i32, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     ((if m <= 2 { y + 1 } else { y }) as i32, m, d)
+}
+
+/// Today's civil date (UTC) for the example line when no photo date is known.
+pub fn today() -> (i32, u32, u32) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    civil_from_days(secs.div_euclid(86_400))
 }
 
 /// Add one file to the plan at `folder_rel/name` under each destination,
@@ -360,6 +363,60 @@ fn place(
     });
 }
 
+/// One variant that survived the ledger check, with the base name it
+/// would take before any collision suffix.
+struct PendingVariant {
+    source: PathBuf,
+    size: u64,
+    fingerprint: Option<String>,
+    stem: String,
+    ext: String,
+}
+
+/// Smallest suffix `k` (0 = the plain names) whose names are free at every
+/// destination and in this plan for every variant of the item and every
+/// companion, so a pair keeps one common stem. Returns 0 when no suffix
+/// up to 10000 is free; the entries are still placed and `place` reports
+/// the collisions, so the plan is refused.
+fn free_suffix(
+    pending: &[PendingVariant],
+    companion_exts: &[String],
+    opts: &Options,
+    folder_rel: &Path,
+    seen_dest: &BTreeMap<PathBuf, PathBuf>,
+) -> u32 {
+    let is_taken = |n: &String| {
+        let p = opts.primary.join(folder_rel).join(n);
+        let s = opts.secondary.as_ref().map(|s| s.join(folder_rel).join(n));
+        p.exists()
+            || seen_dest.contains_key(&p)
+            || s.as_ref()
+                .is_some_and(|s| s.exists() || seen_dest.contains_key(s))
+    };
+    for k in 0..=10_000 {
+        let mut names: Vec<String> = pending
+            .iter()
+            .map(|p| {
+                if k == 0 {
+                    format!("{}{}", p.stem, p.ext)
+                } else {
+                    format!("{}-{}{}", p.stem, k, p.ext)
+                }
+            })
+            .collect();
+        let cand_stem = if k == 0 {
+            pending[0].stem.clone()
+        } else {
+            format!("{}-{k}", pending[0].stem)
+        };
+        names.extend(companion_exts.iter().map(|e| format!("{cand_stem}.{e}")));
+        if names.iter().all(|n| !is_taken(n)) {
+            return k;
+        }
+    }
+    0
+}
+
 pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
     if opts.primary.starts_with(&opts.source) || opts.source.starts_with(&opts.primary) {
         return Err(PlanError::Nested);
@@ -380,33 +437,47 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
     let mut seq = opts.seq_start;
     let mut item_count = 0usize;
 
-    for (i, item) in items.iter().enumerate() {
-        if let Some(only) = &opts.only_paths {
-            if !item.variants().any(|v| only.iter().any(|p| p == &v.path)) {
-                continue;
+    // `only_paths` membership is tested per variant per photo; a set makes
+    // each test one lookup instead of a scan of the whole batch.
+    let only_set: Option<HashSet<&PathBuf>> =
+        opts.only_paths.as_ref().map(|paths| paths.iter().collect());
+    let passes_filter = |v: &Variant| match opts.filter {
+        FileFilter::All => true,
+        FileFilter::RawOnly => v.kind == Kind::Raw,
+        FileFilter::JpegOnly => v.kind == Kind::Jpeg,
+    };
+    // The EXIF read behind `facts_for` is the slow part of planning and is
+    // independent per photo, so it runs in parallel. Everything after this
+    // stays sequential and in card order: sequence numbers, collision
+    // state and skip order all depend on it. `None` marks a photo the
+    // `only_paths` check or the filter leaves out.
+    let prepped: Vec<Option<Facts>> = items
+        .par_iter()
+        .map(|item| {
+            if let Some(only) = &only_set {
+                if !item.variants().any(|v| only.contains(&v.path)) {
+                    return None;
+                }
             }
-        }
-        let variants: Vec<_> = item
-            .variants()
-            .filter(|v| match opts.filter {
-                FileFilter::All => true,
-                FileFilter::RawOnly => v.kind == Kind::Raw,
-                FileFilter::JpegOnly => v.kind == Kind::Jpeg,
-            })
-            .collect();
-        if variants.is_empty() {
+            let first = item.variants().find(|v| passes_filter(*v))?;
+            Some(facts_for(item, &first.path, opts.headline.as_deref()))
+        })
+        .collect();
+    let mut day_counts: BTreeMap<(i32, u32, u32), usize> = BTreeMap::new();
+
+    for (i, item) in items.iter().enumerate() {
+        let Some(prepped_facts) = &prepped[i] else {
             continue;
-        }
-        let mut facts0 = facts_for(item, &variants[0].path, opts.headline.as_deref());
+        };
+        let variants: Vec<_> = item.variants().filter(|v| passes_filter(*v)).collect();
+        debug_assert!(!variants.is_empty());
+        let mut facts0 = prepped_facts.clone();
         facts0.dest = opts
             .primary
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
         if let Some(d) = facts0.date {
-            match plan.days.iter_mut().find(|(k, _)| *k == d) {
-                Some((_, n)) => *n += 1,
-                None => plan.days.push((d, 1)),
-            }
+            *day_counts.entry(d).or_default() += 1;
         }
         if let Some(want) = opts.day {
             if facts0.date != Some(want) {
@@ -448,6 +519,10 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
                     .unwrap_or_default()
             })
             .collect();
+        // Decide which variants are actually placed (ledger check) and
+        // their base names first: the suffix is chosen once for the whole
+        // item below, so a RAW+JPEG pair never splits across stems.
+        let mut pending: Vec<PendingVariant> = Vec::new();
         for v in &variants {
             // Read once: the ledger check and the entry share it.
             let fp = fingerprint(&v.path);
@@ -490,68 +565,54 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
                     format!("{stem}.{}", facts.ext)
                 }
             };
-            // With the suffix policy, walk `name`, `stem-1.ext`, `stem-2.ext`…
-            // until the name is free at every destination and in this plan.
-            // The first photo file fixes the stem its companions take, so
-            // their names must be free under it too.
-            let (name, suffixed) = if opts.on_collision == CollisionPolicy::Suffix {
-                let (stem, ext) = match name.rfind('.') {
-                    Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
-                    _ => (name.clone(), String::new()),
-                };
-                let mut k = 0u32;
-                loop {
-                    let cand = if k == 0 {
-                        name.clone()
-                    } else {
-                        format!("{stem}-{k}{ext}")
-                    };
-                    let cand_stem = if k == 0 {
-                        stem.clone()
-                    } else {
-                        format!("{stem}-{k}")
-                    };
-                    let mut names = vec![cand.clone()];
-                    if placed_stem.is_none() {
-                        names.extend(companion_exts.iter().map(|e| format!("{cand_stem}.{e}")));
-                    }
-                    let is_taken = |n: &String| {
-                        let p = opts.primary.join(&folder_rel).join(n);
-                        let s = opts.secondary.as_ref().map(|s| s.join(&folder_rel).join(n));
-                        p.exists()
-                            || seen_dest.contains_key(&p)
-                            || s.as_ref()
-                                .is_some_and(|s| s.exists() || seen_dest.contains_key(s))
-                    };
-                    let taken = names.iter().any(is_taken);
-                    if !taken || k > 9999 {
-                        break (cand, k > 0);
-                    }
-                    k += 1;
-                }
-            } else {
-                (name, false)
+            let (stem, ext) = match name.rfind('.') {
+                Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
+                _ => (name.clone(), String::new()),
             };
-            if suffixed {
+            pending.push(PendingVariant {
+                source: v.path.clone(),
+                size: v.size,
+                fingerprint: fp.ok(),
+                stem,
+                ext,
+            });
+        }
+        // With the suffix policy, one suffix for the whole item: walk
+        // `stem`, `stem-1`, `stem-2`… until every variant's name and every
+        // companion's name is free at every destination and in this plan.
+        // The old per-variant walk let the JPEG half keep the plain stem
+        // while the RAW took `-1`, splitting the pair.
+        let suffix_k = if opts.on_collision == CollisionPolicy::Suffix && !pending.is_empty() {
+            free_suffix(&pending, &companion_exts, opts, &folder_rel, &seen_dest)
+        } else {
+            0
+        };
+        for p in &pending {
+            let name = if suffix_k == 0 {
+                format!("{}{}", p.stem, p.ext)
+            } else {
+                format!("{}-{}{}", p.stem, suffix_k, p.ext)
+            };
+            if suffix_k > 0 {
                 plan.suffixed += 1;
             }
             if placed_stem.is_none() {
-                placed_stem = Some(match name.rfind('.') {
-                    Some(i) if i > 0 => name[..i].to_string(),
-                    _ => name.clone(),
+                placed_stem = Some(if suffix_k == 0 {
+                    p.stem.clone()
+                } else {
+                    format!("{}-{suffix_k}", p.stem)
                 });
             }
-            let fp = fp.ok();
             place(
                 &mut plan,
                 &mut seen_dest,
                 opts,
                 &folder_rel,
                 &name,
-                &v.path,
-                v.size,
+                &p.source,
+                p.size,
                 i,
-                fp,
+                p.fingerprint.clone(),
                 false,
             );
             added_any = true;
@@ -585,7 +646,8 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
             seq += 1;
         }
     }
-    plan.days.sort();
+    // The map iterates in day order, which is the sort `days` used to get.
+    plan.days = day_counts.into_iter().collect();
     plan.next_seq = seq;
     // Deduplicate identical collision reports.
     let mut seen = BTreeSet::new();
@@ -602,13 +664,13 @@ mod tests {
     #[test]
     fn civil_dates_across_leap_rules() {
         for (secs, want) in [
-            (0, (1970, 1, 1)),
+            (0i64, (1970, 1, 1)),
             (-86_400, (1969, 12, 31)),
             (951_782_400, (2000, 2, 29)),      // 2000 is a leap year (÷400)
             (4_107_542_400, (2100, 3, 1)),     // 2100 is not (÷100)
             (4_107_542_400 - 1, (2100, 2, 28)),
         ] {
-            assert_eq!(civil_from_secs(secs), want, "{secs}");
+            assert_eq!(civil_from_days(secs.div_euclid(86_400)), want, "{secs}");
         }
     }
     use std::fs;
@@ -616,6 +678,18 @@ mod tests {
     fn card(dir: &Path) {
         for n in ["DSC_0001.NEF", "DSC_0001.JPG", "DSC_0002.NEF", "notes.txt"] {
             fs::write(dir.join(n), format!("data-{n}")).unwrap();
+        }
+    }
+
+    #[test]
+    fn civil_from_days_covers_epoch_leap_and_century_years() {
+        // Day counts checked against known Unix timestamps / 86_400.
+        for (days, want) in [
+            (0, (1970, 1, 1)),       // the epoch itself
+            (11_016, (2000, 2, 29)), // 2000 is a leap year
+            (47_541, (2100, 3, 1)),  // 2100 is not: no Feb 29 that year
+        ] {
+            assert_eq!(civil_from_days(days), want, "day {days}");
         }
     }
 
@@ -789,6 +863,42 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["DSC_0001-1.JPG", "DSC_0001-1.WAV"]);
+    }
+
+    #[test]
+    fn a_suffixed_pair_keeps_one_common_stem() {
+        // Audit finding #4: with only SHOT.NEF at the destination, the
+        // plan used to produce SHOT-1.NEF, SHOT.JPG, SHOT-1.XMP, splitting
+        // the pair so the JPEG no longer scanned with its sidecar.
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        for n in ["SHOT.NEF", "SHOT.JPG", "SHOT.XMP"] {
+            fs::write(src.path().join(n), format!("data-{n}")).unwrap();
+        }
+        fs::write(dst.path().join("SHOT.NEF"), b"old raw").unwrap();
+        let opts = Options {
+            source: src.path().to_path_buf(),
+            primary: dst.path().to_path_buf(),
+            folder_template: String::new(),
+            only_new: false,
+            on_collision: CollisionPolicy::Suffix,
+            ..Default::default()
+        };
+        let plan = build_plan(&opts, &Ledger::in_memory()).unwrap();
+        assert!(plan.can_run(), "{:?}", plan.collisions);
+        let names: Vec<String> = plan
+            .entries
+            .iter()
+            .map(|e| {
+                e.primary
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["SHOT-1.NEF", "SHOT-1.JPG", "SHOT-1.XMP"]);
+        assert_eq!(plan.suffixed, 2);
     }
 
     #[test]
