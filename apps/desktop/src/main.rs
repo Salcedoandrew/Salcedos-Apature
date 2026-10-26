@@ -1,6 +1,7 @@
 //! Apature desktop. `apature [folder] [--theme dark|light] [--screenshot out.png [--frames N]] [--copy-dialog] [--about-dialog]`
 //! (hidden: `--sidebar-shot` screenshots the folder tree from a scratch HOME;
-//! `--bug-dialog` opens Help › Report a Bug… filled with an example)
+//! `--bug-dialog` opens Help › Report a Bug… filled with an example;
+//! `--install-update <image.dmg>` installs that release over this app and quits)
 //! `--ingest-run --ingest-source <card> --ingest-dest <dir>` ingests headlessly and reports;
 //! `--export-run --export-dest <dir>` does the same for export.
 //!
@@ -26,6 +27,7 @@ mod select_by;
 mod selection;
 mod ui;
 mod undo;
+mod update_install;
 mod updater;
 mod worker;
 
@@ -44,6 +46,8 @@ pub struct Launch {
     pub about: bool,
     /// Run the update check now and log the result (tests).
     pub check_updates: bool,
+    /// Hidden: install this disk image over the running app and quit (tests).
+    pub install_update: Option<PathBuf>,
     /// Window size at launch (for layout checks at small sizes).
     pub size: Option<(f32, f32)>,
     pub screenshot_frame: u64,
@@ -114,6 +118,7 @@ fn parse_args() -> Launch {
             "--live" => l.live = true,
             "--about" | "--about-dialog" => l.about = true,
             "--check-updates" => l.check_updates = true,
+            "--install-update" => l.install_update = args.next().map(PathBuf::from),
             "--ingest-source" => l.ingest_source = args.next().map(PathBuf::from),
             "--ingest-dest" => l.ingest_dest = args.next().map(PathBuf::from),
             "--export" => l.export = true,

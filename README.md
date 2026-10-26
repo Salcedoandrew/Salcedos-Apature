@@ -153,6 +153,11 @@ Download the DMG from the [latest release](https://github.com/McCal-Codes/apatur
 to Applications. 0.1.0 is not yet notarised: the first time, right-click the app and choose Open, or allow it under
 System Settings › Privacy & Security.
 
+After that, Apature › Check for Updates… → **Update** downloads a newer release and replaces the copy you are running
+with it: the app quits, puts the new build in the same place, deletes the old app and the download, and opens the new
+version. No dragging to Applications. A build that cannot replace itself (running from a temporary copy in Downloads,
+from a read-only disk image, or from a folder it cannot write to) says why and offers the release page instead.
+
 Build it yourself with Rust 1.80 or newer:
 
 ```bash

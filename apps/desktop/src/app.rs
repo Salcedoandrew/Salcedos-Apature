@@ -651,6 +651,8 @@ pub struct App {
     /// Preview is showing in its own window (prefs.preview_in_window).
     pub preview_window: bool,
     update_checker: Option<crate::updater::Checker>,
+    /// A running update install: download, stage, swap.
+    update_install: Option<crate::update_install::Installer>,
     /// True when the person asked (menu), so "up to date" is worth a toast.
     update_manual: bool,
     pub update_available: Option<crate::updater::Update>,
@@ -920,6 +922,7 @@ impl App {
             about_open: launch.about,
             preview_window: false,
             update_checker: None,
+            update_install: None,
             update_manual: false,
             update_available: None,
             settings_page: ui::settings::Page::General,
@@ -1124,6 +1127,14 @@ impl App {
             }
             if launch.export_run {
                 app.dispatch_later = Some(Command::ExportStart);
+            }
+        }
+        if let Some(image) = launch.install_update.clone() {
+            // Hidden `--install-update IMAGE`: the whole swap from a local disk
+            // image, so it can be checked without a release.
+            if let Err(e) = app.install_from_image(image, &cc.egui_ctx) {
+                eprintln!("install-update: {e}");
+                app.quit_after_frame = true;
             }
         }
         app
@@ -1811,7 +1822,7 @@ impl App {
     pub const INGEST_VIEWPORT: &'static str = "apature-ingest";
 
     fn start_update_check(&mut self, ctx: &egui::Context, manual: bool) {
-        if self.update_checker.is_some() {
+        if self.update_checker.is_some() || self.update_install.is_some() {
             return;
         }
         self.update_manual = manual;
@@ -1827,8 +1838,172 @@ impl App {
         self.prefs_dirty = true;
     }
 
+    /// The one toast that shows an install's progress: its text is replaced as
+    /// the work advances instead of stacking a toast per chunk.
+    fn update_progress(&mut self, text: String) {
+        match self.toasts.iter_mut().find(|t| t.progress) {
+            Some(t) => t.text = text,
+            None => self.toasts.push(ui::toasts::Toast {
+                text,
+                kind: ui::toasts::Kind::Warn,
+                since: Instant::now(),
+                action: None,
+                progress: true,
+            }),
+        }
+    }
+
+    /// A long job that the quit an update needs must not cut off.
+    fn busy_job(&self) -> Option<&'static str> {
+        if self.ingest.running.is_some() {
+            return Some("ingest");
+        }
+        if self.export.running.is_some() {
+            return Some("export");
+        }
+        if self.deliver.running.is_some() {
+            return Some("send");
+        }
+        if self.copy_running.as_ref().is_some_and(|r| r.done.is_none()) {
+            return Some("copy");
+        }
+        if self
+            .extract_running
+            .as_ref()
+            .is_some_and(|r| r.done.is_none())
+        {
+            return Some("preview extraction");
+        }
+        None
+    }
+
+    fn update_failed(&mut self, update: &crate::updater::Update, error: &str) {
+        log::warn!("cannot install update {}: {error}", update.version);
+        self.toasts.retain(|t| !t.progress);
+        self.toasts.push(ui::toasts::Toast {
+            text: format!("Could not install Apature {}: {error}", update.version),
+            kind: ui::toasts::Kind::Error,
+            since: Instant::now(),
+            // A build that cannot replace itself still has the release page.
+            action: Some(("Release page".into(), Command::OpenUpdatePage)),
+            progress: false,
+        });
+    }
+
+    /// Update now: download the release, stage it and swap it in for this
+    /// copy. The app quits once the swap script is ready to run.
+    fn start_update_install(&mut self, ctx: &egui::Context) {
+        if self.update_install.is_some() {
+            return;
+        }
+        let Some(update) = self.update_available.clone() else {
+            self.status = "No update is ready to install.".into();
+            return;
+        };
+        if let Some(job) = self.busy_job() {
+            self.toast(
+                ui::toasts::Kind::Warn,
+                format!("Apature quits to install an update. Finish the {job} first."),
+            );
+            return;
+        }
+        match crate::update_install::Installer::spawn(&update, ctx.clone()) {
+            Ok(installer) => {
+                self.update_install = Some(installer);
+                self.toasts.retain(|t| {
+                    !t.progress && !(t.text.starts_with("Apature ") && t.text.contains("is available"))
+                });
+                log::info!("installing update {}", update.version);
+                self.status = format!("Downloading Apature {}…", update.version);
+                self.update_progress(self.status.clone());
+            }
+            Err(e) => self.update_failed(&update, &e),
+        }
+    }
+
+    /// Drain the install thread: progress to the one toast, a failure to an
+    /// error toast, and a quit once the new app is staged for the swap.
+    fn update_install_tick(&mut self) {
+        let Some(installer) = self.update_install.as_ref() else {
+            return;
+        };
+        let events: Vec<crate::update_install::Progress> =
+            std::iter::from_fn(|| installer.try_recv()).collect();
+        if events.is_empty() {
+            return;
+        }
+        let label = match self.update_available.as_ref() {
+            Some(u) => format!("Apature {}", u.version),
+            None => "Apature".to_string(),
+        };
+        let mut done = false;
+        for event in events {
+            match event {
+                crate::update_install::Progress::Downloading { got, total } => {
+                    let text = match total {
+                        Some(total) if total > 0 => {
+                            format!("Downloading {label}… {}%", got * 100 / total)
+                        }
+                        _ if got > 0 => {
+                            format!("Downloading {label}… {} MB", got / (1024 * 1024))
+                        }
+                        _ => format!("Downloading {label}…"),
+                    };
+                    self.status = text.clone();
+                    self.update_progress(text);
+                }
+                crate::update_install::Progress::Unpacking => {
+                    let text = format!("Installing {label}…");
+                    self.status = text.clone();
+                    self.update_progress(text);
+                }
+                crate::update_install::Progress::Swapping => {
+                    let text = format!("Replacing this copy of Apature with {label}…");
+                    self.status = text.clone();
+                    self.update_progress(text);
+                }
+                crate::update_install::Progress::Installed => {
+                    log::info!("update staged; quitting so the swap can replace this copy");
+                    self.status = format!("Restarting into {label}…");
+                    // Everything queued reaches disk before the app goes.
+                    self.flush_marks();
+                    self.prefs.save();
+                    self.quit_after_frame = true;
+                    done = true;
+                }
+                crate::update_install::Progress::Failed(e) => {
+                    match self.update_available.clone() {
+                        Some(u) => self.update_failed(&u, &e),
+                        None => self.toast(ui::toasts::Kind::Error, e.clone()),
+                    }
+                    self.status = format!("Update failed: {e}");
+                    done = true;
+                }
+            }
+        }
+        if done {
+            self.update_install = None;
+        }
+        if self.launch.install_update.is_some() {
+            eprintln!("install-update: {}", self.status);
+        }
+    }
+
+    /// Hidden `--install-update IMAGE|URL`: the whole install checked without
+    /// a release, from a disk image on this Mac or one to download.
+    fn install_from_image(&mut self, image: PathBuf, ctx: &egui::Context) -> Result<(), String> {
+        let text = image.to_string_lossy().into_owned();
+        self.update_install = Some(if text.starts_with("http://") || text.starts_with("https://") {
+            crate::update_install::Installer::from_url(text, ctx.clone())?
+        } else {
+            crate::update_install::Installer::from_image(image, ctx.clone())?
+        });
+        self.status = "Installing an update from a disk image…".into();
+        Ok(())
+    }
+
     /// Daily check when enabled (never in headless runs unless asked), and
-    /// delivery of the result as a toast with a Download button.
+    /// delivery of the result as a toast with an Update button.
     fn update_tick(&mut self, ctx: &egui::Context) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1874,7 +2049,8 @@ impl App {
                         text,
                         kind: ui::toasts::Kind::Warn,
                         since: Instant::now(),
-                        action: Some(("Download".into(), Command::OpenUpdate)),
+                        action: Some(("Update".into(), Command::OpenUpdate)),
+                        progress: false,
                     });
                 }
                 self.update_available = Some(u);
@@ -1926,6 +2102,7 @@ impl App {
             kind,
             since: Instant::now(),
             action: None,
+            progress: false,
         });
         if self.toasts.len() > 4 {
             self.toasts.remove(0);
@@ -4629,14 +4806,10 @@ impl App {
             Command::OpenAbout => self.about_open = true,
             Command::ReportBug => self.open_bug_dialog(),
             Command::CheckUpdates => self.start_update_check(ctx, true),
-            Command::OpenUpdate => {
+            Command::OpenUpdate => self.start_update_install(ctx),
+            Command::OpenUpdatePage => {
                 if let Some(u) = &self.update_available {
-                    let url = u.dmg.clone().unwrap_or_else(|| u.page.clone());
-                    let _ = std::process::Command::new("open").arg(&url).spawn();
-                    self.status = format!(
-                        "Downloading Apature {} · drag it to Applications when it opens",
-                        u.version
-                    );
+                    let _ = std::process::Command::new("open").arg(&u.page).spawn();
                 }
             }
             Command::TrashConfirm => self.trash_confirm(),
@@ -5219,6 +5392,7 @@ impl eframe::App for App {
         t.apply(ctx, self.reduce_motion());
         self.platform.on_first_frame();
         self.update_tick(ctx);
+        self.update_install_tick();
         // Menu bar extra: what Apature is doing, in a few characters.
         let tray = if let Some(r) = self.ingest.running.as_ref().filter(|r| r.done.is_none()) {
             let total = self

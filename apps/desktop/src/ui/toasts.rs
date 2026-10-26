@@ -24,6 +24,9 @@ pub struct Toast {
     pub since: Instant,
     /// An optional button: label and the command it dispatches.
     pub action: Option<(String, crate::commands::Command)>,
+    /// A running update's progress line: one at a time, its text replaced as
+    /// the work advances instead of stacking a toast per chunk.
+    pub progress: bool,
 }
 
 impl Toast {

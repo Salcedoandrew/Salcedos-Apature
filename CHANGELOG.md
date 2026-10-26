@@ -7,6 +7,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 
 ### Docs
 - Added an AI disclosure to the README: this edition was built with help from AI coding assistants and tested by Andrew Salcedo.
+- README, PRIVACY.md and docs/DECISIONS.md describe updates that install themselves in place.
 
 
 ### Fixed
@@ -30,7 +31,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - Settings › Accent: six soft accent presets (Lavender, Sage, Sky, Peach, Rose, Mist) applied to selection, links and focus in both appearances.
 - A new app icon (the modern A) with three optional alternates (photo frame, aperture, field), every size and `.icns`, generated from `tools/apature_icons.py` with the accent as a parameter.
 - Press kit in `docs/marketing`: hero images, social preview, feature cards, copy kit; `tools/marketing-shots.sh` recaptures the screenshot set.
-- Check for updates: once a day, or Apature › Check for Updates…, a toast offers the newest release's download. Settings › General can turn it off or include betas.
+- Check for updates, and install them in place. Once a day, or Apature › Check for Updates…, a toast offers the newest release. Update downloads that release's disk image, takes the app out of it, and replaces the copy you are running with it: Apature quits, the new build goes in the same place, the old app and the download are deleted, and the new version opens. There is no dragging to Applications, and Finder, the Dock and Spotlight keep pointing at the same app. If Apature cannot replace itself (a temporary copy in Downloads, a read-only disk image, or a folder it cannot write to) the toast says why and offers the release page. Updating waits for a running ingest, copy, export, send or preview extraction and refuses while one is going, because the app has to quit. Settings › General can turn the check off or include betas.
 - Previews for more RAW formats, and bigger ones. Apature now finds the camera's own JPEG in Fujifilm RAF, Canon CR3 and CRW, Panasonic RW2 and Leica RWL, Olympus ORF (from the maker note), Sony SRF and SR2 and Sigma X3F, and shows the largest one by default. Hasselblad 3FR/FFF and Phase One IIQ files carry no JPEG, so their built-in RGB thumbnail is used instead. CRW, SRF, SR2, RWL, FFF and X3F files now show up in folders.
 - `apature-cli preview extract FILE` writes the largest embedded preview out untouched (`--prefer smallest` or a pixel size, `--max-bytes`, `--list`), and `apature-cli preview list FILE` lists them all.
 

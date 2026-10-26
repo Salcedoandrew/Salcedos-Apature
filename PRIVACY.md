@@ -18,6 +18,11 @@ Once a day, when "Check for updates" is on (it is by default, and Settings › G
 GitHub's public releases API for Salcedo's Apature repository (Salcedoandrew/salcedos-apature) for the newest version. The request
 carries the app's own version in its user agent and nothing else; GitHub sees your IP address like any web request.
 
+Only when you click **Update** on that notice does Apature download the release's disk image from GitHub. Nothing is
+sent with the download beyond the same user agent. The image is opened, the app inside it is copied out, the copy is
+checked to be Apature, and the app is then replaced on your Mac with it; the download and the old app are deleted
+afterwards. Settings and photos are not part of it.
+
 Only the files you export, to the targets you configure, over the protocol you chose. The log records the file
 names and hosts of those sends; it is never uploaded. GPS you enter is written into sidecars and into exports like
 any other field, so check it before delivering if a location should stay private.

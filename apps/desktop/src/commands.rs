@@ -88,9 +88,11 @@ pub enum Command {
     /// Help menu: Settings > Shortcuts, the log, the repository.
     OpenShortcuts,
     OpenAbout,
-    /// Updates: check now (menu), open the newest release's DMG.
+    /// Updates: check now (menu), install the newest release over this copy
+    /// (toast), and its release page when this copy cannot be replaced.
     CheckUpdates,
     OpenUpdate,
+    OpenUpdatePage,
     RevealLog,
     OpenRepo,
     /// Help › Report a Bug…: the bug report dialog.

@@ -261,3 +261,17 @@ Frames within one second group behind the first; off by default. Sub-second EXIF
 ## ADR-029 — Preview window is optional (2026-10-21, accepted)
 Default inline (faster for one screen); Settings switch opens Preview in its own window with full keyboard handling, like Photo Mechanic.
 
+
+## ADR-030 — Updates install themselves in place (2026-10-26, accepted)
+Alic's updater (Tauri's plugin: check, download, replace the running bundle, restart) rebuilt on egui. The payload is the
+release's DMG, which the releases already carry, so no new artifact and no signing key is needed: `update_install`
+downloads it to a temporary folder, mounts it read-only with `hdiutil`, takes the app out with `ditto` and checks the
+copy's `CFBundleIdentifier` before it counts. A running binary cannot be replaced (`ETXTBSY`), so the swap is a generated
+`/bin/bash` script that waits for this process to quit, moves the old bundle aside in the same folder, `ditto`s the new
+one to the same path, deletes the old app and the download, and opens the new app; the app quits when the script is
+ready. Everything is written to `swap.log` next to the script. A failure before the swap changes nothing; a failed copy
+puts the old app back. The old build is deleted rather than kept as a backup, as asked; a build that cannot replace
+itself (translocated, read-only volume, unwritable folder, or not in a bundle at all) is offered the release page
+instead. Rejected: Tauri's updater artifacts (a `.app.tar.gz`, `latest.json` and a minisign key pair for every release,
+and a second signing scheme beside codesign); replacing files while the app runs (a second instance and a half-written
+bundle); installing without quitting (the app has to exit, so a running ingest, copy, export, send or extraction blocks it).

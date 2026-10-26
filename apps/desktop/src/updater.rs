@@ -1,7 +1,8 @@
 //! Update check against this fork's GitHub Releases (the repository named in
-//! `bug_report::REPO_URL`): one request a day when enabled, nothing else
-//! leaves the Mac. The result is a toast with a Download button; the DMG
-//! opens in the browser and the person drags it to Applications.
+//! `bug_report::REPO_URL`): one request a day when enabled. The result is a
+//! toast with an Update button; `update_install` then downloads that release's
+//! disk image, swaps it for the app that is running and opens it again, so the
+//! download never has to be dragged into place by hand.
 //!
 //! Test builds are published as pre-releases tagged `vX.Y.Z-test.BUILD`, so
 //! the check lists releases (the `/releases/latest` endpoint skips
