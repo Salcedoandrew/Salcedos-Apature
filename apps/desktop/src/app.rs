@@ -1911,7 +1911,8 @@ impl App {
             Ok(installer) => {
                 self.update_install = Some(installer);
                 self.toasts.retain(|t| {
-                    !t.progress && !(t.text.starts_with("Apature ") && t.text.contains("is available"))
+                    !t.progress
+                        && !(t.text.starts_with("Apature ") && t.text.contains("is available"))
                 });
                 log::info!("installing update {}", update.version);
                 self.status = format!("Downloading Apature {}…", update.version);
@@ -1993,11 +1994,13 @@ impl App {
     /// a release, from a disk image on this Mac or one to download.
     fn install_from_image(&mut self, image: PathBuf, ctx: &egui::Context) -> Result<(), String> {
         let text = image.to_string_lossy().into_owned();
-        self.update_install = Some(if text.starts_with("http://") || text.starts_with("https://") {
-            crate::update_install::Installer::from_url(text, ctx.clone())?
-        } else {
-            crate::update_install::Installer::from_image(image, ctx.clone())?
-        });
+        self.update_install = Some(
+            if text.starts_with("http://") || text.starts_with("https://") {
+                crate::update_install::Installer::from_url(text, ctx.clone())?
+            } else {
+                crate::update_install::Installer::from_image(image, ctx.clone())?
+            },
+        );
         self.status = "Installing an update from a disk image…".into();
         Ok(())
     }
