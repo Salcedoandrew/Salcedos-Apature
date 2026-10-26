@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [Unreleased]
+## [0.1.3] — 2026-10-26
 
 ### Docs
 - Added an AI disclosure to the README: this edition was built with help from AI coding assistants and tested by Andrew Salcedo.
