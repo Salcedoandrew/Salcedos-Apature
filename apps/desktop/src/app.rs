@@ -37,6 +37,13 @@ use crate::Launch;
 const THUMB_PX: u32 = 320;
 const PREFETCH_ROWS: usize = 3;
 const KEEP_ROWS: usize = 12;
+/// Warm-up: how many not-yet-queued thumbnails `schedule_thumbs` may queue
+/// per frame, and how large the decode queue may grow before it pauses.
+/// Warm jobs sit at `WARM_PRIO_BASE` and above, so a visible row or a
+/// preview queued later always jumps ahead of them in the pool.
+const WARM_BATCH: usize = 64;
+const WARM_MAX_PENDING: usize = 256;
+const WARM_PRIO_BASE: u32 = 10_000;
 const PREVIEW_LRU: usize = 8;
 
 /// Positions to preload around `pos` in a view of `len`, most urgent
@@ -87,6 +94,12 @@ pub struct TabState {
     pub exif: Vec<Option<ExifSummary>>,
     pub thumbs: Vec<Option<TextureHandle>>,
     pub thumb_err: Vec<Option<String>>,
+    /// Items already queued for a thumbnail this session (visible rows
+    /// included), so the whole-folder warm-up in `schedule_thumbs` never
+    /// re-queues an item whose texture was dropped by the keep-rows
+    /// eviction below. The disk cache, not this flag, is what makes a
+    /// later scroll fast: a warmed item is re-decoded from the cache.
+    pub thumb_warmed: Vec<bool>,
     /// Upright size of the largest image each photo can show, from the
     /// first decode of it (see `worker::Done::native`).
     pub native: Vec<Option<[u32; 2]>>,
@@ -545,6 +558,8 @@ pub struct App {
     pub exif: Vec<Option<ExifSummary>>,
     pub thumbs: Vec<Option<TextureHandle>>,
     pub thumb_err: Vec<Option<String>>,
+    /// Items already queued for a thumbnail this session; see `TabState`.
+    pub thumb_warmed: Vec<bool>,
     /// Upright size of the largest image each photo can show, from the
     /// first decode of it (see `worker::Done::native`).
     pub native: Vec<Option<[u32; 2]>>,
@@ -849,6 +864,7 @@ impl App {
             exif: Vec::new(),
             thumbs: Vec::new(),
             thumb_err: Vec::new(),
+            thumb_warmed: Vec::new(),
             native: Vec::new(),
             previews: HashMap::new(),
             preview_lru: VecDeque::new(),
@@ -3119,6 +3135,7 @@ impl App {
             exif: std::mem::take(&mut self.exif),
             thumbs: std::mem::take(&mut self.thumbs),
             thumb_err: std::mem::take(&mut self.thumb_err),
+            thumb_warmed: std::mem::take(&mut self.thumb_warmed),
             native: std::mem::take(&mut self.native),
             previews: std::mem::take(&mut self.previews),
             preview_lru: std::mem::take(&mut self.preview_lru),
@@ -3147,6 +3164,7 @@ impl App {
         self.exif = t.exif;
         self.thumbs = t.thumbs;
         self.thumb_err = t.thumb_err;
+        self.thumb_warmed = t.thumb_warmed;
         self.native = t.native;
         self.previews = t.previews;
         self.preview_lru = t.preview_lru;
@@ -3267,6 +3285,7 @@ impl App {
                 self.exif = read.into_iter().map(|(_, _, e)| e).collect();
                 self.thumbs = vec![None; n];
                 self.thumb_err = vec![None; n];
+                self.thumb_warmed = vec![false; n];
                 self.native = vec![None; n];
                 self.previews.clear();
                 self.preview_lru.clear();
@@ -3787,6 +3806,9 @@ impl App {
             return;
         }
         let rows = self.row_count();
+        if self.thumb_warmed.len() != self.items.len() {
+            self.thumb_warmed.resize(self.items.len(), false);
+        }
         let first = visible_rows.start.saturating_sub(PREFETCH_ROWS);
         let last = (visible_rows.end + PREFETCH_ROWS).min(rows);
         for row in first..last {
@@ -3798,7 +3820,69 @@ impl App {
                 (row - visible_rows.start) as u32
             };
             for p in row * self.cols..((row + 1) * self.cols).min(self.view.len()) {
-                self.request_thumb(self.view[p], prio);
+                let idx = self.view[p];
+                self.request_thumb(idx, prio);
+                if let Some(w) = self.thumb_warmed.get_mut(idx) {
+                    *w = true;
+                }
+            }
+        }
+        // Warm the rest of the folder into the persistent disk cache, so
+        // scrolling a big folder on a slow drive re-decodes from the cache
+        // instead of the originals. Warm jobs run at a priority above every
+        // visible or preview priority, so a row queued here that scrolls
+        // into view is promoted by the loop above on the next frame, and
+        // the queue never grows past `WARM_MAX_PENDING` while visible work
+        // is waiting. Items already warmed are never re-queued, even after
+        // the keep-rows eviction below drops their texture: the disk cache
+        // is the point, the texture is recreated from it on demand. (A tab
+        // switch drops queued warm jobs, so a few items may stay unwarm
+        // until scrolled to; visible requests still cover them.)
+        if self.pool.pending() < WARM_MAX_PENDING {
+            let mut queued = 0;
+            let mut after = last;
+            let mut before = first;
+            let mut take_after = true;
+            while queued < WARM_BATCH && (after < rows || before > 0) {
+                let row = if take_after && after < rows {
+                    take_after = false;
+                    let r = after;
+                    after += 1;
+                    r
+                } else if before > 0 {
+                    take_after = true;
+                    before -= 1;
+                    before
+                } else if after < rows {
+                    let r = after;
+                    after += 1;
+                    r
+                } else {
+                    break;
+                };
+                let dist = if row >= visible_rows.end {
+                    row - visible_rows.end
+                } else {
+                    visible_rows.start - row
+                };
+                let prio = WARM_PRIO_BASE + dist as u32;
+                for p in row * self.cols..((row + 1) * self.cols).min(self.view.len()) {
+                    if queued >= WARM_BATCH {
+                        break;
+                    }
+                    let idx = self.view[p];
+                    if self.thumb_warmed.get(idx).copied().unwrap_or(false)
+                        || self.thumbs[idx].is_some()
+                        || self.thumb_err[idx].is_some()
+                    {
+                        continue;
+                    }
+                    self.request_thumb(idx, prio);
+                    if let Some(w) = self.thumb_warmed.get_mut(idx) {
+                        *w = true;
+                    }
+                    queued += 1;
+                }
             }
         }
         let keep_first = visible_rows.start.saturating_sub(KEEP_ROWS);
