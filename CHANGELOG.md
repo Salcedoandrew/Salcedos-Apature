@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [Unreleased]
+## [0.1.4] — 2026-10-28
 
 ### Added
 - The contact sheet now warms the whole folder into the persistent thumbnail cache in the background, at a lower priority than visible rows and previews, so scrolling a big folder on a slow drive re-decodes thumbnails from the local cache instead of the originals. Visible rows and previews still jump ahead of warm-up work, and already-warmed photos are never re-queued when their on-screen texture is dropped.
