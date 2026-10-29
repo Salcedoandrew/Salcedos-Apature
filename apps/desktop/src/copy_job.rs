@@ -42,7 +42,9 @@ impl CopyRunning {
     }
     /// Time from start to finish (or to now while still copying).
     pub fn elapsed(&self) -> Duration {
-        self.finished.unwrap_or_else(Instant::now).saturating_duration_since(self.started)
+        self.finished
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.started)
     }
     /// Bytes copied so far, or in total once done.
     pub fn bytes_copied(&self) -> u64 {
@@ -56,7 +58,10 @@ impl CopyRunning {
 
 /// apature.log line for a copy's start.
 pub fn start_log_line(dest: &std::path::Path, files: usize, bytes: u64) -> String {
-    format!("copy photos: start → {}: {files} files, {bytes} bytes", dest.display())
+    format!(
+        "copy photos: start → {}: {files} files, {bytes} bytes",
+        dest.display()
+    )
 }
 
 /// "done", "cancelled" or "failed" (any file failed) for a finished copy.
@@ -71,8 +76,18 @@ pub fn outcome_status(o: &CopyOutcome) -> &'static str {
 }
 
 /// apature.log line for a copy's end.
-pub fn end_log_line(status: &str, files: usize, failed: usize, bytes: u64, elapsed: Duration) -> String {
-    let failed = if failed > 0 { format!(", {failed} failed") } else { String::new() };
+pub fn end_log_line(
+    status: &str,
+    files: usize,
+    failed: usize,
+    bytes: u64,
+    elapsed: Duration,
+) -> String {
+    let failed = if failed > 0 {
+        format!(", {failed} failed")
+    } else {
+        String::new()
+    };
     format!(
         "copy photos: {status}: {files} files copied{failed}, {bytes} bytes in {}, {}",
         format_elapsed(elapsed),
@@ -85,7 +100,13 @@ pub fn log_outcome(o: &CopyOutcome, elapsed: Duration) {
     for (path, why) in &o.failed {
         log::error!("copy photos: failed {}: {why}", path.display());
     }
-    let line = end_log_line(outcome_status(o), o.copied.len(), o.failed.len(), o.bytes, elapsed);
+    let line = end_log_line(
+        outcome_status(o),
+        o.copied.len(),
+        o.failed.len(),
+        o.bytes,
+        elapsed,
+    );
     if o.failed.is_empty() {
         log::info!("{line}");
     } else {
@@ -142,7 +163,10 @@ impl CopyJobs {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let photos = plan.photos;
-        log::info!("{}", start_log_line(&dest, plan.entries.len(), plan.total_bytes));
+        log::info!(
+            "{}",
+            start_log_line(&dest, plan.entries.len(), plan.total_bytes)
+        );
         std::thread::Builder::new()
             .name("copy-photos".into())
             .spawn(move || {
@@ -184,18 +208,34 @@ mod tests {
         assert_eq!(format_speed(mb_per_sec(1_000, Duration::ZERO)), "—");
         let v = mb_per_sec(10_300_000_000, Duration::from_millis(38_433)).unwrap();
         assert_eq!(format_speed(Some(v)), "268 MB/sec");
-        assert_eq!(format_speed(mb_per_sec(2_500_000, Duration::from_secs(1))), "2.5 MB/sec");
-        assert_eq!(format_speed(mb_per_sec(0, Duration::from_secs(3))), "0.0 MB/sec");
+        assert_eq!(
+            format_speed(mb_per_sec(2_500_000, Duration::from_secs(1))),
+            "2.5 MB/sec"
+        );
+        assert_eq!(
+            format_speed(mb_per_sec(0, Duration::from_secs(3))),
+            "0.0 MB/sec"
+        );
     }
 
     #[test]
     fn log_lines() {
         assert_eq!(
-            start_log_line(std::path::Path::new("/Volumes/CARD/Job"), 546, 10_300_000_000),
+            start_log_line(
+                std::path::Path::new("/Volumes/CARD/Job"),
+                546,
+                10_300_000_000
+            ),
             "copy photos: start → /Volumes/CARD/Job: 546 files, 10300000000 bytes"
         );
         assert_eq!(
-            end_log_line("done", 546, 0, 10_300_000_000, Duration::from_millis(38_433)),
+            end_log_line(
+                "done",
+                546,
+                0,
+                10_300_000_000,
+                Duration::from_millis(38_433)
+            ),
             "copy photos: done: 546 files copied, 10300000000 bytes in 38 sec, 268 MB/sec"
         );
         assert_eq!(

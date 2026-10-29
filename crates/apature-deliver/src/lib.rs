@@ -542,7 +542,10 @@ mod tests {
         let r = send(&target, "", &[a.clone(), b.clone()], |e| events.push(e)).unwrap();
         assert_eq!((r.sent, r.failed.len(), r.bytes), (2, 0, 100_011));
         assert_eq!(std::fs::read(desk.join("A.JPG")).unwrap(), b"first photo");
-        assert_eq!(std::fs::read(desk.join("B.JPG")).unwrap(), vec![7u8; 100_000]);
+        assert_eq!(
+            std::fs::read(desk.join("B.JPG")).unwrap(),
+            vec![7u8; 100_000]
+        );
         let mut names: Vec<String> = std::fs::read_dir(&desk)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

@@ -450,8 +450,7 @@ pub fn run_copy(
         // Group the entries per photo and index the copied destinations
         // once: testing every photo against the whole plan and the whole
         // copied list made this pass quadratic in the number of photos.
-        let copied: HashSet<&Path> =
-            out.copied.iter().map(|(_, d)| d.as_path()).collect();
+        let copied: HashSet<&Path> = out.copied.iter().map(|(_, d)| d.as_path()).collect();
         let mut by_item: BTreeMap<usize, Vec<&CopyEntry>> = BTreeMap::new();
         for e in &plan.entries {
             by_item.entry(e.item).or_default().push(e);

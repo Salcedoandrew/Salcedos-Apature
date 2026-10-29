@@ -986,15 +986,16 @@ mod tests {
             height: 32,
             data: vec![128; 64 * 32 * 3],
         };
-        std::fs::write(&src, apature_preview::decode::encode_jpeg(&img, 85).unwrap()).unwrap();
+        std::fs::write(
+            &src,
+            apature_preview::decode::encode_jpeg(&img, 85).unwrap(),
+        )
+        .unwrap();
         let mut iptc = sample_iptc();
         iptc.description = Some("Long caption test.".repeat(4000)); // 72 KB
         let out = dir.path().join("out/long.jpg");
         let r = export(&item_for(&src), &iptc, &Settings::default(), &out);
-        assert!(
-            matches!(r, Err(ExportError::SegmentTooLarge(_))),
-            "{r:?}"
-        );
+        assert!(matches!(r, Err(ExportError::SegmentTooLarge(_))), "{r:?}");
         assert!(!out.exists(), "no corrupt file is left behind");
     }
 
