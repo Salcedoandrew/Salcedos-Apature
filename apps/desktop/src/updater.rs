@@ -57,7 +57,47 @@ pub struct Update {
     /// Direct link to the .dmg asset, when the release has one (the
     /// `-universal.dmg` one when there is a choice).
     pub dmg: Option<String>,
+    /// The SHA-256 of that disk image, as the release notes publish it.
+    /// `None` when the release does not say, which the installer refuses:
+    /// a download that cannot be checked against what was published is not
+    /// installed.
+    pub sha256: Option<String>,
     pub notes: String,
+}
+
+/// The published digest of a release's disk image, from its notes.
+///
+/// `release.yml` writes one line, `**SHA-256** of the disk image: `…``, so
+/// the digest is the first 64-character hex run on a line that names
+/// SHA-256. Releases built before that line existed have none, and an empty
+/// answer has to mean "uncheckable", never "checked".
+pub fn digest_from_notes(notes: &str) -> Option<String> {
+    for line in notes.lines() {
+        if !line.contains("SHA-256") {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let mut run = 0usize;
+        for (i, b) in bytes.iter().enumerate() {
+            if !b.is_ascii_hexdigit() {
+                run = 0;
+                continue;
+            }
+            run += 1;
+            if run == 64 {
+                // A longer run is not a digest; keep looking past it.
+                let ends = match bytes.get(i + 1) {
+                    Some(next) => !next.is_ascii_hexdigit(),
+                    None => true,
+                };
+                if ends {
+                    return Some(line[i + 1 - 64..=i].to_ascii_lowercase());
+                }
+                run = 0;
+            }
+        }
+    }
+    None
 }
 
 /// Parsed `X.Y.Z[-pre][+meta]`.
@@ -177,12 +217,14 @@ pub fn pick(releases: &serde_json::Value, current: &str, beta: bool) -> Option<U
                 }
             })
         };
+        let notes = str_of(r, "body");
         best = Some(Update {
             version: tag,
             prerelease: pre,
             page: str_of(r, "html_url"),
             dmg: dmg_named("-universal.dmg").or_else(|| dmg_named(".dmg")),
-            notes: str_of(r, "body"),
+            sha256: digest_from_notes(&notes),
+            notes,
         });
     }
     best
@@ -358,6 +400,53 @@ mod tests {
             pick(&serde_json::json!({"message": "Not Found"}), "0.1.0", true),
             None
         );
+    }
+
+    #[test]
+    fn the_published_digest_is_read_from_the_notes() {
+        let body = "## [0.1.4] — 2026-10-28\n\n### Added\n- Warmer.\n\n\n**SHA-256** of the disk image: `B6CE6F88851AB23FBFABEA24EFF48A4786486EFEBA1D2CF738189096612DE0B8`\n\n> This build is ad-hoc signed.\n";
+        // Uppercase in the notes is the same digest, answered in lower case.
+        assert_eq!(
+            digest_from_notes(body).as_deref(),
+            Some("b6ce6f88851ab23fbfabea24eff48a4786486efeba1d2cf738189096612de0b8")
+        );
+        // Nothing to check is None, never a guess.
+        assert_eq!(digest_from_notes("SHA-256: `b6ce6f88`"), None);
+        assert_eq!(digest_from_notes("no digest here"), None);
+        assert_eq!(digest_from_notes(""), None);
+        // A run that is part of a longer one is not a digest.
+        let long = format!("SHA-256: {}aa", "b".repeat(64));
+        assert_eq!(digest_from_notes(&long), None);
+    }
+
+    #[test]
+    fn an_offer_carries_the_digest_of_its_image() {
+        let digest = "ab".repeat(32);
+        let asset = serde_json::json!({
+            "name": "Apature-9.9.9.dmg",
+            "browser_download_url": "https://example.com/a.dmg"
+        });
+        let with = serde_json::json!([{
+            "tag_name": "v9.9.9",
+            "prerelease": false,
+            "draft": false,
+            "html_url": "https://example.com/r",
+            "body": format!("**SHA-256** of the disk image: `{digest}`"),
+            "assets": [asset.clone()]
+        }]);
+        let offer = pick(&with, "0.1.4", false).expect("offer");
+        assert_eq!(offer.sha256.as_deref(), Some(digest.as_str()));
+
+        let without = serde_json::json!([{
+            "tag_name": "v9.9.9",
+            "prerelease": false,
+            "draft": false,
+            "html_url": "https://example.com/r",
+            "body": "Notes with no digest",
+            "assets": [asset]
+        }]);
+        let offer = pick(&without, "0.1.4", false).expect("offer");
+        assert_eq!(offer.sha256, None);
     }
 
     /// Live GitHub API: `cargo test -p apature -- --ignored live_check`.
