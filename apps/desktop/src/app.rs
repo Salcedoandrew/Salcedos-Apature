@@ -2007,12 +2007,14 @@ impl App {
     }
 
     /// Hidden `--install-update IMAGE|URL`: the whole install checked without
-    /// a release, from a disk image on this Mac or one to download.
+    /// a release, from a disk image on this Mac or one to download. A URL here
+    /// carries no published digest, so nothing is verified; the release path
+    /// always checks one.
     fn install_from_image(&mut self, image: PathBuf, ctx: &egui::Context) -> Result<(), String> {
         let text = image.to_string_lossy().into_owned();
         self.update_install = Some(
             if text.starts_with("http://") || text.starts_with("https://") {
-                crate::update_install::Installer::from_url(text, ctx.clone())?
+                crate::update_install::Installer::from_url(text, None, ctx.clone())?
             } else {
                 crate::update_install::Installer::from_image(image, ctx.clone())?
             },
