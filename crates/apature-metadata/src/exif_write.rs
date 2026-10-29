@@ -485,7 +485,10 @@ mod tests {
         let mut block = big_endian_block();
         let back = exif::from_bytes(&block).expect("parses");
         assert_eq!(back.model.as_deref(), Some("NIKON D850"));
-        assert_eq!(back.date_time_original.as_deref(), Some("2026:10:06 14:03:11"));
+        assert_eq!(
+            back.date_time_original.as_deref(),
+            Some("2026:10:06 14:03:11")
+        );
         assert_eq!(back.exposure_time, Some((1, 250)));
         assert_eq!(back.f_number, Some(2.8));
         assert_eq!(back.iso, Some(800));
@@ -495,9 +498,15 @@ mod tests {
         assert!(block.starts_with(b"MM"), "stays big-endian");
         let back = exif::from_bytes(&block).unwrap();
         assert_eq!(back.orientation, 1);
-        assert_eq!(back.model.as_deref(), Some("NIKON D850"), "the rest is untouched");
+        assert_eq!(
+            back.model.as_deref(),
+            Some("NIKON D850"),
+            "the rest is untouched"
+        );
         let (t, first) = Tiff::parse(&block).unwrap();
-        let p = t.uint(t.read_ifd(first).unwrap().get(EXIF_IFD).unwrap(), 0).unwrap() as u32;
+        let p = t
+            .uint(t.read_ifd(first).unwrap().get(EXIF_IFD).unwrap(), 0)
+            .unwrap() as u32;
         let ex = t.read_ifd(p).unwrap();
         assert_eq!(t.uint(ex.get(PIXEL_X).unwrap(), 0), Some(2048));
         assert_eq!(t.uint(ex.get(PIXEL_Y).unwrap(), 0), Some(1365));

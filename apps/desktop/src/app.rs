@@ -1125,8 +1125,10 @@ impl App {
             if let Some(d) = app.bug_dialog.as_mut() {
                 d.report = crate::bug_report::BugReport {
                     title: "Crop guides vanish after rotating a photo".into(),
-                    happened: "After rotating a NEF with ] the crop guides (G) no longer draw.".into(),
-                    steps: "1. Open a folder of NEFs\n2. Press ] on a photo\n3. Press K, then G".into(),
+                    happened: "After rotating a NEF with ] the crop guides (G) no longer draw."
+                        .into(),
+                    steps: "1. Open a folder of NEFs\n2. Press ] on a photo\n3. Press K, then G"
+                        .into(),
                     expected: "The rule-of-thirds guides over the crop.".into(),
                 };
             }
@@ -1315,7 +1317,10 @@ impl App {
         self.bug_dialog = Some(BugDialog {
             report: Default::default(),
             include_info: true,
-            info: crate::bug_report::SystemInfo::collect(self.prefs.shortcut_layout, focused.as_deref()),
+            info: crate::bug_report::SystemInfo::collect(
+                self.prefs.shortcut_layout,
+                focused.as_deref(),
+            ),
             notice: None,
             select_all: false,
             focus_title: true,
@@ -3441,7 +3446,8 @@ impl App {
     /// choice once toggled there; elsewhere the saved preference.
     pub fn inspector_shown(&self) -> bool {
         if self.workspace == Workspace::Preview {
-            self.preview_inspector.unwrap_or(self.prefs.inspector_visible)
+            self.preview_inspector
+                .unwrap_or(self.prefs.inspector_visible)
         } else {
             self.prefs.inspector_visible
         }
@@ -4208,24 +4214,28 @@ impl App {
             .spawn(move || {
                 let mut kinds = kinds;
                 let (volumes, volume_devs) = scan_volumes(&mut kinds);
-                let live = live.and_then(|(src, subfolders, pending, handed, opts, ledger_path)| {
-                    let (pending, ready) = live_scan(&src, subfolders, pending, &handed)?;
-                    let plan = if ready.is_empty() {
-                        None
-                    } else {
-                        let mut opts = opts;
-                        opts.only_paths = Some(ready.clone());
-                        opts.day = None;
-                        let ledger = apature_ingest::Ledger::load(&ledger_path);
-                        Some(apature_ingest::build_plan(&opts, &ledger).map_err(|e| e.to_string()))
-                    };
-                    Some(LivePoll {
-                        src,
-                        pending,
-                        ready,
-                        plan,
-                    })
-                });
+                let live =
+                    live.and_then(|(src, subfolders, pending, handed, opts, ledger_path)| {
+                        let (pending, ready) = live_scan(&src, subfolders, pending, &handed)?;
+                        let plan = if ready.is_empty() {
+                            None
+                        } else {
+                            let mut opts = opts;
+                            opts.only_paths = Some(ready.clone());
+                            opts.day = None;
+                            let ledger = apature_ingest::Ledger::load(&ledger_path);
+                            Some(
+                                apature_ingest::build_plan(&opts, &ledger)
+                                    .map_err(|e| e.to_string()),
+                            )
+                        };
+                        Some(LivePoll {
+                            src,
+                            pending,
+                            ready,
+                            plan,
+                        })
+                    });
                 let _ = tx.send(PollResult {
                     volumes,
                     volume_kinds: kinds,
@@ -5435,11 +5445,17 @@ impl eframe::App for App {
         if !self.tab_is_free(ctx) {
             return;
         }
-        let bare_tab = |e: &egui::Event| {
-            matches!(e, egui::Event::Key { key: egui::Key::Tab, modifiers, .. } if modifiers.is_none())
-        };
+        let bare_tab = |e: &egui::Event| matches!(e, egui::Event::Key { key: egui::Key::Tab, modifiers, .. } if modifiers.is_none());
         if raw_input.events.iter().any(|e| {
-            bare_tab(e) && matches!(e, egui::Event::Key { pressed: true, repeat: false, .. })
+            bare_tab(e)
+                && matches!(
+                    e,
+                    egui::Event::Key {
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    }
+                )
         }) {
             self.tab_toggle = true;
         }
@@ -5557,9 +5573,9 @@ impl eframe::App for App {
             if let Some(d) = self.bug_dialog.as_mut() {
                 match c {
                     Command::SelectAll => d.select_all = true,
-                    Command::CloseWindow
-                    | Command::MinimizeWindow
-                    | Command::ShowMainWindow => self.dispatch(ctx, c),
+                    Command::CloseWindow | Command::MinimizeWindow | Command::ShowMainWindow => {
+                        self.dispatch(ctx, c)
+                    }
                     _ => {}
                 }
                 continue;

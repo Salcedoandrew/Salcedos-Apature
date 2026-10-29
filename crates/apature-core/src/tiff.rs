@@ -287,7 +287,11 @@ mod tests {
     #[test]
     fn a_damaged_count_does_not_loop() {
         // StripOffsets claiming u32::MAX LONGs in a file of a few bytes.
-        let data = testutil::build_le(&[(273, 4, u32::MAX, 64u32.to_le_bytes())], &[1, 0, 0, 0], 64);
+        let data = testutil::build_le(
+            &[(273, 4, u32::MAX, 64u32.to_le_bytes())],
+            &[1, 0, 0, 0],
+            64,
+        );
         let (t, first) = Tiff::parse(&data).unwrap();
         let ifd = t.read_ifd(first).unwrap();
         let t0 = std::time::Instant::now();

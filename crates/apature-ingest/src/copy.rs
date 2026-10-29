@@ -173,7 +173,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("BIG.NEF");
         // 3 MiB + a bit, so reads land on and straddle the 1 MiB buffer.
-        let data: Vec<u8> = (0..3 * (1 << 20) + 12_345).map(|i: usize| (i * 31 % 251) as u8).collect();
+        let data: Vec<u8> = (0..3 * (1 << 20) + 12_345)
+            .map(|i: usize| (i * 31 % 251) as u8)
+            .collect();
         fs::write(&src, &data).unwrap();
         let dst = dir.path().join("out/BIG.NEF");
         let r = copy_verified(&src, &dst).unwrap();

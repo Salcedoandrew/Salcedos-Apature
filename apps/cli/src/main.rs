@@ -455,8 +455,7 @@ fn main() -> Result<()> {
 }
 
 fn cache_dir() -> Result<PathBuf> {
-    let dirs =
-        apature_core::project_dirs().context("no home directory")?;
+    let dirs = apature_core::project_dirs().context("no home directory")?;
     Ok(dirs.cache_dir().join("thumbs"))
 }
 

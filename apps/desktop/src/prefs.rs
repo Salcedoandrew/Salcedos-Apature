@@ -268,8 +268,7 @@ impl Prefs {
     }
 
     pub fn path() -> Option<PathBuf> {
-        apature_core::project_dirs()
-            .map(|d| d.config_dir().join("prefs.json"))
+        apature_core::project_dirs().map(|d| d.config_dir().join("prefs.json"))
     }
 
     /// Load, and say what happened: a damaged file is kept beside the live
