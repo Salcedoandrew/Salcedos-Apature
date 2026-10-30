@@ -6,6 +6,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 ## [Unreleased]
 
 ### Fixed
+- A sidecar keeps the spelling it has on disk. On a Mac, where the default volume treats `DSC_0001.XMP` and `DSC_0001.xmp` as one file, Apature used to name the sidecar with the case of the photo's extension even when Photo Mechanic had written the other one, so the path it showed, read, wrote and copied was not the name the file has. Reads, edits and Copy Photos now use the spelling that exists, and a folder copied to a case-sensitive drive can no longer pick up a second sidecar name for the same photo. When no sidecar exists yet the case still follows the photo's extension, as before.
 - A self-installed update is checked before it counts: the downloaded disk image must match the SHA-256 its release notes publish, and a release that publishes none is not installed in the app at all (install it from the release page). The image is also attached without `-noverify`, so a corrupt download is refused rather than mounted. The old app is kept until the new one opens: if the new build will not launch, the previous one is put back instead of being replaced and then deleted.
 
 ## [0.1.4] — 2026-10-28
