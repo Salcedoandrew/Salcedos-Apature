@@ -70,8 +70,10 @@ impl PhotoItem {
     ///
     /// Case: Photo Mechanic writes `IMG.XMP` next to `IMG.NEF` (it copies the
     /// case of the source extension). An existing sidecar of either case is
-    /// used as-is so we never create a second file on a case-sensitive
-    /// filesystem; when none exists, the case follows the primary's extension.
+    /// returned with the spelling it has on disk, so we never create a second
+    /// file on a case-sensitive filesystem and never report a path that does
+    /// not exist on one; when none exists, the case follows the primary's
+    /// extension.
     pub fn sidecar_path(&self) -> PathBuf {
         let lower = self.primary.path.with_extension("xmp");
         let upper = self.primary.path.with_extension("XMP");
@@ -87,23 +89,20 @@ impl PhotoItem {
         } else {
             (lower, upper)
         };
-        // Exact probes first: on a case-sensitive filesystem a hit *is* the
-        // real spelling, and on a case-insensitive one any spelling opens
-        // the same file, so either hit can be answered directly.
-        if preferred.is_file() {
+        // One spelling opens a file and the other does not: names were
+        // compared exactly, so the hit is the spelling on disk.
+        //
+        // When *both* open a file, a case-insensitive volume has matched the
+        // same entry twice (`IMG.XMP` and `IMG.xmp` are one file there), and
+        // `is_file` cannot tell which spelling the directory entry has. Ask
+        // the directory. Returning `preferred` on a guess is what reported
+        // `DSC_0001.XMP` for a sidecar Photo Mechanic wrote as `DSC_0001.xmp`,
+        // and that spelling is a different file name on a case-sensitive
+        // destination.
+        if preferred.is_file() && !other.is_file() {
             return preferred;
         }
-        if other.is_file() {
-            return other;
-        }
-        // Neither spelling is there. A sidecar can still exist under a
-        // third spelling (IMG.Xmp) that only a directory scan finds; the
-        // scan used to run for every item that *has* a sidecar, and now
-        // runs only on this miss path.
-        if let Some(real) = existing_with_case(&preferred) {
-            return real;
-        }
-        preferred
+        existing_with_case(&preferred).unwrap_or(preferred)
     }
 
     pub fn variants(&self) -> impl Iterator<Item = &Variant> {
@@ -112,17 +111,24 @@ impl PhotoItem {
 }
 
 /// The directory entry whose name equals `p`'s file name ignoring ASCII case,
-/// with its real spelling; None when there is none.
+/// with its real spelling, preferring the exact spelling when both exist (a
+/// case-sensitive directory can hold `IMG.XMP` and `IMG.xmp` at once); None
+/// when there is none.
 fn existing_with_case(p: &Path) -> Option<PathBuf> {
     let parent = p.parent()?;
     let want = p.file_name()?.to_str()?;
+    let mut folded = None;
     for e in std::fs::read_dir(parent).ok()?.flatten() {
         let name = e.file_name();
-        if name.to_str().is_some_and(|s| s.eq_ignore_ascii_case(want)) {
+        let Some(s) = name.to_str() else { continue };
+        if s == want {
             return Some(parent.join(name));
         }
+        if folded.is_none() && s.eq_ignore_ascii_case(want) {
+            folded = Some(parent.join(name));
+        }
     }
-    None
+    folded
 }
 
 #[cfg(test)]
