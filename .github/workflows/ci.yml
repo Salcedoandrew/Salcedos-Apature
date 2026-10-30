@@ -5,7 +5,11 @@ name: CI
 # so a commit that does not compile can never sit on main unnoticed.
 # A second macOS job type-checks the desktop on pull requests, so a PR that
 # breaks macOS-only code (platform/macos.rs, the sips RAW path, the Trash
-# method, extract timestamping) fails before it merges instead of after.
+# method, extract timestamping) fails before it merges instead of after. It
+# runs the library tests too: the filesystem a Mac has by default (APFS, names
+# compared case-insensitively) behaves differently from the Linux runner in
+# ways a type-check cannot see, so a test that only ever ran on Linux can pass
+# there and fail on every Mac, which is what happened to the sidecar spelling.
 # Bundling, signing and the real-card checks stay on the owner's Mac.
 on:
   push:
@@ -44,8 +48,11 @@ jobs:
       - run: cargo test --workspace --exclude apature
 
   desktop-macos-check:
-    # Check only, no release build and no tests: enough to catch a PR that
-    # breaks macOS-only code, at a fraction of the full macOS job's minutes.
+    # The desktop is checked, the libraries are tested, and nothing is release
+    # built: enough to catch a PR that breaks macOS-only code or macOS file
+    # behaviour, at a fraction of the full macOS job's minutes. The desktop
+    # crate's own tests stay on the push-to-main job, since building them is
+    # what makes macOS minutes expensive.
     if: github.event_name == 'pull_request'
     runs-on: macos-latest
     timeout-minutes: 40
@@ -54,6 +61,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p apature --all-targets
+      # Same command as the Linux job, on the other filesystem: path, copy and
+      # sidecar behaviour is what differs between the two.
+      - name: Library tests on macOS
+        run: cargo test --workspace --exclude apature
 
   desktop-macos:
     # macOS minutes cost ten times Linux ones: pushes to main only, and not
