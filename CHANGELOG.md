@@ -3,6 +3,13 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.1.10] — 2026-11-03
+
+### Changed
+- The build number moves, so the disk image comes from the current `main`. What the app does is the same as
+  0.1.9; the only changes since then are to the checks that guard a release, which no longer warn about the
+  em dash the dated section heading is meant to carry.
+
 ## [0.1.9] — 2026-11-03
 
 ### Fixed
