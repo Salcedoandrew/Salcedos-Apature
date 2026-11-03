@@ -199,12 +199,20 @@ fn fresh_packet(marks: &XmpMarks) -> Result<String, XmpError> {
 /// Give the rewritten file at `tmp` the modified, accessed and (macOS)
 /// created dates of the JPEG it replaces, so embedding marks does not make a
 /// photo look new to Finder, backups or date sorting.
+///
+/// Only timestamps the filesystem actually reports are copied: some network
+/// and FUSE mounts have no access time, and a mark that was written correctly
+/// should not be undone over a date we cannot read.
 fn keep_dates(original: &Path, tmp: &Path) -> std::io::Result<()> {
     let m = fs::metadata(original)?;
     #[allow(unused_mut)]
-    let mut times = fs::FileTimes::new()
-        .set_modified(m.modified()?)
-        .set_accessed(m.accessed()?);
+    let mut times = fs::FileTimes::new();
+    if let Ok(t) = m.modified() {
+        times = times.set_modified(t);
+    }
+    if let Ok(t) = m.accessed() {
+        times = times.set_accessed(t);
+    }
     #[cfg(target_os = "macos")]
     {
         use std::os::macos::fs::FileTimesExt;
@@ -430,6 +438,25 @@ mod tests {
             1,
             "no temp file left"
         );
+    }
+
+    #[test]
+    fn keep_dates_copies_the_modified_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("orig.JPG");
+        let tmp = dir.path().join("tmp.JPG");
+        fs::write(&original, skeleton(false)).unwrap();
+        fs::write(&tmp, b"x").unwrap();
+        // Whole seconds, so a coarse filesystem timestamp still holds it exactly.
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&original)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        keep_dates(&original, &tmp).unwrap();
+        assert_eq!(fs::metadata(&tmp).unwrap().modified().unwrap(), old);
     }
 
     /// Real camera JPEG + exiftool, when both are available.
