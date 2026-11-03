@@ -31,8 +31,8 @@ version=$(git diff "$base"...HEAD -- Cargo.toml | grep -E "^[+-]version = " || t
 if [[ -n "$ships" && -z "$notes" ]] && ! printf '%s' "$labels" | grep -q "no-changelog"; then
   say "REL-7: code under apps/ or crates/ changed without a CHANGELOG.md line (label no-changelog if nobody will see a difference)"
 fi
-# REL-9: no em dashes in new changelog lines.
-if [[ -n "$notes" ]] && git diff "$base"...HEAD -- CHANGELOG.md | grep -E "^\+" | grep -v "^+++" | grep -q "—"; then
+# REL-9: no em dashes in new changelog prose. Headings are exempt: REL-10 dates the section as "[x.y.z] — YYYY-MM-DD".
+if [[ -n "$notes" ]] && git diff "$base"...HEAD -- CHANGELOG.md | grep -E "^\+" | grep -v "^+++" | grep -vE "^\+#{1,6} " | grep -q "—"; then
   echo "::warning::REL-9: new changelog lines use an em dash; prefer a comma, a colon or a full stop"
 fi
 # REL-13: the version bump is its own commit.
