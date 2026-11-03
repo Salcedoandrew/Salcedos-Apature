@@ -494,8 +494,13 @@ log "old app moved aside to $OLD"
 
 if ! ditto "$NEW" "$TARGET" 2>>"$LOG"; then
   log "could not put the new app in place; putting the old one back"
-  rm -rf "$TARGET"
-  mv "$OLD" "$TARGET"
+  # `mv` into a directory that still exists nests the old app inside it, so the
+  # target has to be gone before the old app is moved back.
+  if rm -rf "$TARGET" && [ ! -e "$TARGET" ]; then
+    mv "$OLD" "$TARGET"
+  else
+    log "could not clear $TARGET; the old app is still at $OLD"
+  fi
   unmount
   rm -rf "$WORK"
   "$OPEN_CMD" "$TARGET"

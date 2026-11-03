@@ -38,12 +38,14 @@ const THUMB_PX: u32 = 320;
 const PREFETCH_ROWS: usize = 3;
 const KEEP_ROWS: usize = 12;
 /// Warm-up: how many not-yet-queued thumbnails `schedule_thumbs` may queue
-/// per frame, and how large the decode queue may grow before it pauses.
-/// Warm jobs sit at `WARM_PRIO_BASE` and above, so a visible row or a
+/// per frame, and how large the decode queue may grow before it pauses. Warm
+/// jobs sit at `worker::WARM_PRIO_BASE` and above, so a visible row or a
 /// preview queued later always jumps ahead of them in the pool.
 const WARM_BATCH: usize = 64;
 const WARM_MAX_PENDING: usize = 256;
-const WARM_PRIO_BASE: u32 = 10_000;
+/// Thumbnails kept on disk. Warm-up fills the cache for whole folders, so the
+/// oldest entries are dropped at startup once this is exceeded.
+const THUMB_CACHE_BUDGET: u64 = 2 << 30;
 const PREVIEW_LRU: usize = 8;
 
 /// Positions to preload around `pos` in a view of `len`, most urgent
@@ -826,8 +828,15 @@ struct CaptionWrite {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, launch: Launch) -> Self {
-        let cache = apature_core::project_dirs()
-            .and_then(|d| ThumbCache::new(d.cache_dir().join("thumbs")).ok());
+        let cache = apature_core::project_dirs().and_then(|d| {
+            let cache = ThumbCache::new(d.cache_dir().join("thumbs")).ok()?;
+            match cache.sweep(THUMB_CACHE_BUDGET) {
+                Ok(0) => {}
+                Ok(n) => log::info!("thumbnail cache: dropped {n} old entries"),
+                Err(e) => log::warn!("thumbnail cache sweep failed: {e}"),
+            }
+            Some(cache)
+        });
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -3872,7 +3881,7 @@ impl App {
                 } else {
                     visible_rows.start - row
                 };
-                let prio = WARM_PRIO_BASE + dist as u32;
+                let prio = crate::worker::WARM_PRIO_BASE + dist as u32;
                 for p in row * self.cols..((row + 1) * self.cols).min(self.view.len()) {
                     if queued >= WARM_BATCH {
                         break;

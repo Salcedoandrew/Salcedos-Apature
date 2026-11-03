@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
@@ -65,6 +65,10 @@ impl Done {
 
 type Key = (usize, JobKind);
 
+/// Priority at which warm-up work starts. Anything below is a visible row or a
+/// preview and always outranks it.
+pub const WARM_PRIO_BASE: u32 = 10_000;
+
 #[derive(Default)]
 struct Queue {
     /// (priority, kind, index): at equal priority a preview goes first.
@@ -72,6 +76,8 @@ struct Queue {
     prio: HashMap<Key, u32>,
     jobs: HashMap<Key, Job>,
     inflight: HashSet<Key>,
+    /// Warm jobs being decoded right now, so they can be capped.
+    warm_running: usize,
 }
 
 fn kind_u8(k: JobKind) -> u8 {
@@ -83,6 +89,8 @@ fn kind_u8(k: JobKind) -> u8 {
 
 struct Shared {
     q: Mutex<Queue>,
+    /// How many threads warm-up may occupy at once.
+    warm_cap: usize,
     cv: Condvar,
     cache: Option<ThumbCache>,
     ctx: egui::Context,
@@ -99,6 +107,8 @@ impl Pool {
         let (tx, rx) = unbounded();
         let shared = Arc::new(Shared {
             q: Mutex::new(Queue::default()),
+            // One thread always stays free for a visible row or a preview.
+            warm_cap: threads.saturating_sub(1).max(1),
             cv: Condvar::new(),
             cache,
             ctx,
@@ -116,7 +126,7 @@ impl Pool {
 
     pub fn request(&self, job: Job, prio: u32) {
         let key = (job.idx, job.kind);
-        let mut q = self.shared.q.lock().unwrap();
+        let mut q = lock_queue(&self.shared);
         if q.inflight.contains(&key) {
             return;
         }
@@ -136,7 +146,7 @@ impl Pool {
     /// Drop queued preview decodes for photos not in `keep` (the user has
     /// flipped past them). Decodes already running finish and are cached.
     pub fn retain_previews(&self, keep: &[usize]) {
-        let mut q = self.shared.q.lock().unwrap();
+        let mut q = lock_queue(&self.shared);
         let stale: Vec<Key> = q
             .jobs
             .keys()
@@ -152,14 +162,14 @@ impl Pool {
     }
 
     pub fn clear_pending(&self) {
-        let mut q = self.shared.q.lock().unwrap();
+        let mut q = lock_queue(&self.shared);
         q.order.clear();
         q.prio.clear();
         q.jobs.clear();
     }
 
     pub fn pending(&self) -> usize {
-        let q = self.shared.q.lock().unwrap();
+        let q = lock_queue(&self.shared);
         q.order.len() + q.inflight.len()
     }
 
@@ -167,7 +177,7 @@ impl Pool {
     /// does not count an item it queued on an earlier frame as new work, and so
     /// one whose queued job was dropped is picked up again.
     pub fn queued(&self, idx: usize, kind: JobKind) -> bool {
-        let q = self.shared.q.lock().unwrap();
+        let q = lock_queue(&self.shared);
         q.prio.contains_key(&(idx, kind)) || q.inflight.contains(&(idx, kind))
     }
 
@@ -176,13 +186,29 @@ impl Pool {
     }
 }
 
+/// The queue lock, recovered if a worker panicked while holding it: one bad
+/// frame must not poison every later frame into a panic of its own.
+fn lock_queue(s: &Shared) -> std::sync::MutexGuard<'_, Queue> {
+    s.q.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn worker_loop(s: Arc<Shared>) {
     loop {
-        let job = {
-            let mut q = s.q.lock().unwrap();
+        let (job, warm) = {
+            let mut q = lock_queue(&s);
             loop {
-                if let Some(&(p, k, idx)) = q.order.iter().next() {
-                    q.order.remove(&(p, k, idx));
+                if let Some(&(prio, k, idx)) = q.order.iter().next() {
+                    // Warm-up work may not take the last thread. A thumbnail
+                    // or preview that scrolls into view while a folder warms
+                    // would otherwise wait for a whole decode to finish.
+                    if prio >= WARM_PRIO_BASE && q.warm_running >= s.warm_cap {
+                        let (guard, _) =
+                            s.cv.wait_timeout(q, Duration::from_millis(100))
+                                .unwrap_or_else(|e| e.into_inner());
+                        q = guard;
+                        continue;
+                    }
+                    q.order.remove(&(prio, k, idx));
                     let kind = if k == 0 {
                         JobKind::Preview
                     } else {
@@ -192,18 +218,25 @@ fn worker_loop(s: Arc<Shared>) {
                     q.prio.remove(&key);
                     if let Some(job) = q.jobs.remove(&key) {
                         q.inflight.insert(key);
-                        break job;
+                        if prio >= WARM_PRIO_BASE {
+                            q.warm_running += 1;
+                        }
+                        break (job, prio >= WARM_PRIO_BASE);
                     }
                 } else {
-                    q = s.cv.wait(q).unwrap();
+                    q = s.cv.wait(q).unwrap_or_else(|e| e.into_inner());
                 }
             }
         };
         let done = run(&s, &job);
         {
-            let mut q = s.q.lock().unwrap();
+            let mut q = lock_queue(&s);
             q.inflight.remove(&(job.idx, job.kind));
+            if warm {
+                q.warm_running = q.warm_running.saturating_sub(1);
+            }
         }
+        s.cv.notify_all();
         if s.tx.send(done).is_err() {
             return;
         }
@@ -367,6 +400,7 @@ mod tests {
         let pool = Pool {
             shared: Arc::new(Shared {
                 q: Mutex::new(Queue::default()),
+                warm_cap: 1,
                 cv: Condvar::new(),
                 cache: None,
                 ctx: egui::Context::default(),
