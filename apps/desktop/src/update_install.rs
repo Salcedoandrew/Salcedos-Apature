@@ -1,9 +1,10 @@
 //! Installing an update in place, the way Alic does: no trip to the Finder.
 //!
 //! The payload is the release's disk image, which is what the releases carry.
-//! It is downloaded to a temporary folder, the app is taken out of it with
-//! `ditto`, and the copy is checked to be Apature before it counts. A running
-//! bundle cannot be replaced while it runs, so the last step is a small shell
+//! It is downloaded to a temporary folder, its SHA-256 is checked against the
+//! digest the release notes publish, the app is taken out of it with `ditto`,
+//! and the copy is checked to be Apature before it counts. A running bundle
+//! cannot be replaced while it runs, so the last step is a small shell
 //! script: it waits for this process to quit, moves the old app aside, puts the
 //! new build at the same path, deletes the old app, opens the new app and only
 //! then lets go of the disk image. `Progress::Installed` is the signal for the
@@ -11,7 +12,9 @@
 //!
 //! The script writes every step to `apature.log` (Help › Reveal Log), so an
 //! update that fails can be read afterwards. A failure before the swap leaves
-//! the old app untouched and reopens it, and a failed copy puts it back.
+//! the old app untouched and reopens it; a failed copy or a new app that will
+//! not open puts the old one back, because nothing is deleted until the new
+//! app has opened.
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -54,16 +57,34 @@ impl Installer {
         let url = update.dmg.clone().ok_or_else(|| {
             "the release has no disk image to install from; use the release page".to_string()
         })?;
-        Self::from_url(url, ctx)
+        // A download nobody can check is not installed: every release built
+        // by `release.yml` publishes a SHA-256, so a missing one means this is
+        // older or hand-made, and the release page is the honest answer.
+        let expected = update.sha256.clone().ok_or_else(|| {
+            format!(
+                "Apature {} does not publish a SHA-256 for its disk image, so the download can't be checked; install it from the release page",
+                update.version
+            )
+        })?;
+        Self::from_url(url, Some(expected), ctx)
     }
 
     /// The same pipeline for a disk image at a URL (`--install-update URL`).
-    pub fn from_url(url: String, ctx: egui::Context) -> Result<Installer, String> {
+    /// `expected` is the digest the release published; `None` means nobody
+    /// published one, which the release path never allows.
+    pub fn from_url(
+        url: String,
+        expected: Option<String>,
+        ctx: egui::Context,
+    ) -> Result<Installer, String> {
         Self::start(
             target_bundle()?,
             move |work, report| {
                 let dmg = work.join("Apature.dmg");
                 download(&url, &dmg, report)?;
+                if let Some(expected) = expected {
+                    verify_digest(&dmg, &expected)?;
+                }
                 stage_from_image(&dmg, work, report)
             },
             ctx,
@@ -230,7 +251,6 @@ fn stage_from_image(
             OsStr::new("attach"),
             OsStr::new("-readonly"),
             OsStr::new("-nobrowse"),
-            OsStr::new("-noverify"),
             OsStr::new("-mountpoint"),
             mount.as_os_str(),
             image.as_os_str(),
@@ -247,6 +267,20 @@ fn stage_from_image(
             Err(e)
         }
     }
+}
+
+/// The download must be the bytes the release published. A digest that does
+/// not match means something else was served, and nothing is installed.
+fn verify_digest(image: &Path, expected: &str) -> Result<(), String> {
+    let got =
+        apature_ingest::sha256_file(image).map_err(|e| format!("{}: {e}", image.display()))?;
+    let expected = expected.trim();
+    if !got.eq_ignore_ascii_case(expected) {
+        return Err(format!(
+            "the download is not the file the release publishes (SHA-256 {got}, expected {expected}); nothing was changed"
+        ));
+    }
+    Ok(())
 }
 
 fn stage_app(mount: &Path, staged: &Path) -> Result<(), String> {
@@ -469,11 +503,23 @@ if ! ditto "$NEW" "$TARGET" 2>>"$LOG"; then
 fi
 log "new app in place at $TARGET"
 
+# The old app is kept until the new one opens: a copy that will not launch
+# must leave something working behind. `open` answers once LaunchServices has
+# taken the request, so this is when the new app counts as launched, not a
+# promise that it will stay up.
+if ! "$OPEN_CMD" "$TARGET" 2>>"$LOG"; then
+  log "the new app did not open; putting the old one back"
+  rm -rf "$TARGET"
+  mv "$OLD" "$TARGET"
+  unmount
+  rm -rf "$WORK"
+  "$OPEN_CMD" "$TARGET"
+  exit 1
+fi
+log "new app opened at $TARGET"
+
 rm -rf "$OLD"
 log "old app deleted"
-
-"$OPEN_CMD" "$TARGET"
-log "new app opened"
 
 # Out of sight of the new app: let go of the image, then remove the download,
 # the copy and this script.
@@ -590,6 +636,13 @@ mod tests {
         assert!(script.contains(r#"ditto "$NEW" "$TARGET""#), "{script}");
         assert!(script.contains(r#"rm -rf "$OLD""#), "{script}");
         assert!(script.contains(r#""$OPEN_CMD" "$TARGET""#), "{script}");
+        // The old app outlives the new one opening: nothing is deleted first.
+        let opens = script.find(r#""$OPEN_CMD" "$TARGET""#).expect("open");
+        let deletes = script.find(r#"rm -rf "$OLD""#).expect("delete");
+        assert!(
+            opens < deletes,
+            "the old app is deleted only after the new one opens"
+        );
         // Nothing is left mounted or downloaded.
         assert!(
             script.contains(r#"hdiutil detach "$MOUNT" -force"#),
@@ -686,5 +739,83 @@ mod tests {
         let written = std::fs::read_to_string(&log).expect("log");
         assert!(written.contains("putting the old one back"), "{written}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A copy that is in place but will not open puts the old app back.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_new_app_that_will_not_open_restores_the_old_one() {
+        let root = std::env::temp_dir().join(format!("apature-swap-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let apps = root.join("Applications");
+        let work = root.join("work");
+        let target = apps.join("Apature.app");
+        let staged = work.join("Apature.app");
+        for (dir, mark) in [(&target, "old"), (&staged, "new")] {
+            std::fs::create_dir_all(dir.join("Contents/MacOS")).expect("bundle");
+            std::fs::write(dir.join("Contents/MacOS/mark.txt"), mark).expect("marker");
+        }
+        let log = root.join("apature.log");
+        let swap = Swap {
+            pid: 4_000_000,
+            target: target.clone(),
+            staged,
+            mount: PathBuf::new(),
+            work: work.clone(),
+            log: log.clone(),
+        };
+        let script = work.join("swap.sh");
+        std::fs::write(&script, swap_script(&swap)).expect("script");
+        let status = std::process::Command::new("/bin/bash")
+            .arg(&script)
+            // `open` failing stands for a new app that will not launch.
+            .env("APATURE_SWAP_OPEN", "/usr/bin/false")
+            .status()
+            .expect("run the swap");
+        assert!(!status.success(), "the swap must report the failure");
+        let marker =
+            std::fs::read_to_string(target.join("Contents/MacOS/mark.txt")).expect("old app");
+        assert_eq!(marker, "old", "the old app is back");
+        let written = std::fs::read_to_string(&log).expect("log");
+        assert!(written.contains("did not open"), "{written}");
+        assert!(written.contains("putting the old one back"), "{written}");
+        assert!(
+            !written.contains("old app deleted"),
+            "the old app was deleted before the new one opened: {written}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_download_that_does_not_match_the_published_digest_is_refused() {
+        let root = std::env::temp_dir().join(format!("apature-digest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("dir");
+        let image = root.join("Apature.dmg");
+        std::fs::write(&image, b"not the release").expect("image");
+        let err = verify_digest(&image, &"00".repeat(32)).expect_err("mismatch");
+        assert!(err.contains("not the file the release publishes"), "{err}");
+        // The digest is compared case-insensitively and ignores padding.
+        let real = apature_ingest::sha256_file(&image).expect("hash");
+        assert_eq!(verify_digest(&image, &real.to_uppercase()), Ok(()));
+        assert_eq!(verify_digest(&image, &format!(" {real}\n")), Ok(()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_release_without_a_published_digest_is_not_installed() {
+        let update = crate::updater::Update {
+            version: "9.9.9".into(),
+            prerelease: false,
+            page: "https://example.com/r".into(),
+            dmg: Some("https://example.com/a.dmg".into()),
+            sha256: None,
+            notes: String::new(),
+        };
+        let err = match Installer::spawn(&update, egui::Context::default()) {
+            Ok(_) => panic!("an uncheckable download must not be installed"),
+            Err(e) => e,
+        };
+        assert!(err.contains("does not publish a SHA-256"), "{err}");
     }
 }

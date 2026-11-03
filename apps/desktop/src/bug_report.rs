@@ -67,7 +67,10 @@ impl SystemInfo {
     pub fn lines(&self) -> Vec<(&'static str, String)> {
         let or_unknown = |v: &Option<String>| v.clone().unwrap_or_else(|| "unknown".into());
         vec![
-            ("Apature", format!("{} (build {})", self.version, self.build)),
+            (
+                "Apature",
+                format!("{} (build {})", self.version, self.build),
+            ),
             ("Commit", or_unknown(&self.commit)),
             ("macOS", or_unknown(&self.macos)),
             ("CPU", self.arch.clone()),
@@ -130,7 +133,10 @@ fn body_capped(r: &BugReport, info: Option<&SystemInfo>, max: Option<usize>) -> 
         ("What you expected", &r.expected),
     ] {
         let t = cap(text, max);
-        b += &format!("### {head}\n\n{}\n\n", if t.is_empty() { "_No response_" } else { &t });
+        b += &format!(
+            "### {head}\n\n{}\n\n",
+            if t.is_empty() { "_No response_" } else { &t }
+        );
     }
     if let Some(info) = info {
         b += "### System info\n\n";
@@ -159,7 +165,9 @@ pub fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -189,7 +197,10 @@ pub fn issue_link(r: &BugReport, info: Option<&SystemInfo>) -> IssueLink {
     let title = cap(&r.title, Some(MAX_TITLE_CHARS)).replace('\n', " ");
     let url = url_for(&title, &body(r, info));
     if url.len() <= MAX_URL_LEN {
-        return IssueLink { url, trimmed: false };
+        return IssueLink {
+            url,
+            trimmed: false,
+        };
     }
     let longest = [&r.happened, &r.steps, &r.expected]
         .iter()
@@ -208,7 +219,10 @@ pub fn issue_link(r: &BugReport, info: Option<&SystemInfo>) -> IssueLink {
 
 /// Open a link in the default browser.
 pub fn open_in_browser(url: &str) -> std::io::Result<()> {
-    std::process::Command::new("open").arg(url).spawn().map(|_| ())
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
 }
 
 #[cfg(test)]
@@ -261,7 +275,10 @@ mod tests {
 
     #[test]
     fn encodes_reserved_and_unicode() {
-        assert_eq!(encode("a b&c=d?e#f/g+h%"), "a%20b%26c%3Dd%3Fe%23f%2Fg%2Bh%25");
+        assert_eq!(
+            encode("a b&c=d?e#f/g+h%"),
+            "a%20b%26c%3Dd%3Fe%23f%2Fg%2Bh%25"
+        );
         assert_eq!(encode("é›"), "%C3%A9%E2%80%BA");
         assert_eq!(encode("Az09-_.~"), "Az09-_.~");
         assert_eq!(encode("x\ny"), "x%0Ay");
@@ -297,7 +314,10 @@ mod tests {
 
     #[test]
     fn never_sends_paths_or_names() {
-        assert_eq!(file_type(Path::new("/Users/someone/Pictures/x/DSC_0001.nef")).as_deref(), Some("NEF"));
+        assert_eq!(
+            file_type(Path::new("/Users/someone/Pictures/x/DSC_0001.nef")).as_deref(),
+            Some("NEF")
+        );
         assert_eq!(file_type(Path::new("/Users/someone/no-extension")), None);
         // Something that isn't a plain extension is dropped, not sent.
         assert_eq!(file_type(Path::new("/tmp/a.b c d")), None);
@@ -317,7 +337,13 @@ mod tests {
         let mut r = report();
         r.happened = "ä long story ".repeat(800);
         r.steps = "step ".repeat(50);
-        let full = issue_link(&BugReport { happened: "short".into(), ..r.clone() }, Some(&info()));
+        let full = issue_link(
+            &BugReport {
+                happened: "short".into(),
+                ..r.clone()
+            },
+            Some(&info()),
+        );
         assert!(!full.trimmed);
         let l = issue_link(&r, Some(&info()));
         assert!(l.trimmed);
@@ -348,7 +374,11 @@ mod tests {
     #[test]
     fn title_is_required() {
         assert!(!BugReport::default().can_submit());
-        assert!(!BugReport { title: "   ".into(), ..Default::default() }.can_submit());
+        assert!(!BugReport {
+            title: "   ".into(),
+            ..Default::default()
+        }
+        .can_submit());
         assert!(report().can_submit());
     }
 }

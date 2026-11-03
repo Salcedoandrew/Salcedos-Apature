@@ -584,7 +584,15 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
 /// One labelled white field of the bug report. `select_all` applies a ⌘A
 /// that the menu bar caught (see `App::bug_dialog`) to this field when it
 /// has focus, instead of selecting every photo.
-fn bug_field(ui: &mut egui::Ui, t: &Theme, label: &str, text: &mut String, rows: usize, hint: &str, select_all: bool) -> egui::Response {
+fn bug_field(
+    ui: &mut egui::Ui,
+    t: &Theme,
+    label: &str,
+    text: &mut String,
+    rows: usize,
+    hint: &str,
+    select_all: bool,
+) -> egui::Response {
     ui.label(RichText::new(label).monospace().size(9.5).color(t.muted));
     let r = light(ui, |ui| {
         let edit = if rows <= 1 {
@@ -613,7 +621,9 @@ fn bug_field(ui: &mut egui::Ui, t: &Theme, label: &str, text: &mut String, rows:
 fn report_bug(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Command>) {
     use crate::bug_report;
     let mut status: Option<String> = None;
-    let Some(d) = app.bug_dialog.as_mut() else { return };
+    let Some(d) = app.bug_dialog.as_mut() else {
+        return;
+    };
     let modal = egui::Modal::new(egui::Id::new("bug-dialog")).show(ctx, |ui| {
         ui.set_width(560.0);
         ui.spacing_mut().item_spacing.y = S2;
