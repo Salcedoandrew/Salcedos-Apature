@@ -41,11 +41,18 @@ are stable so a pull request or a commit can cite them.
 ## Cutting a release
 
 1. `main` green, `CHANGELOG.md` Unreleased section complete and in the author's words.
-2. Version-bump commit: set the version in `Cargo.toml`, date the changelog section, add `docs/releases/x.y.z.md`.
-3. `git tag -a vX.Y.Z -m "Apature X.Y.Z"` and push the tag. The release workflow builds the DMG on a macOS runner,
-   signs and notarises when the secrets exist, computes the SHA-256, and attaches both to a GitHub release with the
-   changelog section as notes.
-4. Download the DMG from the release page and launch it once on a Mac that did not build it.
+2. Version-bump commit: set the version in `Cargo.toml`, the same version in every `apature*` block of
+   `Cargo.lock`, date the changelog section, and add `docs/releases/x.y.z.md`. Add those four paths by name
+   (`git add Cargo.toml Cargo.lock CHANGELOG.md docs/releases/x.y.z.md`) and commit them together. A commit that
+   stages only some of them, or that relies on a dirty tree, can leave the version change behind while the tag
+   still gets made. Nothing else belongs in the commit (REL-13).
+3. Before tagging, run `bash tools/check-version.sh vX.Y.Z`. It must print `version X.Y.Z consistent`, which means
+   the tag, `Cargo.toml` and the changelog's top heading all agree. If it does not, fix the bump commit: the tag
+   must never be moved to carry a version the commit does not have.
+4. `git tag -a vX.Y.Z -m "Apature X.Y.Z"` and push the tag. The release workflow runs the same check first and
+   stops before building when it fails, then builds the DMG on a macOS runner, signs and notarises when the secrets
+   exist, computes the SHA-256, and attaches both to a GitHub release with the changelog section as notes.
+5. Download the DMG from the release page and launch it once on a Mac that did not build it.
 
 ## Where Apature is today (2026-10-21)
 
