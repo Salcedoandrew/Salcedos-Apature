@@ -3,6 +3,12 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [Unreleased]
+
+### Fixed
+- Revisiting a folder is faster: a thumbnail that is already cached no longer makes Apature scan the photo again to find its largest embedded preview.
+- If Apature cannot start one of its background workers the reason goes to the log and the rest of the app carries on, instead of the window closing.
+
 ## [0.1.6] — 2026-11-03
 
 ### Fixed

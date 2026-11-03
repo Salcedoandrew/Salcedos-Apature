@@ -147,12 +147,13 @@ impl MarkWriter {
                     cv.notify_all();
                 }
             })
-            .expect("spawn mark writer");
+            .map_err(|e| log::error!("could not start the mark writer: {e}"))
+            .ok();
         MarkWriter {
             tx: Some(tx),
             rx,
             pending,
-            handle: Some(handle),
+            handle,
             next_seq: 0,
         }
     }

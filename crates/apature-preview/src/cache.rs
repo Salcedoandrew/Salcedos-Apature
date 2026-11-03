@@ -50,6 +50,27 @@ impl ThumbCache {
         decode_jpeg(&bytes, None).ok()
     }
 
+    fn native_for(&self, key: &str) -> PathBuf {
+        self.path_for(key).with_extension("size")
+    }
+
+    /// The largest image the original file can show, stored next to its
+    /// thumbnail so a cache hit does not have to scan the original for
+    /// embedded JPEGs again.
+    pub fn get_native(&self, key: &str) -> Option<[u32; 2]> {
+        let text = fs::read_to_string(self.native_for(key)).ok()?;
+        let (w, h) = text.trim().split_once('x')?;
+        Some([w.parse().ok()?, h.parse().ok()?])
+    }
+
+    pub fn put_native(&self, key: &str, native: [u32; 2]) {
+        let path = self.native_for(key);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(path, format!("{}x{}", native[0], native[1]));
+    }
+
     pub fn contains(&self, key: &str) -> bool {
         self.path_for(key).is_file()
     }

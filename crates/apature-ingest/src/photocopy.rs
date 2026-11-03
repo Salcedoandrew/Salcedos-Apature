@@ -735,10 +735,7 @@ mod tests {
         o.dest_mode = DestMode::OriginalFolder;
         o.date_folders = DateFolders::Day;
         let got = dirs(&o);
-        assert!(
-            got[0].starts_with("day1") && got[0] != PathBuf::from("day1"),
-            "{got:?}"
-        );
+        assert!(got[0].starts_with("day1") && got[0] != *"day1", "{got:?}");
         assert!(got[1].starts_with("day2"));
         // Nothing to resolve yet: no folder chosen, or an empty subfolder name.
         let mut none = opts(Path::new(""));

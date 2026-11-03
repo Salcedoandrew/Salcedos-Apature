@@ -45,6 +45,11 @@ jobs:
       # Clippy type-checks the desktop app too; its tests and full debug
       # build run on the Mac, where it ships.
       - run: cargo clippy --workspace --all-targets
+      # The libraries are warning free, so a new lint fails here. The desktop
+      # app is left out: it carries warnings that only exist on Linux, where it
+      # is type-checked but not shipped.
+      - name: Library crates stay warning free
+        run: cargo clippy -p apature-core -p apature-preview -p apature-metadata -p apature-ingest -p apature-export -p apature-deliver -p apature-cli --all-targets -- -D warnings
       - run: cargo test --workspace --exclude apature
 
   desktop-macos-check:

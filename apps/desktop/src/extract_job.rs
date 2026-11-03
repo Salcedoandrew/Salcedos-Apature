@@ -62,7 +62,7 @@ impl ExtractJobs {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let n = photos.len();
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("extract-previews".into())
             .spawn(move || {
                 let out = run_extract(&photos, dest.as_deref(), &opts, &scheme, &c2, |p| {
@@ -71,8 +71,10 @@ impl ExtractJobs {
                 });
                 let _ = tx.send(ExtractMsg::Done(out));
                 ctx.request_repaint();
-            })
-            .expect("spawn extract thread");
+            });
+        if let Err(e) = started {
+            log::error!("could not start the extract thread: {e}");
+        }
         ExtractRunning {
             cancel,
             photos: n,

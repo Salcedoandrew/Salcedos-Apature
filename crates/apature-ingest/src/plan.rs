@@ -459,7 +459,7 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
                     return None;
                 }
             }
-            let first = item.variants().find(|v| passes_filter(*v))?;
+            let first = item.variants().find(|v| passes_filter(v))?;
             Some(facts_for(item, &first.path, opts.headline.as_deref()))
         })
         .collect();
@@ -469,7 +469,7 @@ pub fn build_plan(opts: &Options, ledger: &Ledger) -> Result<Plan, PlanError> {
         let Some(prepped_facts) = &prepped[i] else {
             continue;
         };
-        let variants: Vec<_> = item.variants().filter(|v| passes_filter(*v)).collect();
+        let variants: Vec<_> = item.variants().filter(|v| passes_filter(v)).collect();
         debug_assert!(!variants.is_empty());
         let mut facts0 = prepped_facts.clone();
         facts0.dest = opts

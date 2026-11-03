@@ -269,13 +269,15 @@ pub struct Checker {
 impl Checker {
     pub fn spawn(current: String, beta: bool, ctx: egui::Context) -> Checker {
         let (tx, rx) = channel();
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("update-check".into())
             .spawn(move || {
                 let _ = tx.send(check(&current, beta));
                 ctx.request_repaint();
-            })
-            .expect("spawn update check");
+            });
+        if let Err(e) = started {
+            log::error!("could not start the update check: {e}");
+        }
         Checker { rx }
     }
     pub fn try_recv(&self) -> Option<Result<Option<Update>, String>> {

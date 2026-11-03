@@ -74,15 +74,17 @@ impl IngestJobs {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let ledger_path = self.ledger_path.clone();
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("ingest-plan".into())
             .spawn(move || {
                 let ledger = Ledger::load(&ledger_path);
                 let result = build_plan(&opts, &ledger).map_err(|e| e.to_string());
                 let _ = tx.send(Msg::PlanReady { generation, result });
                 ctx.request_repaint();
-            })
-            .expect("spawn plan thread");
+            });
+        if let Err(e) = started {
+            log::error!("could not start the plan thread: {e}");
+        }
     }
 
     /// Run the plan; afterwards optionally apply `pad` to the verified
@@ -101,7 +103,7 @@ impl IngestJobs {
         let ctx = self.ctx.clone();
         let ledger_path = self.ledger_path.clone();
         let c2 = cancel.clone();
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("ingest-run".into())
             .spawn(move || {
                 let mut ledger = Ledger::load(&ledger_path);
@@ -123,8 +125,10 @@ impl IngestJobs {
                     let _ = tx.send(Msg::PadApplied { files, failed });
                 }
                 ctx.request_repaint();
-            })
-            .expect("spawn run thread");
+            });
+        if let Err(e) = started {
+            log::error!("could not start the run thread: {e}");
+        }
         Running {
             cancel,
             statuses: vec![FileStatus::Pending; n],

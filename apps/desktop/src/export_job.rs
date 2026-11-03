@@ -82,7 +82,7 @@ impl ExportJobs {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let c2 = cancel.clone();
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("export-run".into())
             .spawn(move || {
                 let mut handles = Vec::new();
@@ -93,32 +93,40 @@ impl ExportJobs {
                     let tx = tx.clone();
                     let ctx = ctx.clone();
                     let cancel = c2.clone();
-                    handles.push(std::thread::spawn(move || loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= jobs.len() || cancel.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let job = &jobs[i];
-                        let _ = tx.send(Msg::Started { index: i });
-                        ctx.request_repaint();
-                        let file = apature_metadata::items::read_iptc(&job.item);
-                        let iptc = match &job.pad {
-                            Some(p) => p.overlay(&file),
-                            None => file,
-                        };
-                        let result = export(&job.item, &iptc, &settings, &job.out)
-                            .map_err(|e| e.to_string());
-                        let _ = tx.send(Msg::Done { index: i, result });
-                        ctx.request_repaint();
-                    }));
+                    let worker = std::thread::Builder::new()
+                        .name("export-worker".into())
+                        .spawn(move || loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            if i >= jobs.len() || cancel.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let job = &jobs[i];
+                            let _ = tx.send(Msg::Started { index: i });
+                            ctx.request_repaint();
+                            let file = apature_metadata::items::read_iptc(&job.item);
+                            let iptc = match &job.pad {
+                                Some(p) => p.overlay(&file),
+                                None => file,
+                            };
+                            let result = export(&job.item, &iptc, &settings, &job.out)
+                                .map_err(|e| e.to_string());
+                            let _ = tx.send(Msg::Done { index: i, result });
+                            ctx.request_repaint();
+                        });
+                    match worker {
+                        Ok(h) => handles.push(h),
+                        Err(e) => log::error!("could not start an export worker: {e}"),
+                    }
                 }
                 for h in handles {
                     let _ = h.join();
                 }
                 let _ = tx.send(Msg::Finished);
                 ctx.request_repaint();
-            })
-            .expect("spawn export thread");
+            });
+        if let Err(e) = started {
+            log::error!("could not start the export thread: {e}");
+        }
         Running {
             cancel,
             statuses: vec![Status::Pending; n],

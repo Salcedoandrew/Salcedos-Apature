@@ -87,7 +87,9 @@ pub fn decode_jpeg(bytes: &[u8], max_long_side: Option<u32>) -> Result<Rgb, Deco
                 return Err(DecodeError::SizeMismatch);
             }
             pixels
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .flat_map(|c| [c[1], c[1], c[1]])
                 .collect()
         }
@@ -96,7 +98,9 @@ pub fn decode_jpeg(bytes: &[u8], max_long_side: Option<u32>) -> Result<Rgb, Deco
                 return Err(DecodeError::SizeMismatch);
             }
             pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|c| {
                     let k = c[3] as u32;
                     let f = |x: u8| ((x as u32) * k / 255) as u8;

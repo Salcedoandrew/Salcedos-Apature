@@ -167,7 +167,7 @@ impl CopyJobs {
             "{}",
             start_log_line(&dest, plan.entries.len(), plan.total_bytes)
         );
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("copy-photos".into())
             .spawn(move || {
                 let out = run_copy(&plan, &c2, pad.as_ref(), |p| {
@@ -176,8 +176,10 @@ impl CopyJobs {
                 });
                 let _ = tx.send(CopyMsg::Done(out));
                 ctx.request_repaint();
-            })
-            .expect("spawn copy thread");
+            });
+        if let Err(e) = started {
+            log::error!("could not start the copy thread: {e}");
+        }
         CopyRunning {
             cancel,
             dest,

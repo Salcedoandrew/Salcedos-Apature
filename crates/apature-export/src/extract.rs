@@ -186,7 +186,7 @@ pub fn extract_one(
     }
     let when = capture_time(raw).or_else(|| fs::metadata(raw).ok().and_then(|m| m.modified().ok()));
     if let Some(t) = when {
-        let mut times = FileTimes::new().set_modified(t).set_accessed(t);
+        let times = FileTimes::new().set_modified(t).set_accessed(t);
         #[cfg(target_os = "macos")]
         {
             use std::os::macos::fs::FileTimesExt;

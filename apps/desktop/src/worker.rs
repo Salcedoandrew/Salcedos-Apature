@@ -116,10 +116,12 @@ impl Pool {
         });
         for i in 0..threads.max(1) {
             let s = shared.clone();
-            std::thread::Builder::new()
+            let started = std::thread::Builder::new()
                 .name(format!("decode-{i}"))
-                .spawn(move || worker_loop(s))
-                .expect("spawn worker");
+                .spawn(move || worker_loop(s));
+            if let Err(e) = started {
+                log::error!("could not start the worker: {e}");
+            }
         }
         Pool { shared, rx }
     }
@@ -274,7 +276,14 @@ fn run(s: &Shared, job: &Job) -> Done {
     let mut native: Option<[u32; 2]> = None;
     let result: Result<(Rgb, Option<ExifSummary>, bool), String> = (|| {
         let src = Source::open(&job.path).map_err(|e| e.to_string())?;
-        native = src.largest().map(|c| [c.width, c.height]);
+        // The thumbnail cache remembers the original's size, and scanning a
+        // RAW for its embedded JPEGs is the expensive part of a warm hit.
+        native = if job.kind == JobKind::Thumb {
+            s.cache.as_ref().and_then(|c| c.get_native(&key))
+        } else {
+            None
+        };
+        native = native.or_else(|| src.largest().map(|c| [c.width, c.height]));
         let exif = apature_metadata::exif::from_bytes(src.data());
         let orientation = exif.as_ref().map(|e| e.orientation).unwrap_or(1);
 
@@ -311,6 +320,9 @@ fn run(s: &Shared, job: &Job) -> Done {
             if let Some(c) = &s.cache {
                 if let Err(e) = c.put(&key, &rgb) {
                     log::warn!("thumb cache write failed: {e}");
+                }
+                if let Some(n) = native {
+                    c.put_native(&key, n);
                 }
             }
         }

@@ -52,7 +52,7 @@ impl DeliverJobs {
         let ctx = self.ctx.clone();
         let t2 = target.clone();
         let f2 = files.clone();
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("deliver".into())
             .spawn(move || {
                 let result = send(&t2, &secret, &f2, |e| {
@@ -62,8 +62,10 @@ impl DeliverJobs {
                 .map_err(|e| e.to_string());
                 let _ = tx.send(Msg::Done(result));
                 ctx.request_repaint();
-            })
-            .expect("spawn deliver thread");
+            });
+        if let Err(e) = started {
+            log::error!("could not start the deliver thread: {e}");
+        }
         Running {
             target: target.name,
             files,
