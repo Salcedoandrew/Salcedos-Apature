@@ -176,7 +176,9 @@ pub fn from_app13(payload: &[u8]) -> Option<&[u8]> {
         if id == 0x0404 {
             return Some(data);
         }
-        p = &p[data_at + ((len + 1) & !1)..];
+        // A truncated payload can end right after an odd-length resource, with
+        // the pad byte missing; `get` keeps that a `None` instead of a panic.
+        p = p.get(data_at + ((len + 1) & !1)..)?;
     }
     None
 }
@@ -320,6 +322,26 @@ mod tests {
             Err(IimError::SegmentTooLarge(_))
         ));
         assert!(app13_segment(&sample()).is_ok());
+    }
+
+    #[test]
+    fn a_truncated_payload_is_none_not_a_panic() {
+        // An odd-length resource with its pad byte cut off: the next resource
+        // cannot be found, and nothing is read past the end of the buffer.
+        let mut payload = b"Photoshop 3.0\0".to_vec();
+        payload.extend_from_slice(b"8BIM");
+        payload.extend_from_slice(&0x0403u16.to_be_bytes());
+        payload.extend_from_slice(&[0, 0]);
+        payload.extend_from_slice(&3u32.to_be_bytes());
+        payload.extend_from_slice(b"abc");
+        assert_eq!(from_app13(&payload), None);
+        // A resource claiming more bytes than the segment holds.
+        let mut short = b"Photoshop 3.0\0".to_vec();
+        short.extend_from_slice(b"8BIM");
+        short.extend_from_slice(&0x0404u16.to_be_bytes());
+        short.extend_from_slice(&[0, 0]);
+        short.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        assert_eq!(from_app13(&short), None);
     }
 
     #[test]
