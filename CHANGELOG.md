@@ -3,6 +3,11 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.1.9] — 2026-11-03
+
+### Fixed
+- Saving marks into a JPEG still works on a volume that has no access time, such as some network and FUSE mounts. The photo keeps its modified date and the mark is written; before, the whole save was abandoned.
+
 ## [0.1.8] — 2026-11-03
 
 ### Fixed
