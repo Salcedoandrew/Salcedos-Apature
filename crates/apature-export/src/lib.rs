@@ -358,10 +358,20 @@ pub(crate) fn app1(sig: &[u8], body: &[u8]) -> Result<Vec<u8>, ExportError> {
 /// APP0 (JFIF header) when it comes first.
 pub(crate) fn splice_after_app0(encoded: &[u8], segs: &[Vec<u8>]) -> Vec<u8> {
     let mut ins = 2;
-    if encoded.len() > 4 && encoded[2] == 0xFF && encoded[3] == 0xE0 {
-        let len = u16::from_be_bytes([encoded[4], encoded[5]]) as usize;
-        ins = 2 + 2 + len;
+    // Six bytes are the marker pair and the two length bytes; a shorter buffer
+    // simply has no APP0 to step over.
+    if let Some(hdr) = encoded.get(2..6) {
+        if hdr[0] == 0xFF && hdr[1] == 0xE0 {
+            let len = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
+            // A length that runs past the buffer would splice out of bounds;
+            // leave the file alone (segments go right after SOI) instead.
+            let after = 2 + 2 + len;
+            if after <= encoded.len() {
+                ins = after;
+            }
+        }
     }
+    let ins = ins.min(encoded.len());
     let mut file = Vec::with_capacity(encoded.len() + segs.iter().map(Vec::len).sum::<usize>());
     file.extend_from_slice(&encoded[..ins]);
     for s in segs {
@@ -997,6 +1007,23 @@ mod tests {
         let r = export(&item_for(&src), &iptc, &Settings::default(), &out);
         assert!(matches!(r, Err(ExportError::SegmentTooLarge(_))), "{r:?}");
         assert!(!out.exists(), "no corrupt file is left behind");
+    }
+
+    #[test]
+    fn splicing_never_indexes_past_a_short_or_lying_header() {
+        let seg = vec![0xFF, 0xE1, 0x00, 0x02];
+        // Shorter than the six bytes an APP0 header needs.
+        assert_eq!(
+            splice_after_app0(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00], std::slice::from_ref(&seg)),
+            vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x02, 0xFF, 0xE0, 0x00]
+        );
+        // An APP0 whose length claims more than the file holds.
+        let lying = [0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xFF, 0x00, 0x01];
+        let out = splice_after_app0(&lying, &[seg]);
+        assert_eq!(&out[..2], &[0xFF, 0xD8]);
+        assert_eq!(out.len(), lying.len() + 4);
+        // Nothing at all: no panic.
+        assert_eq!(splice_after_app0(&[], &[]), Vec::<u8>::new());
     }
 
     #[test]
