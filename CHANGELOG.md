@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [Unreleased]
+## [0.1.6] — 2026-11-03
 
 ### Fixed
 - The thumbnail cache now keeps itself to 2 GB: on startup the oldest thumbnails are dropped, so years of folders cannot fill the disk. A cache bigger than that shrinks to fit the first time Apature opens.
