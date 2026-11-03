@@ -18,6 +18,8 @@ are stable so a pull request or a commit can cite them.
   `CHANGELOG.md`, and add each user-visible change's line in the same pull request as the change. Label
   `no-changelog` when nobody will see a difference.
 - **REL-9 MUST** write each line as what a person sees, not what the code does, and punctuate without em dashes.
+  The rule is about the prose under a heading: the dated heading keeps the em dash REL-10 gives it, and
+  `tools/check-release-rules.sh` skips heading lines when it looks for one.
 - **REL-10 MUST** date the section in the version-bump commit, not before. `Unreleased` is the truth until then.
 - **REL-11 MUST** follow semver in `Cargo.toml` (`[workspace.package] version`). The build number is the commit
   count on `main` and is derived, never typed.
