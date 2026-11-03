@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [0.1.5] — Unreleased
+## [0.1.5] — 2026-11-03
 
 ### Fixed
 - Clearing the thumbnail cache now really clears it: the photos on screen are read again from their files and the background warm-up fills the new cache from scratch. Before, the sheet kept showing the old images and the new cache stayed empty until the folder was reopened.
