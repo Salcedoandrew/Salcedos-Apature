@@ -86,21 +86,14 @@ pub fn decode_jpeg(bytes: &[u8], max_long_side: Option<u32>) -> Result<Rgb, Deco
             if pixels.len() != n * 2 {
                 return Err(DecodeError::SizeMismatch);
             }
-            pixels
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .flat_map(|c| [c[1], c[1], c[1]])
-                .collect()
+            pixels.chunks(2).flat_map(|c| [c[1], c[1], c[1]]).collect()
         }
         CMYK32 => {
             if pixels.len() != n * 4 {
                 return Err(DecodeError::SizeMismatch);
             }
             pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
+                .chunks(4)
                 .flat_map(|c| {
                     let k = c[3] as u32;
                     let f = |x: u8| ((x as u32) * k / 255) as u8;
