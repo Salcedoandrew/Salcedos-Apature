@@ -163,6 +163,14 @@ impl Pool {
         q.order.len() + q.inflight.len()
     }
 
+    /// Is a job for this slot already waiting or in flight? Warm-up asks so it
+    /// does not count an item it queued on an earlier frame as new work, and so
+    /// one whose queued job was dropped is picked up again.
+    pub fn queued(&self, idx: usize, kind: JobKind) -> bool {
+        let q = self.shared.q.lock().unwrap();
+        q.prio.contains_key(&(idx, kind)) || q.inflight.contains(&(idx, kind))
+    }
+
     pub fn try_recv(&self) -> Option<Done> {
         self.rx.try_recv().ok()
     }

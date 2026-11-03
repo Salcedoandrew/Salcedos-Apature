@@ -94,11 +94,11 @@ pub struct TabState {
     pub exif: Vec<Option<ExifSummary>>,
     pub thumbs: Vec<Option<TextureHandle>>,
     pub thumb_err: Vec<Option<String>>,
-    /// Items already queued for a thumbnail this session (visible rows
-    /// included), so the whole-folder warm-up in `schedule_thumbs` never
-    /// re-queues an item whose texture was dropped by the keep-rows
-    /// eviction below. The disk cache, not this flag, is what makes a
-    /// later scroll fast: a warmed item is re-decoded from the cache.
+    /// Items whose thumbnail has been decoded this session, whether it came
+    /// from the disk cache or was written to it. The whole-folder warm-up in
+    /// `schedule_thumbs` queues everything this flag leaves false, so an item
+    /// whose texture the keep-rows eviction dropped is not decoded twice, and
+    /// one whose queued job was dropped before it ran is picked up again.
     pub thumb_warmed: Vec<bool>,
     /// Upright size of the largest image each photo can show, from the
     /// first decode of it (see `worker::Done::native`).
@@ -558,7 +558,7 @@ pub struct App {
     pub exif: Vec<Option<ExifSummary>>,
     pub thumbs: Vec<Option<TextureHandle>>,
     pub thumb_err: Vec<Option<String>>,
-    /// Items already queued for a thumbnail this session; see `TabState`.
+    /// Items whose thumbnail has been decoded this session; see `TabState`.
     pub thumb_warmed: Vec<bool>,
     /// Upright size of the largest image each photo can show, from the
     /// first decode of it (see `worker::Done::native`).
@@ -3677,6 +3677,9 @@ impl App {
                         JobKind::Thumb => {
                             self.thumbs[done.idx] = Some(tex);
                             self.thumb_err[done.idx] = None;
+                            if let Some(w) = self.thumb_warmed.get_mut(done.idx) {
+                                *w = true;
+                            }
                             self.stats.thumbs_done += 1;
                             if done.cache_hit {
                                 self.stats.cache_hits += 1;
@@ -3820,11 +3823,7 @@ impl App {
                 (row - visible_rows.start) as u32
             };
             for p in row * self.cols..((row + 1) * self.cols).min(self.view.len()) {
-                let idx = self.view[p];
-                self.request_thumb(idx, prio);
-                if let Some(w) = self.thumb_warmed.get_mut(idx) {
-                    *w = true;
-                }
+                self.request_thumb(self.view[p], prio);
             }
         }
         // Warm the rest of the folder into the persistent disk cache, so
@@ -3836,8 +3835,8 @@ impl App {
         // is waiting. Items already warmed are never re-queued, even after
         // the keep-rows eviction below drops their texture: the disk cache
         // is the point, the texture is recreated from it on demand. (A tab
-        // switch drops queued warm jobs, so a few items may stay unwarm
-        // until scrolled to; visible requests still cover them.)
+        // switch drops queued warm jobs; an item only counts as warmed once
+        // its thumbnail arrives, so those are queued again next time.)
         if self.pool.pending() < WARM_MAX_PENDING {
             let mut queued = 0;
             let mut after = last;
@@ -3874,13 +3873,11 @@ impl App {
                     if self.thumb_warmed.get(idx).copied().unwrap_or(false)
                         || self.thumbs[idx].is_some()
                         || self.thumb_err[idx].is_some()
+                        || self.pool.queued(idx, JobKind::Thumb)
                     {
                         continue;
                     }
                     self.request_thumb(idx, prio);
-                    if let Some(w) = self.thumb_warmed.get_mut(idx) {
-                        *w = true;
-                    }
                     queued += 1;
                 }
             }
@@ -5011,6 +5008,30 @@ impl App {
                 let dir = self.cache_dir();
                 let _ = std::fs::remove_dir_all(&dir);
                 let _ = std::fs::create_dir_all(&dir);
+                // The textures on screen came from the cache that just went,
+                // and an item marked warm is never queued again: drop both, or
+                // the sheet keeps showing those images and the new cache stays
+                // empty until the folder is reopened.
+                let mut dropped = 0usize;
+                for slot in self.thumbs.iter_mut() {
+                    if slot.take().is_some() {
+                        dropped += 1;
+                    }
+                }
+                for slot in self.thumb_err.iter_mut() {
+                    *slot = None;
+                }
+                for w in self.thumb_warmed.iter_mut() {
+                    *w = false;
+                }
+                for tab in self.tabs.iter_mut() {
+                    if let Some(state) = tab.state.as_mut() {
+                        for w in state.thumb_warmed.iter_mut() {
+                            *w = false;
+                        }
+                    }
+                }
+                self.stats.thumbs_done = self.stats.thumbs_done.saturating_sub(dropped);
                 self.cache_size = Some((0, 0));
                 self.status = "Thumbnail cache cleared".into();
             }
