@@ -319,6 +319,20 @@ fn unique_probe_path(dir: &Path) -> PathBuf {
     ))
 }
 
+/// Counter so two deliveries from this process never share a part name.
+static PART_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A part name unique to this process: two app instances delivering the
+/// same file must not share one `.part` file, or the SFTP rename with
+/// OVERWRITE would publish a byte-interleaved file with no error.
+fn unique_part_name(base: &str, name: &str) -> String {
+    let n = PART_COUNTER.fetch_add(1, Ordering::Relaxed);
+    remote_path(
+        base,
+        Path::new(&format!(".{name}.part{}-{n}", std::process::id())),
+    )
+}
+
 fn connect(target: &Target, secret: &str) -> Result<Box<dyn Remote>, DeliverError> {
     let addr = format!("{}:{}", target.host, target.port);
     match target.kind {
@@ -445,7 +459,8 @@ pub fn test_connection(target: &Target, secret: &str) -> Result<(), DeliverError
     connect(target, secret).map(|_| ())
 }
 
-/// Send every file; each lands as `.name.part` and is renamed on completion.
+/// Send every file; each lands under a per-process-unique `.name.part…`
+/// name and is renamed on completion.
 pub fn send(
     target: &Target,
     secret: &str,
@@ -464,12 +479,16 @@ pub fn send(
     for (index, f) in files.iter().enumerate() {
         on_event(Event::Started { index });
         let final_name = remote_path(&base, f);
+        // One part name per file for this process: the retry loop reuses
+        // it (put truncates), and the rename on success removes it, so
+        // cleanup is exactly as before — just no longer shared between
+        // processes.
         let part = {
             let name = f
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            remote_path(&base, Path::new(&format!(".{name}.part")))
+            unique_part_name(&base, &name)
         };
         // Three tries per file; a failed try reconnects first, since a
         // dropped FTP data connection usually takes the control one with it.

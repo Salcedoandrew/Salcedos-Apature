@@ -250,7 +250,7 @@ pub fn write_with(
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.xmp-tmp{}", std::process::id()));
+    let tmp = path.with_file_name(format!(".{name}.xmp-tmp{}-{}", std::process::id(), xmp::next_tmp_seq()));
     let result = (|| {
         fs::write(&tmp, &out)?;
         fs::File::open(&tmp)?.sync_all()?;
@@ -286,7 +286,7 @@ pub fn write_marks(path: &Path, marks: &XmpMarks) -> Result<(), JpegXmpError> {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.xmp-tmp{}", std::process::id()));
+    let tmp = path.with_file_name(format!(".{name}.xmp-tmp{}-{}", std::process::id(), xmp::next_tmp_seq()));
     let result = (|| {
         fs::write(&tmp, &out)?;
         fs::File::open(&tmp)?.sync_all()?;

@@ -6,9 +6,11 @@
 //! from disk first calls [`MarkWriter::wait_idle`] so it never reads stale
 //! data. When several jobs pile up for the same photo only the newest is
 //! written, except edits, where a crop and a turn touch different fields
-//! and both must land.
+//! and both must land; IPTC payloads are partial, so older ones are merged
+//! into the surviving job field by field instead of being dropped, and
+//! every folded job still reports its own result.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -132,14 +134,25 @@ impl MarkWriter {
                     let mut batch = vec![first];
                     batch.extend(jobs.try_iter());
                     let n = batch.len();
-                    for job in latest_per_photo(batch) {
+                    for coalesced in latest_per_photo(batch) {
+                        let job = coalesced.job;
                         let result = run(&job);
-                        let _ = done_tx.send(Done {
-                            seq: job.seq,
-                            path: job.item.path().to_path_buf(),
-                            label: job.work.label(),
-                            result,
-                        });
+                        let path = job.item.path().to_path_buf();
+                        let label = job.work.label();
+                        // Every seq folded into this job reports in with
+                        // its result: its fields landed (or failed) with
+                        // the surviving write, so bulk-write completion
+                        // accounting resolves instead of hanging.
+                        let mut seqs = coalesced.merged;
+                        seqs.push(job.seq);
+                        for seq in seqs {
+                            let _ = done_tx.send(Done {
+                                seq,
+                                path: path.clone(),
+                                label,
+                                result: result.clone(),
+                            });
+                        }
                     }
                     let (m, cv) = &*p;
                     let mut left = m.lock().unwrap_or_else(|e| e.into_inner());
@@ -261,21 +274,98 @@ impl Drop for MarkWriter {
     }
 }
 
+/// One job that survived coalescing, plus the sequence numbers of the older
+/// jobs folded into it. Each folded seq gets its own [`Done`] with the
+/// surviving job's result, so bulk writes waiting on those seqs resolve.
+struct Coalesced {
+    job: Job,
+    merged: Vec<u64>,
+    /// Position of the surviving (newest) job in the batch, so the output
+    /// keeps queue order.
+    pos: usize,
+}
+
+/// Fold `older`'s IPTC fields into `newer`: a field set (`Some`) on the
+/// newer job wins, `None` keeps the older value. `None` means "leave
+/// untouched" when writing, so this is how a paste and a caption for the
+/// same photo both land instead of the earlier one silently vanishing.
+fn merge_iptc(newer: &mut Iptc, older: &Iptc) {
+    macro_rules! field {
+        ($f:ident) => {
+            if newer.$f.is_none() {
+                newer.$f = older.$f.clone();
+            }
+        };
+    }
+    field!(title);
+    field!(headline);
+    field!(description);
+    field!(keywords);
+    field!(creator);
+    field!(creator_title);
+    field!(credit);
+    field!(source);
+    field!(copyright);
+    field!(caption_writer);
+    field!(city);
+    field!(state);
+    field!(country);
+    field!(country_code);
+    field!(sublocation);
+    field!(date_created);
+    field!(instructions);
+    field!(transmission_reference);
+    field!(usage_terms);
+    field!(gps_latitude);
+    field!(gps_longitude);
+}
+
 /// Keep only the newest job for each photo and kind, in the order those
 /// were queued. Marks and IPTC for the same photo are different kinds and
 /// both land; edits are never dropped, because a crop and a turn touch
 /// different fields and the earlier one must not vanish.
-fn latest_per_photo(batch: Vec<Job>) -> Vec<Job> {
-    let mut seen = HashSet::new();
-    let mut out: Vec<Job> = batch
-        .into_iter()
-        .rev()
-        .filter(|j| match j.work.kind() {
-            Kind::Edits => true,
-            kind => seen.insert((j.item.path().to_path_buf(), kind)),
-        })
-        .collect();
-    out.reverse();
+///
+/// IPTC payloads are partial (a paste carries headline/keywords, a caption
+/// carries the description), so the newest does not supersede the oldest:
+/// older payloads are merged into the surviving job field by field, newer
+/// `Some` winning. Marks payloads are complete, so newest-wins stands for
+/// them.
+fn latest_per_photo(batch: Vec<Job>) -> Vec<Coalesced> {
+    let mut groups: HashMap<(PathBuf, Kind), usize> = HashMap::new();
+    let mut out: Vec<Coalesced> = Vec::new();
+    for (pos, job) in batch.into_iter().enumerate() {
+        if job.work.kind() == Kind::Edits {
+            out.push(Coalesced {
+                job,
+                merged: Vec::new(),
+                pos,
+            });
+            continue;
+        }
+        let key = (job.item.path().to_path_buf(), job.work.kind());
+        match groups.get(&key) {
+            None => {
+                groups.insert(key, out.len());
+                out.push(Coalesced {
+                    job,
+                    merged: Vec::new(),
+                    pos,
+                });
+            }
+            Some(&i) => {
+                let slot = &mut out[i];
+                let old = std::mem::replace(&mut slot.job, job);
+                if let (Work::Iptc { iptc: newer, .. }, Work::Iptc { iptc: older, .. }) =
+                    (&mut slot.job.work, &old.work)
+                {
+                    merge_iptc(newer, older);
+                }
+                slot.merged.push(old.seq);
+                slot.pos = pos;
+            }
+        }
+    }
+    out.sort_by_key(|c| c.pos);
     out
 }
 
@@ -378,9 +468,16 @@ mod tests {
         };
         let kept: Vec<u64> = latest_per_photo(vec![job(1, 0), job(2, 1), job(3, 0)])
             .iter()
-            .map(|j| j.seq)
+            .map(|c| c.job.seq)
             .collect();
         assert_eq!(kept, vec![2, 3]);
+        // The dropped marks job still reports: its seq is folded into the
+        // survivor so bulk-write accounting resolves.
+        let folded: Vec<u64> = latest_per_photo(vec![job(1, 0), job(3, 0)])
+            .into_iter()
+            .flat_map(|c| c.merged)
+            .collect();
+        assert_eq!(folded, vec![1]);
         // A marks job and an IPTC job for the same photo are different
         // kinds: both land, in queue order.
         let iptc = |seq, i: usize| Job {
@@ -396,7 +493,7 @@ mod tests {
         };
         let kept: Vec<u64> = latest_per_photo(vec![job(1, 0), iptc(2, 0), job(3, 0)])
             .iter()
-            .map(|j| j.seq)
+            .map(|c| c.job.seq)
             .collect();
         assert_eq!(kept, vec![2, 3]);
         // Edits are never coalesced: a crop and a turn touch different
@@ -430,9 +527,50 @@ mod tests {
             ),
         ])
         .iter()
-        .map(|j| j.seq)
+        .map(|c| c.job.seq)
         .collect();
         assert_eq!(kept, vec![1, 2]);
+        // IPTC payloads are partial: the surviving job carries the merged
+        // fields, newer `Some` winning, instead of the older job's fields
+        // vanishing.
+        let paste = |seq| Job {
+            seq,
+            item: its[0].clone(),
+            work: Work::Iptc {
+                iptc: Box::new(Iptc {
+                    headline: Some("paste headline".into()),
+                    keywords: Some(vec!["pasted".into()]),
+                    ..Default::default()
+                }),
+                policy: JpegMarks::Sidecar,
+            },
+        };
+        let caption = |seq| Job {
+            seq,
+            item: its[0].clone(),
+            work: Work::Iptc {
+                iptc: Box::new(Iptc {
+                    description: Some("caption text".into()),
+                    headline: Some("caption headline".into()),
+                    ..Default::default()
+                }),
+                policy: JpegMarks::Sidecar,
+            },
+        };
+        let merged = latest_per_photo(vec![paste(1), caption(2)]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].job.seq, 2);
+        assert_eq!(merged[0].merged, vec![1]);
+        let Work::Iptc { iptc, .. } = &merged[0].job.work else {
+            panic!("expected the surviving IPTC job");
+        };
+        assert_eq!(iptc.description.as_deref(), Some("caption text"));
+        assert_eq!(iptc.headline.as_deref(), Some("caption headline"));
+        assert_eq!(
+            iptc.keywords,
+            Some(vec!["pasted".to_string()]),
+            "older paste-only field survives"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
