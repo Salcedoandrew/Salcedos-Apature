@@ -11,6 +11,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 
 ### Fixed
 - Caption, paste, crop and rotate no longer freeze the window: sidecar writes now run in the background, so bulk captioning (for example pasting metadata across many selected photos) stays responsive on slow volumes. A caption that fails to save now goes back to a dirty draft instead of being lost. Pull requests now also get a macOS type-check of the desktop, so macOS-only code is compiled before it merges.
+- Audit fixes: pasting a caption while an ingest pad is applied no longer loses headline or keywords, and bulk metadata jobs now always finish instead of stalling. Delivering the same file from two app windows no longer mixes their bytes. A crashed Replace no longer blocks later replaces with a confusing error, and a crashed rename can no longer destroy a stranded temp file.
 
 
 ### Added
