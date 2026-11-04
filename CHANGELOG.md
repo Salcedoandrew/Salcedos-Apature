@@ -3,6 +3,16 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.1.11] — 2026-11-04
+
+### Fixed
+- Pasting a caption or keywords into a photo whose metadata is still saving keeps what you pasted. Two partial saves for one photo used to keep only the newer one, so a paste and a caption typed in quick succession could lose the first one's headline and keywords; they are now merged field by field.
+- A bulk paste or bulk caption job now always finishes. Every photo folded into a merged save reports back, so the job no longer stalls on its last photo with the progress window still open.
+- Saving marks while an ingest pad writes the same photo no longer risks a mixed file. The temporary file a save writes through is now named per save, not per app, so two saves to one sidecar or JPEG cannot share a scratch file.
+- Sending the same photo from two copies of Apature at once no longer risks a corrupt upload: each delivery names its own remote part file before the rename, so the two cannot interleave their bytes into one file.
+- A Copy Photos Replace that was interrupted no longer makes the next Replace fail with a confusing "destination exists" error. The temporary file left by the interrupted run is cleared first, and files copied by a dead process are never reused.
+- Renaming a batch of photos now stops and puts back the ones it had already moved when it finds a staging file left by an interrupted rename, instead of overwriting that file and losing whatever it held.
+
 ## [0.1.10] — 2026-11-03
 
 ### Changed
@@ -50,7 +60,6 @@ All notable, user-visible changes. Versions follow semantic versioning;
 
 ### Fixed
 - Caption, paste, crop and rotate no longer freeze the window: sidecar writes now run in the background, so bulk captioning (for example pasting metadata across many selected photos) stays responsive on slow volumes. A caption that fails to save now goes back to a dirty draft instead of being lost. Pull requests now also get a macOS type-check of the desktop, so macOS-only code is compiled before it merges.
-- Audit fixes: pasting a caption while an ingest pad is applied no longer loses headline or keywords, and bulk metadata jobs now always finish instead of stalling. Delivering the same file from two app windows no longer mixes their bytes. A crashed Replace no longer blocks later replaces with a confusing error, and a crashed rename can no longer destroy a stranded temp file.
 
 
 ### Added
