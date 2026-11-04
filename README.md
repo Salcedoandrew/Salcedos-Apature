@@ -42,6 +42,8 @@ The changes in this edition were written with the help of AI coding assistants. 
   <img src="https://img.shields.io/badge/Rust-stable-DEA584?logo=rust" alt="Rust stable">
   <img src="https://img.shields.io/badge/originals-never%20modified-5A48C7" alt="Originals never modified">
   <a href="https://ko-fi.com/mccal"><img src="https://img.shields.io/badge/Ko--fi-buy%20me%20a%20coffee-FF5E5B" alt="Buy me a coffee on Ko-fi"></a>
+  <a href="https://github.com/Salcedoandrew/salcedos-apature/releases"><img src="https://img.shields.io/github/v/release/Salcedoandrew/salcedos-apature?label=this%20edition" alt="This edition's latest release"></a>
+  <a href="https://github.com/Salcedoandrew/salcedos-apature/commits/main"><img src="https://img.shields.io/github/last-commit/Salcedoandrew/salcedos-apature/main" alt="Last commit"></a>
 </p>
 
 <p align="center">
@@ -60,10 +62,10 @@ The changes in this edition were written with the help of AI coding assistants. 
 > edges, and tell me about them. Developed on a Mac with a Nikon Z 6 II. See what's changed in [CHANGELOG.md](CHANGELOG.md).
 
 **Contents:** [Why I made this](#why-i-made-this) · [Screenshots](#screenshots) · [What it does](#what-it-does) ·
-[What you need](#what-you-need) · [Install](#install) · [Keys](#keys) · [Promises](#promises) · [Get involved](#get-involved) ·
-[Artists wanted](#artists-and-animators-wanted) · [Contact](#contact) · [License](#license)
+[What you need](#what-you-need) · [RAW previews](#raw-previews) · [Install](#install) · [Keys](#keys) · [Promises](#promises) ·
+[Get involved](#get-involved) · [Artists wanted](#artists-and-animators-wanted) · [Contact](#contact) · [License](#license)
 
-## Why I made this
+## 🎯 Why I made this
 
 Honestly, I made this to see what I could do. I love Photo Mechanic and I use it on deadline, but I was curious what
 I could build myself, so I rebuilt the loop I actually use every week: card in, cull, caption, export, send. Along
@@ -79,7 +81,7 @@ in, and to show that it isn't that hard. Sometimes it's the software and the exp
 Who knows where it goes from here. This is the first version, I'm still learning Rust, and it shows in places. Don't
 go crazy about it; tell me what breaks and what you'd want next.
 
-## Screenshots
+## 📸 Screenshots
 
 | Preview with the crop tool | Caption workspace |
 | :---: | :---: |
@@ -89,7 +91,7 @@ go crazy about it; tell me what breaks and what you'd want next.
 | :---: | :---: |
 | ![Ingest](docs/screenshots/ingest.png) | ![Export](docs/screenshots/export.png) |
 
-## What it does
+## ✨ What it does
 
 - **Ingest** from a card or any folder: day chips before you copy, a live example of every name the templates produce,
   SHA-256 verification of every copy at every destination, a ledger so a card is never copied twice, voice-memo and
@@ -105,14 +107,23 @@ go crazy about it; tell me what breaks and what you'd want next.
   FTPS or SFTP with passwords in the Keychain, retry, and a per-photo sent ledger.
 - Two appearances, Reduce Motion, text scaling, higher contrast, focus rings, a menu bar extra with live status.
 
-## What you need
+## ✅ What you need
 
 - A Mac on macOS 12 or newer. Apple silicon and Intel both build; Apple silicon is what it is tested on.
 - Photos from a camera that embeds a JPEG preview in its RAW files, which is every current body. Apature never
   decodes a RAW to show a thumbnail when the camera already did the work.
 - Optional: `brew install jpeg-xl` for JPEG XL export. Nothing else.
 
-## RAW previews
+## 🚀 Main Technologies
+
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/rust/rust-original.svg" alt="Rust logo" width="48" height="48"> <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/apple/apple-original.svg" alt="Apple logo" width="48" height="48">
+
+**See more**
+
+- [Rust](https://www.rust-lang.org/) — the app is written in Rust.
+- [macOS](https://www.apple.com/macos/) — built for the Mac.
+
+## 📷 RAW previews
 
 Apature shows the JPEG the camera embedded in the RAW and picks the largest
 one by default. Checked against one sample per camera from
@@ -147,7 +158,7 @@ carry bigger or smaller ones.
 untouched (default: the largest under 8 MiB). Lossless JPEG streams, which are raw sensor data rather than
 previews, are never picked.
 
-## Install
+## 📦 Install
 
 Download the DMG from the [latest release](https://github.com/McCal-Codes/apature/releases/latest) and drag Apature
 to Applications. 0.1.0 is not yet notarised: the first time, right-click the app and choose Open, or allow it under
@@ -164,7 +175,7 @@ Build it yourself with Rust 1.80 or newer:
 scripts/bundle.sh --install   # builds, bundles, signs ad-hoc, installs to /Applications
 ```
 
-## Keys
+## ⌨️ Keys
 
 Apature uses Photo Mechanic's macOS shortcuts out of the box, so your hands already know the way. Prefer Apature's
 original keys? Pick **Apature classic** in Settings › Shortcuts › Shortcut layout; the choice is remembered. The full
@@ -219,7 +230,7 @@ highlights (`N`, `B`), 2-up layouts and linked previews (`O`, `H`, `G`, `/`, `Ta
 selection in Preview (`W`, `D`), scroll to last previewed (`L`), close other tabs (`⌃⌥⌘W`), new window and ingest from
 selection (`⌘⇧N`, `⌘⇧S`), the catalog menu (Photo Mechanic Plus), and the IPTC Info window's own keys.
 
-## Promises
+## 🤝 Promises
 
 - Originals are never modified. Marks, rotation and crop go to the XMP sidecar next to the file, edited property by
   property so what Photo Mechanic or Lightroom wrote survives.
@@ -230,14 +241,14 @@ selection (`⌘⇧N`, `⌘⇧S`), the catalog menu (Photo Mechanic Plus), and th
 
 Press kit: screenshots, hero images, a social preview and approved wording are in [docs/marketing](docs/marketing).
 
-## Get involved
+## 🙌 Get involved
 
 Bug reports and ideas go to [Issues](https://github.com/McCal-Codes/apature/issues/new/choose); see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how changes are made and checked, and [SECURITY.md](SECURITY.md) for anything
 sensitive. [docs/STATUS.md](docs/STATUS.md) says what is implemented, tested and verified, with numbers;
 [docs/PLAN.md](docs/PLAN.md) is the order of work; [docs/DECISIONS.md](docs/DECISIONS.md) records every choice.
 
-## Artists and animators wanted
+## 🎨 Artists and animators wanted
 
 Apature has a mascot, Fen the fennec, drawn as a placeholder, and a motion language for the app that is written
 down but not yet animated. I'm looking for illustrators and animation artists to work with on Fen, the app icon, and
@@ -246,12 +257,16 @@ earned moments. Start with the [artist brief](docs/design/ARTIST_BRIEF.md), the 
 the [motion notes](docs/design/MOTION_DESIGN.md), then open an issue or email me with a few pieces of your work and
 we'll talk about scope and terms. Credit is always given; the brief says how the work is licensed.
 
-## Contact
+## 📬 Contact
 
 Caleb McCartney · [contact@mcc-cal.com](mailto:contact@mcc-cal.com) · [Ko-fi](https://ko-fi.com/mccal)
 
-## License
+## 📝 License
 
 MIT OR Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE). Third-party
 notices are in [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) and in About Apature. Not affiliated with Camera Bits or
 Photo Mechanic.
+
+Made with ❤️ by [Andrew Salcedo](https://github.com/Salcedoandrew)
+
+[Back to top](#apature)

@@ -365,6 +365,11 @@ pub fn copy_preserving(src: &Path, dst: &Path, replace: bool) -> Result<u64, Ing
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let tmp = dst.with_file_name(format!(".{name}.replace{}", std::process::id()));
+        // A stale temp from a crashed run would make `copy_verified`
+        // refuse the destination with a confusing `DestinationExists`.
+        // The name carries this process's id, so no live process can be
+        // using it; anything there is debris from a dead one.
+        let _ = fs::remove_file(&tmp);
         let r = copy_verified(src, &tmp)?;
         let done = copy_dates(src, &tmp).and_then(|_| fs::rename(&tmp, dst));
         if let Err(e) = done {

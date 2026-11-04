@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use regex::Regex;
@@ -18,6 +19,18 @@ use apature_core::{ColorClass, ColorClassScheme, Marks, Rating};
 
 pub const NS_XMP: &str = "http://ns.adobe.com/xap/1.0/";
 pub const NS_PM: &str = "http://ns.camerabits.com/photomechanic/1.0/";
+
+/// Counter that keeps temp sidecar/JPEG names unique within this process.
+/// The mark-writer thread and an ingest pad can write the same file at
+/// once; with pid-only temp names they would share one temp file and the
+/// bytes could interleave. The process id keeps names distinct across
+/// processes.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Next per-process temp-name sequence number; pair with the process id.
+pub(crate) fn next_tmp_seq() -> u64 {
+    TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Marks as they appear in XMP. `None` means the property is absent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -332,7 +345,7 @@ pub fn write_sidecar_with(
     if !verify(&updated) {
         return Err(XmpError::Verify(path.to_path_buf()));
     }
-    let tmp = path.with_extension(format!("xmp.tmp{}", std::process::id()));
+    let tmp = path.with_extension(format!("xmp.tmp{}-{}", std::process::id(), next_tmp_seq()));
     let result = (|| {
         fs::write(&tmp, updated.as_bytes())?;
         fs::File::open(&tmp)?.sync_all()?;
@@ -362,7 +375,7 @@ pub fn write_marks(path: &Path, marks: &XmpMarks) -> Result<(), XmpError> {
     if !satisfies(marks, &parse(&updated)) {
         return Err(XmpError::Verify(path.to_path_buf()));
     }
-    let tmp = path.with_extension(format!("xmp.tmp{}", std::process::id()));
+    let tmp = path.with_extension(format!("xmp.tmp{}-{}", std::process::id(), next_tmp_seq()));
     let result = (|| {
         fs::write(&tmp, updated.as_bytes())?;
         fs::File::open(&tmp)?.sync_all()?;

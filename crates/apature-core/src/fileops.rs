@@ -140,6 +140,21 @@ pub fn rename(plan: &RenamePlan) -> Result<Vec<(PathBuf, PathBuf)>, FileOpError>
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new(); // (from, tmp)
     for (i, (from, _)) in plan.moves.iter().enumerate() {
         let tmp = tmp_of(from, i);
+        if std::fs::symlink_metadata(&tmp).is_ok() {
+            // A staging file stranded by a crashed run: renaming over it
+            // would silently destroy that content, so fail instead and
+            // roll back what was staged.
+            for (f, t) in staged.iter().rev() {
+                let _ = std::fs::rename(t, f);
+            }
+            return Err(FileOpError::Io(
+                tmp,
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "staging file from an interrupted rename",
+                ),
+            ));
+        }
         if let Err(e) = std::fs::rename(from, &tmp) {
             for (f, t) in staged.iter().rev() {
                 let _ = std::fs::rename(t, f);
