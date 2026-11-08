@@ -14,7 +14,7 @@ crop) → caption (pad, codes, keywords, GPS, recent values, save to
 selection) → export (presets, JPEG or JPEG XL) → deliver (Folder, FTP,
 FTPS, SFTP; Keychain; retry; sent ledger). Two appearances, lavender accent,
 Reduce Motion, text scale, contrast, focus rings. Menus complete, About,
-menu bar extra, toasts, unplug detection, log file, versioned prefs.
+toasts, unplug detection, log file, versioned prefs.
 
 Measured: 134 NEF / 6.0 GB verified ingest from a Z 6 II card; headless
 harness captures every workspace. Tests: 94. CI: Linux + macOS.

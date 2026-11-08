@@ -11,8 +11,6 @@ mod macos;
 pub struct Platform {
     #[cfg(target_os = "macos")]
     menu: Option<macos::MenuBar>,
-    #[cfg(target_os = "macos")]
-    status: Option<macos::StatusItem>,
 }
 
 impl Platform {
@@ -25,8 +23,6 @@ impl Platform {
             menu: macos::MenuBar::install(layout)
                 .map_err(|e| log::warn!("native menu unavailable: {e}"))
                 .ok(),
-            #[cfg(target_os = "macos")]
-            status: None,
         }
     }
 
@@ -48,25 +44,6 @@ impl Platform {
         #[cfg(target_os = "macos")]
         if let Some(m) = &mut self.menu {
             m.install_if_needed();
-        }
-        #[cfg(target_os = "macos")]
-        if self.status.is_none() {
-            self.status = macos::StatusItem::install()
-                .map_err(|e| log::warn!("menu bar extra unavailable: {e}"))
-                .ok();
-        }
-    }
-
-    /// Menu bar extra title (empty hides it) and the Live Ingest check.
-    pub fn status_item(&self, title: &str, live: bool) {
-        #[cfg(target_os = "macos")]
-        if let Some(s) = &self.status {
-            s.set_title(title);
-            s.set_live(live);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (title, live);
         }
     }
 

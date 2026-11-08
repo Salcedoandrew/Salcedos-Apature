@@ -5528,27 +5528,6 @@ impl eframe::App for App {
         self.platform.on_first_frame();
         self.update_tick(ctx);
         self.update_install_tick();
-        // Menu bar extra: what Apature is doing, in a few characters.
-        let tray = if let Some(r) = self.ingest.running.as_ref().filter(|r| r.done.is_none()) {
-            let total = self
-                .ingest
-                .plan
-                .as_ref()
-                .map(|p| p.entries.len())
-                .unwrap_or(0)
-                .max(1);
-            format!("Ingest {}/{}", r.verified_count, total)
-        } else if let Some(r) = self.deliver.running.as_ref().filter(|r| r.done.is_none()) {
-            let sent = r.statuses.iter().filter(|s| **s == DStatus::Sent).count();
-            format!("Sending {}/{}", sent, r.files.len())
-        } else if let Some(r) = self.export.running.as_ref().filter(|r| !r.finished) {
-            format!("Export {}/{}", r.ok + r.failed, r.statuses.len())
-        } else if self.ingest.live.on {
-            format!("Live · {}", self.ingest.live.ingested)
-        } else {
-            String::new()
-        };
-        self.platform.status_item(&tray, self.ingest.live.on);
         if self.status != self.last_status {
             self.last_status = self.status.clone();
             self.status_since = Some(Instant::now());

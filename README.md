@@ -105,7 +105,7 @@ go crazy about it; tell me what breaks and what you'd want next.
   Rating, by Color Class, Cropped and RAW+JPEG pairs pick from the current tab.
 - **Export** JPEG or JPEG XL with presets per outlet, EXIF, XMP and IPTC-IIM kept, then **deliver** to a folder, FTP,
   FTPS or SFTP with passwords in the Keychain, retry, and a per-photo sent ledger.
-- Two appearances, Reduce Motion, text scaling, higher contrast, focus rings, a menu bar extra with live status.
+- Two appearances, Reduce Motion, text scaling, higher contrast, focus rings.
 
 ## ✅ What you need
 

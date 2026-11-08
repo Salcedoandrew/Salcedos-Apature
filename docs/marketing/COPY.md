@@ -60,7 +60,7 @@ text and should not be paraphrased.
 - Deliver to a folder, FTP, FTPS or SFTP, passwords in the Keychain, with retry and a per-photo sent ledger.
 - Crop and rotate stored in the sidecar. The original is never modified.
 - Two appearances, six soft accent colours, Reduce Motion, text scaling, higher contrast, focus rings.
-- A menu bar extra with live status, Live Ingest for a watched folder, and update checks against GitHub Releases.
+- Live Ingest for a watched folder and update checks against GitHub Releases.
 - No accounts, no analytics, no telemetry.
 
 ## Social posts
