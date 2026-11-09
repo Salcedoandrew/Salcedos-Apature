@@ -268,6 +268,23 @@ fn extract_previews(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Ve
             ui.checkbox(&mut o.keep_exif, "Preserve Exif data where possible");
             ui.checkbox(&mut o.keep_marks, "Preserve image preferences (Tag and Color Class)");
             ui.checkbox(&mut o.embed_icc, "Embed ICC Profile");
+            ui.checkbox(&mut o.compress, "Compress extracted JPEGs");
+            if o.compress {
+                ui.horizontal(|ui| {
+                    ui.add_space(18.0);
+                    ui.label("JPEG quality");
+                    ui.add(
+                        egui::DragValue::new(&mut o.compress_quality)
+                            .range(1..=100)
+                            .speed(1.0),
+                    );
+                    ui.label(
+                        RichText::new("Alic · lossy · metadata and dates kept")
+                            .size(10.5)
+                            .color(t.muted),
+                    );
+                });
+            }
         });
         ui.add_space(S3);
         let can = d.raws > 0;
