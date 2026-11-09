@@ -381,7 +381,11 @@ pub struct CopyPreserved {
 
 /// Verified byte-for-byte copy that keeps the dates. With `replace`, an
 /// existing destination is swapped out only after the new copy verified.
-pub fn copy_preserving(src: &Path, dst: &Path, replace: bool) -> Result<CopyPreserved, IngestError> {
+pub fn copy_preserving(
+    src: &Path,
+    dst: &Path,
+    replace: bool,
+) -> Result<CopyPreserved, IngestError> {
     copy_preserving_with(src, dst, replace, copy_dates)
 }
 
@@ -889,10 +893,7 @@ mod tests {
         assert_eq!(fs::read(&dst).unwrap(), b"photo bytes");
         // ...and the warning names the step and the file it was working on.
         let w = r.date_warning.expect("a warning for the dates");
-        assert!(
-            w.contains("keep the original's dates on the copy"),
-            "{w}"
-        );
+        assert!(w.contains("keep the original's dates on the copy"), "{w}");
         assert!(w.contains("A.CR3"), "{w}");
         // The modified date still came across on the fallback.
         assert_eq!(

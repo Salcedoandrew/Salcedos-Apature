@@ -1,9 +1,10 @@
 //! Extract JPEG Previews from RAW Photos… (as in Photo Mechanic): the
 //! largest JPEG inside each RAW becomes `name.jpg`, next to the RAW or in a
-//! chosen folder. The picture's bytes are written exactly as extracted;
-//! only metadata segments (Exif, XMP, IPTC-IIM, ICC) are spliced in after
-//! the start marker. A free name is always found (`name-1.jpg`…); no file
-//! is ever replaced, and the RAWs are only read.
+//! chosen folder. The picture's bytes are written exactly as extracted, or,
+//! with Compress extracted JPEGs on, re-encoded first at the Alic image
+//! compressor's JPEG quality; only metadata segments (Exif, XMP, IPTC-IIM,
+//! ICC) are spliced in after the start marker. A free name is always found
+//! (`name-1.jpg`…); no file is ever replaced, and the RAWs are only read.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, FileTimes, OpenOptions};
@@ -36,6 +37,13 @@ pub struct ExtractOptions {
     pub embed_icc: bool,
     /// Write next to the RAW instead of asking for a folder.
     pub to_source: bool,
+    /// Compress extracted JPEGs: re-encode each preview at the Alic image
+    /// compressor's JPEG quality, so the file comes out of the RAW the size
+    /// an Alic pass would leave it. Off by default, because a preview's own
+    /// bytes are the closest thing to what the camera rendered.
+    pub compress: bool,
+    /// JPEG quality for that re-encode (Alic's JPEG Quality slider, 1-100).
+    pub compress_quality: u8,
 }
 
 impl Default for ExtractOptions {
@@ -46,6 +54,8 @@ impl Default for ExtractOptions {
             keep_marks: true,
             embed_icc: true,
             to_source: false,
+            compress: false,
+            compress_quality: 80,
         }
     }
 }
@@ -171,6 +181,21 @@ pub fn extract_one(
     if !apature_preview::jpeg_info::is_jpeg(&jpeg) {
         return Err("no JPEG preview inside".into());
     }
+    // Compression happens before the metadata splice, so Preserve Exif,
+    // Copy IPTC/XMP and Embed ICC Profile still decide what travels and the
+    // new bytes keep it. A preview the decoder cannot read is still worth
+    // writing as it came out of the RAW, so that is a warning, not a skip.
+    let jpeg = if opts.compress {
+        match compress_preview(&jpeg, opts.compress_quality) {
+            Ok(smaller) => smaller,
+            Err(e) => {
+                log::warn!("{}: {e}", raw.display());
+                jpeg
+            }
+        }
+    } else {
+        jpeg
+    };
     let file = with_metadata(item, raw, &jpeg, opts, scheme)?;
     fs::create_dir_all(dir).map_err(|e| format!("can't create the folder: {e}"))?;
     let stem = raw
@@ -205,6 +230,21 @@ pub fn extract_one(
         let _ = f.set_times(times);
     }
     Ok(path)
+}
+
+/// The Alic image compressor's JPEG settings, applied to one preview: the
+/// picture is decoded at full size and written again as a lossy JPEG at
+/// `quality` with 4:2:0 chroma, the settings libcaesium hands mozjpeg when
+/// Alic compresses a JPEG. The encoder is the app's own rather than
+/// libcaesium itself, which is MozJPEG behind a native build this repository
+/// does not ship. Only the picture is re-written here; Exif, XMP, IPTC-IIM,
+/// ICC and the file dates are added afterwards by [`extract_one`] and
+/// [`with_metadata`], so those checkboxes still decide what the JPEG carries.
+fn compress_preview(jpeg: &[u8], quality: u8) -> Result<Vec<u8>, String> {
+    let img = apature_preview::decode::decode_jpeg(jpeg, None)
+        .map_err(|e| format!("can't re-encode the preview: {e}"))?;
+    apature_preview::decode::encode_jpeg(&img, quality.clamp(1, 100))
+        .map_err(|e| format!("can't re-encode the preview: {e}"))
 }
 
 /// Free output names for one extraction run, shared across the parallel
@@ -558,6 +598,32 @@ mod tests {
         apature_preview::decode::encode_jpeg(&img, 90).unwrap()
     }
 
+    /// A detailed preview: noise over a gradient, so re-encoding at a lower
+    /// quality measurably saves bytes (a flat pattern survives any quality at
+    /// almost the same size).
+    fn busy_preview_jpeg(quality: u8) -> Vec<u8> {
+        let (w, h) = (400u32, 200u32);
+        let mut data = Vec::with_capacity((w * h * 3) as usize);
+        let mut seed = 7u32;
+        for y in 0..h {
+            for x in 0..w {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let n = (seed >> 16) as u8;
+                data.extend_from_slice(&[
+                    ((x * 255 / w) as u8).wrapping_add(n / 3),
+                    ((y * 255 / h) as u8).wrapping_add(n / 3),
+                    n,
+                ]);
+            }
+        }
+        let img = apature_preview::Rgb {
+            width: w,
+            height: h,
+            data,
+        };
+        apature_preview::decode::encode_jpeg(&img, quality).unwrap()
+    }
+
     /// A NEF-shaped TIFF: Make, Model, Orientation 6, a capture date in the
     /// Exif IFD and the preview as JPEGInterchangeFormat.
     fn fake_nef(path: &Path, jpeg: &[u8]) {
@@ -715,6 +781,8 @@ mod tests {
             keep_marks: false,
             embed_icc: false,
             to_source: true,
+            compress: false,
+            compress_quality: 80,
         };
         let out = run(&shoot(d.path()), None, &opts);
         let got = fs::read(&out.extracted[0].1).unwrap();
@@ -734,6 +802,56 @@ mod tests {
         )
         .unwrap();
         assert!(t.read_ifd(first).is_ok());
+    }
+
+    #[test]
+    fn compression_writes_a_smaller_preview_at_the_alic_quality() {
+        let d = tempfile::tempdir().unwrap();
+        let jpeg = busy_preview_jpeg(90);
+        let raw = d.path().join("D.NEF");
+        fake_nef(&raw, &jpeg);
+        let items = shoot(d.path());
+
+        let at_80 = ExtractOptions {
+            compress: true,
+            compress_quality: 80,
+            ..ExtractOptions::default()
+        };
+        let out = run(&items, None, &at_80);
+        assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+        let got = fs::read(&out.extracted[0].1).unwrap();
+        assert!(
+            got.len() < jpeg.len(),
+            "compressed {} is not smaller than the preview {}",
+            got.len(),
+            jpeg.len()
+        );
+        // The same picture: dimensions unchanged, and the orientation and
+        // camera data the dialog asked for are still there.
+        assert_eq!(
+            apature_preview::jpeg_info::dimensions(&got),
+            Some((400, 200))
+        );
+        let ex = exif::from_bytes(&got).expect("exif");
+        assert_eq!(ex.orientation, 6);
+        assert_eq!(ex.model.as_deref(), Some("Z 6_2"));
+        assert_eq!(
+            ex.date_time_original.as_deref(),
+            Some("2026:10:06 14:03:11")
+        );
+
+        // The quality in the dialog is the one the encoder is given.
+        let at_40 = ExtractOptions {
+            compress: true,
+            compress_quality: 40,
+            ..ExtractOptions::default()
+        };
+        let small = fs::read(&run(&items, None, &at_40).extracted[0].1).unwrap();
+        assert!(small.len() < got.len(), "{} vs {}", small.len(), got.len());
+        assert_eq!(
+            apature_preview::jpeg_info::dimensions(&small),
+            Some((400, 200))
+        );
     }
 
     #[test]
