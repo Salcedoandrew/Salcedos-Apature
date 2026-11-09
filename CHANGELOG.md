@@ -3,6 +3,12 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.1.14] — 2026-11-09
+
+### Fixed
+- The updater no longer offers the version you already have. Release builds are now stamped as releases, so a stable 0.1.13 stops seeing 0.1.13 as an update.
+- Copying to ExFAT drives (like the T7) no longer fails when the drive can't set a file's dates. The copy is kept with a warning, and any copy error now names the step that failed.
+
 ## [0.1.13] — 2026-11-09
 
 ### Changed

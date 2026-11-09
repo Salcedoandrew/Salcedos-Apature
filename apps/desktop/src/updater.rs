@@ -517,7 +517,7 @@ mod tests {
     /// offer it again. A release build now reports the bare version, so its
     /// own stable release is never offered, and the channel rules still hold.
     #[test]
-    fn a_release_build_stamped_as_test_is_reoffered_its_own_stable_version() {
+    fn a_release_build_is_never_reoffered_its_own_version() {
         let rel = serde_json::json!([
             {
                 "tag_name": "v0.1.13",
