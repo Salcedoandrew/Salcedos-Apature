@@ -241,7 +241,14 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                                 }
                             }
                             None => {
-                                ui.label(RichText::new("reading…").size(11.0).color(t.muted));
+                                // The summary is read for every file when the
+                                // folder opens, so an empty slot means the file
+                                // has none, not that the read is still running.
+                                ui.label(
+                                    RichText::new("No EXIF in this file")
+                                        .size(11.0)
+                                        .color(t.muted),
+                                );
                             }
                         }
                         // File rows (formerly the Files section).
