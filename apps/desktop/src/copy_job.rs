@@ -95,10 +95,14 @@ pub fn end_log_line(
     )
 }
 
-/// Log a finished copy: one end line, plus one line per file that failed.
+/// Log a finished copy: one end line, plus one line per file that failed and
+/// one warning per copy that was kept without the original's dates.
 pub fn log_outcome(o: &CopyOutcome, elapsed: Duration) {
     for (path, why) in &o.failed {
         log::error!("copy photos: failed {}: {why}", path.display());
+    }
+    for warning in &o.warnings {
+        log::warn!("copy photos: {warning}");
     }
     let line = end_log_line(
         outcome_status(o),

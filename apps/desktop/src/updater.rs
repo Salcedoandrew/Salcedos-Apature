@@ -24,19 +24,42 @@ pub fn repo() -> &'static str {
         .unwrap_or(REPO_URL)
 }
 
-/// The version this build calls itself for the update check. Builds made by
-/// `scripts/bundle.sh` / `scripts/dmg.sh` carry `APATURE_BUILD` and are test
-/// builds, so they are `X.Y.Z-test.BUILD`, the same shape as the release tag.
-/// A plain `cargo run` has no build number and is just `X.Y.Z`.
+/// True when this build is the shipped artifact of a tagged release:
+/// `scripts/bundle.sh` sets `APATURE_RELEASE=1` when it builds one.
+const RELEASE_BUILD: bool = option_env!("APATURE_RELEASE").is_some();
+
+/// The version this build calls itself for the update check. Local and
+/// ad-hoc builds made by `scripts/bundle.sh` / `scripts/dmg.sh` carry
+/// `APATURE_BUILD` and are test builds, so they are `X.Y.Z-test.BUILD`, the
+/// same shape as the release tag. A tagged release reports the bare `X.Y.Z`
+/// instead: stamped as `X.Y.Z-test.N` it sorted below its own stable, so the
+/// updater offered the release that was already installed and the build
+/// accepted test releases with "Include beta releases" off. A plain
+/// `cargo run` has no build number and is just `X.Y.Z`.
 ///
 /// `APATURE_UPDATE_BUILD` (read at run time) pretends to be another build
 /// number, for testing the check without rebuilding.
 pub fn current_version() -> String {
     let fake = std::env::var("APATURE_UPDATE_BUILD").ok();
-    version_for(
-        env!("CARGO_PKG_VERSION"),
-        fake.as_deref().or(option_env!("APATURE_BUILD")),
-    )
+    match fake.as_deref() {
+        Some(fake) => version_for(env!("CARGO_PKG_VERSION"), Some(fake)),
+        None => version_stamped(
+            env!("CARGO_PKG_VERSION"),
+            option_env!("APATURE_BUILD"),
+            RELEASE_BUILD,
+        ),
+    }
+}
+
+/// The version a build reports: a release is always the bare package
+/// version, whatever stamp the build environment supplied; anything else is
+/// `X.Y.Z-test.N` when there is a build number.
+fn version_stamped(pkg: &str, build: Option<&str>, release: bool) -> String {
+    if release {
+        pkg.to_string()
+    } else {
+        version_for(pkg, build)
+    }
 }
 
 fn version_for(pkg: &str, build: Option<&str>) -> String {
@@ -449,6 +472,117 @@ mod tests {
         }]);
         let offer = pick(&without, "0.1.4", false).expect("offer");
         assert_eq!(offer.sha256, None);
+    }
+
+    #[test]
+    fn a_correctly_stamped_stable_build_is_never_offered_its_own_version() {
+        // What the check must do: a stable build reporting a bare X.Y.Z is
+        // never offered that same X.Y.Z again, and its test builds are
+        // invisible while betas are off.
+        let rel = serde_json::json!([
+            {
+                "tag_name": "v0.1.13",
+                "prerelease": false,
+                "draft": false,
+                "html_url": "https://example.com/v0.1.13",
+                "body": "",
+                "assets": [{
+                    "name": "Apature-0.1.13.dmg",
+                    "browser_download_url": "https://example.com/a.dmg"
+                }]
+            },
+            {
+                "tag_name": "v0.1.13-test.240",
+                "prerelease": true,
+                "draft": false,
+                "html_url": "https://example.com/v0.1.13-test.240",
+                "body": "",
+                "assets": []
+            },
+            {
+                "tag_name": "v0.1.14-test.1",
+                "prerelease": true,
+                "draft": false,
+                "html_url": "https://example.com/v0.1.14-test.1",
+                "body": "",
+                "assets": []
+            }
+        ]);
+        assert_eq!(pick(&rel, "0.1.13", false), None);
+    }
+
+    /// Regression for the reported defect: a tagged release build used to be
+    /// stamped `X.Y.Z-test.<commit count>` by `scripts/bundle.sh`, which made
+    /// the updater see the stable release the app already was as newer and
+    /// offer it again. A release build now reports the bare version, so its
+    /// own stable release is never offered, and the channel rules still hold.
+    #[test]
+    fn a_release_build_stamped_as_test_is_reoffered_its_own_stable_version() {
+        let rel = serde_json::json!([
+            {
+                "tag_name": "v0.1.13",
+                "prerelease": false,
+                "draft": false,
+                "html_url": "https://example.com/v0.1.13",
+                "body": "",
+                "assets": [{
+                    "name": "Apature-0.1.13.dmg",
+                    "browser_download_url": "https://example.com/a.dmg"
+                }]
+            },
+            {
+                "tag_name": "v0.1.13-test.240",
+                "prerelease": true,
+                "draft": false,
+                "html_url": "https://example.com/v0.1.13-test.240",
+                "body": "",
+                "assets": []
+            },
+            {
+                "tag_name": "v0.1.14-test.1",
+                "prerelease": true,
+                "draft": false,
+                "html_url": "https://example.com/v0.1.14-test.1",
+                "body": "",
+                "assets": []
+            }
+        ]);
+        // What a tagged release build reports, even with a build stamp in
+        // the environment: the bare stable version, not `-test.236`.
+        let installed = version_stamped("0.1.13", Some("236"), true);
+        assert_eq!(installed, "0.1.13");
+        assert!(!installed.contains("-test"));
+        // The version already installed is not offered back to it, and the
+        // test channel stays invisible while betas are off.
+        assert_eq!(pick(&rel, &installed, false), None);
+        // With betas on only a genuinely newer test build is offered.
+        assert_eq!(
+            pick(&rel, &installed, true).map(|u| u.version),
+            Some("0.1.14-test.1".into())
+        );
+    }
+
+    /// The released artifact identifies as `X.Y.Z`, never `X.Y.Z-test.N`.
+    #[test]
+    fn a_released_build_identifies_as_a_bare_version() {
+        // `scripts/bundle.sh` builds a tagged commit with APATURE_RELEASE=1;
+        // no stamp may leak into the version the updater compares.
+        for stamp in [None, Some("236"), Some(" 236 "), Some("dev"), Some("")] {
+            let released = version_stamped("0.1.13", stamp, true);
+            assert_eq!(released, "0.1.13", "stamp {stamp:?}");
+            assert!(!released.contains("-test"), "stamp {stamp:?}");
+        }
+        // Local/ad-hoc builds keep the test stamp, and a bare local build
+        // (a plain `cargo run`) has none either.
+        assert_eq!(
+            version_stamped("0.1.13", Some("236"), false),
+            "0.1.13-test.236"
+        );
+        assert_eq!(version_stamped("0.1.13", None, false), "0.1.13");
+        // A prerelease build still identifies as one, so it sees the test
+        // channel with betas off.
+        let pre = version_stamped("0.2.0", Some("300"), false);
+        assert!(parse(&pre).is_some_and(|v| !v.pre.is_empty()));
     }
 
     /// Live GitHub API: `cargo test -p apature -- --ignored live_check`.

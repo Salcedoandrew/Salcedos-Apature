@@ -14,7 +14,7 @@ use apature_core::PhotoItem;
 use apature_metadata::{iptc, xmp, Iptc};
 use rayon::prelude::*;
 
-use crate::copy::{copy_verified, IngestError};
+use crate::copy::{copy_verified, is_optional_step_unsupported, IngestError};
 use crate::plan::{civil_from_days, facts_for, PlanError, Skip};
 use crate::template::{expand, sanitize_component, Facts};
 
@@ -356,9 +356,43 @@ pub fn copy_dates(src: &Path, dst: &Path) -> std::io::Result<()> {
     File::options().write(true).open(dst)?.set_times(times)
 }
 
+/// Only the modified date: what is left when a filesystem refuses the richer
+/// set (`utimensat` on exFAT answers `ENOTSUP`).
+pub fn copy_mtime(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let modified = fs::metadata(src)?.modified()?;
+    File::options()
+        .write(true)
+        .open(dst)?
+        .set_times(FileTimes::new().set_modified(modified))
+}
+
+/// The date step of a copy, taken as a parameter so tests can stand in for a
+/// filesystem that refuses it, the way the hard-link call is taken in `copy`.
+type DateSetter = fn(&Path, &Path) -> std::io::Result<()>;
+
+/// A copy that landed: its bytes, and whether the original's dates came with
+/// it. `date_warning` is set when the filesystem refused the dates and the
+/// copy was kept without them (or with the modified date only).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyPreserved {
+    pub bytes: u64,
+    pub date_warning: Option<String>,
+}
+
 /// Verified byte-for-byte copy that keeps the dates. With `replace`, an
 /// existing destination is swapped out only after the new copy verified.
-pub fn copy_preserving(src: &Path, dst: &Path, replace: bool) -> Result<u64, IngestError> {
+pub fn copy_preserving(src: &Path, dst: &Path, replace: bool) -> Result<CopyPreserved, IngestError> {
+    copy_preserving_with(src, dst, replace, copy_dates)
+}
+
+/// [`copy_preserving`] with the date step injected, so the exFAT fallback is
+/// testable without a real exFAT volume.
+fn copy_preserving_with(
+    src: &Path,
+    dst: &Path,
+    replace: bool,
+    set_dates: DateSetter,
+) -> Result<CopyPreserved, IngestError> {
     if replace && dst.exists() {
         let name = dst
             .file_name()
@@ -371,14 +405,7 @@ pub fn copy_preserving(src: &Path, dst: &Path, replace: bool) -> Result<u64, Ing
         // using it; anything there is debris from a dead one.
         let _ = fs::remove_file(&tmp);
         let r = copy_verified(src, &tmp)?;
-        if let Err(e) = copy_dates(src, &tmp) {
-            let _ = fs::remove_file(&tmp);
-            return Err(IngestError::io(
-                "keep the original's dates on the copy",
-                &tmp,
-                e,
-            ));
-        }
+        let date_warning = keep_dates(src, dst, set_dates)?;
         if let Err(e) = fs::rename(&tmp, dst) {
             let _ = fs::remove_file(&tmp);
             return Err(IngestError::io(
@@ -387,12 +414,45 @@ pub fn copy_preserving(src: &Path, dst: &Path, replace: bool) -> Result<u64, Ing
                 e,
             ));
         }
-        return Ok(r.bytes);
+        return Ok(CopyPreserved {
+            bytes: r.bytes,
+            date_warning,
+        });
     }
     let r = copy_verified(src, dst)?;
-    copy_dates(src, dst)
-        .map_err(|e| IngestError::io("keep the original's dates on the copy", dst, e))?;
-    Ok(r.bytes)
+    let date_warning = keep_dates(src, dst, set_dates)?;
+    Ok(CopyPreserved {
+        bytes: r.bytes,
+        date_warning,
+    })
+}
+
+/// Give `dst` the source's dates, degrading instead of throwing away a good
+/// copy. A filesystem that refuses the richer set (exFAT answers `ENOTSUP` to
+/// `utimensat`, the same class as `link(2)` and `F_FULLFSYNC`) gets the
+/// modified date only, and the weaker result is returned as a warning. Any
+/// other error still fails, naming the step and the file.
+fn keep_dates(
+    src: &Path,
+    dst: &Path,
+    set_dates: DateSetter,
+) -> Result<Option<String>, IngestError> {
+    let step = "keep the original's dates on the copy";
+    match set_dates(src, dst) {
+        Ok(()) => Ok(None),
+        Err(e) if is_optional_step_unsupported(&e) => match copy_mtime(src, dst) {
+            Ok(()) => Ok(Some(format!(
+                "{step} failed for {}: {e}; kept the copy with its modified date only",
+                dst.display()
+            ))),
+            Err(plain) if is_optional_step_unsupported(&plain) => Ok(Some(format!(
+                "{step} failed for {}: {e}; kept the copy without dates",
+                dst.display()
+            ))),
+            Err(plain) => Err(IngestError::io(step, dst, plain)),
+        },
+        Err(e) => Err(IngestError::io(step, dst, e)),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,6 +469,9 @@ pub struct CopyOutcome {
     /// (source, destination) of every verified copy.
     pub copied: Vec<(PathBuf, PathBuf)>,
     pub failed: Vec<(PathBuf, String)>,
+    /// Copies that landed but without all of the original's dates: the
+    /// filesystem refused them and the modified date (or none) was kept.
+    pub warnings: Vec<String>,
     pub bytes: u64,
     pub cancelled: bool,
     /// Sidecars the caption was written to, and failures doing so.
@@ -456,8 +519,11 @@ pub fn run_copy(
             break;
         }
         match copy_preserving(&e.source, &e.destination, e.replace) {
-            Ok(n) => {
-                out.bytes += n;
+            Ok(c) => {
+                out.bytes += c.bytes;
+                if let Some(w) = c.date_warning {
+                    out.warnings.push(w);
+                }
                 out.copied.push((e.source.clone(), e.destination.clone()));
             }
             Err(err) => out.failed.push((e.source.clone(), err.to_string())),
@@ -800,6 +866,58 @@ mod tests {
         }
         // Add a number put numbered copies beside them.
         assert!(src.join("C-1.NEF").is_file() && src.join("C-1.JPG").is_file());
+    }
+
+    /// A date step that reports the filesystem refuses it (exFAT's
+    /// `ENOTSUP`), which used to abort a copy whose bytes had already been
+    /// written and verified.
+    #[cfg(unix)]
+    fn refuses_dates(_src: &Path, _dst: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOTSUP))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_that_refuses_dates_keeps_the_copy_with_a_warning() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("A.CR3");
+        fs::write(&src, b"photo bytes").unwrap();
+        let dst = d.path().join("out/A.CR3");
+        let r = copy_preserving_with(&src, &dst, false, refuses_dates).unwrap();
+        assert_eq!(r.bytes, 11);
+        // The copy is kept and verified...
+        assert_eq!(fs::read(&dst).unwrap(), b"photo bytes");
+        // ...and the warning names the step and the file it was working on.
+        let w = r.date_warning.expect("a warning for the dates");
+        assert!(
+            w.contains("keep the original's dates on the copy"),
+            "{w}"
+        );
+        assert!(w.contains("A.CR3"), "{w}");
+        // The modified date still came across on the fallback.
+        assert_eq!(
+            fs::metadata(&dst).unwrap().modified().unwrap(),
+            fs::metadata(&src).unwrap().modified().unwrap()
+        );
+        assert!(src.exists(), "source must never be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_date_failure_that_is_not_a_refusal_still_fails_the_step() {
+        fn denied(_src: &Path, _dst: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+        }
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("B.CR3");
+        fs::write(&src, b"photo bytes").unwrap();
+        let dst = d.path().join("out/B.CR3");
+        let err = copy_preserving_with(&src, &dst, false, denied).unwrap_err();
+        assert!(
+            matches!(err, IngestError::Io { op, .. } if op == "keep the original's dates on the copy"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("Permission denied"), "{err}");
     }
 
     #[test]

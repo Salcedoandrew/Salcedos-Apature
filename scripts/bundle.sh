@@ -9,13 +9,28 @@ cd "$(dirname "$0")/.."
 
 VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+# A tagged commit is a shipped release, and a release has to report the bare
+# X.Y.Z: stamped `X.Y.Z-test.N` it sorted below its own stable version, so the
+# updater offered the release the app already was. The commit count is still
+# passed as APATURE_BUILD for the About window and bug reports, but the release
+# flag makes `updater::current_version` ignore it. The `-test.N` stamp is for
+# local and ad-hoc builds only.
+if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]] || git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+  RELEASE=1
+else
+  RELEASE=0
+fi
 # APP and APATURE_BINARY can be overridden (scripts/dmg.sh bundles a
 # universal binary into target/dist without touching target/bundle).
 APP="${APP:-target/bundle/Apature.app}"
 BINARY="${APATURE_BINARY:-}"
 
 if [[ -z "$BINARY" ]]; then
-  APATURE_BUILD="$BUILD" cargo build --release -p apature
+  if [[ "$RELEASE" == 1 ]]; then
+    APATURE_RELEASE=1 APATURE_BUILD="$BUILD" cargo build --release -p apature
+  else
+    APATURE_BUILD="$BUILD" cargo build --release -p apature
+  fi
   BINARY=target/release/apature
 fi
 

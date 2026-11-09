@@ -106,13 +106,17 @@ pub fn copy_unverified(src: &Path, dst: &Path) -> Result<CopyReport, IngestError
 /// stand in for a filesystem that refuses it.
 type Linker = fn(&Path, &Path) -> io::Result<()>;
 
+/// The full flush, taken the same way: a filesystem that refuses it has to
+/// degrade to `fsync(2)` instead of failing an otherwise good copy.
+type Flusher = fn(&File) -> io::Result<()>;
+
 fn copy_impl(src: &Path, dst: &Path, verify: bool) -> Result<CopyReport, IngestError> {
     // `fs::hard_link` is generic over `AsRef<Path>` and does not coerce to a
     // plain function pointer, so the production linker is a concrete wrapper.
     fn link(tmp: &Path, dst: &Path) -> io::Result<()> {
         fs::hard_link(tmp, dst)
     }
-    copy_impl_with(src, dst, verify, link)
+    copy_impl_with(src, dst, verify, link, full_flush)
 }
 
 fn copy_impl_with(
@@ -120,6 +124,7 @@ fn copy_impl_with(
     dst: &Path,
     verify: bool,
     link: Linker,
+    flush: Flusher,
 ) -> Result<CopyReport, IngestError> {
     if dst.exists() {
         return Err(IngestError::DestinationExists(dst.to_path_buf()));
@@ -150,13 +155,13 @@ fn copy_impl_with(
                 .map_err(|e| IngestError::io("write the copy", &tmp, e))?;
             total += n as u64;
         }
-        let sync = sync_durable(&output, &tmp)?;
+        let sync = sync_durable(&output, &tmp, flush)?;
         drop(output);
         let src_hash = hex(&hasher.finalize());
         if verify {
             check_copy(&tmp, src, &src_hash)?;
         }
-        let published = publish(&tmp, dst, link)?;
+        let published = publish(&tmp, dst, link, flush)?;
         Ok(CopyReport {
             source: src.to_path_buf(),
             destination: dst.to_path_buf(),
@@ -181,7 +186,7 @@ fn copy_impl_with(
 /// A filesystem that cannot link at all (exFAT) falls back to an exclusive
 /// copy of the same verified bytes. Nothing else is retried: a permission
 /// error or a full disk is reported as the failure it is.
-fn publish(tmp: &Path, dst: &Path, link: Linker) -> Result<Publish, IngestError> {
+fn publish(tmp: &Path, dst: &Path, link: Linker, flush: Flusher) -> Result<Publish, IngestError> {
     match link(tmp, dst) {
         Ok(()) => {
             let _ = fs::remove_file(tmp);
@@ -196,7 +201,7 @@ fn publish(tmp: &Path, dst: &Path, link: Linker) -> Result<Publish, IngestError>
             if !is_unsupported(&e) {
                 return Err(IngestError::io("link the copy into place", dst, e));
             }
-            publish_exclusive(tmp, dst)?;
+            publish_exclusive(tmp, dst, flush)?;
             Ok(Publish::ExclusiveCopy)
         }
     }
@@ -212,7 +217,7 @@ fn publish(tmp: &Path, dst: &Path, link: Linker) -> Result<Publish, IngestError>
 /// odd enough to refuse `link(2)` is not one to trust with a single pass,
 /// and a copy that does not read back identical is removed rather than
 /// published.
-fn publish_exclusive(tmp: &Path, dst: &Path) -> Result<(), IngestError> {
+fn publish_exclusive(tmp: &Path, dst: &Path, flush: Flusher) -> Result<(), IngestError> {
     let mut output = match OpenOptions::new().write(true).create_new(true).open(dst) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -243,7 +248,7 @@ fn publish_exclusive(tmp: &Path, dst: &Path) -> Result<(), IngestError> {
                 .write_all(&buf[..n])
                 .map_err(|e| IngestError::io("write the destination", dst, e))?;
         }
-        sync_durable(&output, dst)?;
+        sync_durable(&output, dst, flush)?;
         drop(output);
         let written = hex(&hasher.finalize());
         let landed = sha256_file_ctx(dst, "read the destination back to verify it")?;
@@ -341,11 +346,12 @@ fn is_unsupported(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::Unsupported
 }
 
-/// A full flush may be refused with a wider set of errnos than a link: some
-/// filesystems answer `EINVAL` or `ENOTTY` to `F_FULLFSYNC`, and all that is
-/// lost there is the media-level guarantee, not the copy.
+/// An optional step (a full flush, the richer set of file dates) may be
+/// refused with a wider set of errnos than a link: some filesystems answer
+/// `EINVAL` or `ENOTTY` to `F_FULLFSYNC`, and all that is lost there is the
+/// extra fidelity, not the copy.
 #[cfg(unix)]
-fn is_sync_unsupported(err: &io::Error) -> bool {
+pub(crate) fn is_optional_step_unsupported(err: &io::Error) -> bool {
     match err.raw_os_error() {
         Some(code) => is_unsupported(err) || code == libc::EINVAL || code == libc::ENOTTY,
         None => false,
@@ -353,7 +359,7 @@ fn is_sync_unsupported(err: &io::Error) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_sync_unsupported(err: &io::Error) -> bool {
+pub(crate) fn is_optional_step_unsupported(err: &io::Error) -> bool {
     is_unsupported(err) || err.kind() == io::ErrorKind::InvalidInput
 }
 
@@ -361,9 +367,9 @@ fn is_sync_unsupported(err: &io::Error) -> bool {
 /// this asks for `F_FULLFSYNC` explicitly, because that is what std's
 /// `sync_all` does there and it fails hard when a filesystem refuses; the
 /// refusal is downgraded to `fsync(2)` and reported as [`SyncQuality::Fallback`].
-fn sync_durable(file: &File, path: &Path) -> Result<SyncQuality, IngestError> {
-    if let Err(e) = full_flush(file) {
-        if !is_sync_unsupported(&e) {
+fn sync_durable(file: &File, path: &Path, flush: Flusher) -> Result<SyncQuality, IngestError> {
+    if let Err(e) = flush(file) {
+        if !is_optional_step_unsupported(&e) {
             return Err(IngestError::io("flush the copy to disk", path, e));
         }
         plain_flush(file).map_err(|e| IngestError::io("flush the copy to disk", path, e))?;
@@ -643,7 +649,7 @@ mod tests {
         let data: Vec<u8> = (0..250_000).map(|i| ((i * 29 + 11) % 251) as u8).collect();
         fs::write(&src, &data).unwrap();
         let dst = dir.path().join("out/2026/DSC_0005.CR3");
-        let r = copy_impl_with(&src, &dst, true, no_links).unwrap();
+        let r = copy_impl_with(&src, &dst, true, no_links, full_flush).unwrap();
         assert_eq!(r.published, Publish::ExclusiveCopy);
         assert_eq!(fs::read(&dst).unwrap(), data, "the published bytes differ");
         assert_eq!(r.sha256, sha256_file(&dst).unwrap());
@@ -664,7 +670,7 @@ mod tests {
         let dst = dir.path().join("DSC.CR3");
         fs::write(&dst, b"someone else's photo").unwrap();
         assert!(matches!(
-            publish_exclusive(&tmp, &dst),
+            publish_exclusive(&tmp, &dst, full_flush),
             Err(IngestError::DestinationExists(p)) if p == dst
         ));
         assert_eq!(fs::read(&dst).unwrap(), b"someone else's photo");
@@ -683,7 +689,7 @@ mod tests {
         let src = dir.path().join("DSC_0006.CR3");
         fs::write(&src, b"photo bytes").unwrap();
         let dst = dir.path().join("out/DSC_0006.CR3");
-        let err = copy_impl_with(&src, &dst, true, denied).unwrap_err();
+        let err = copy_impl_with(&src, &dst, true, denied, full_flush).unwrap_err();
         assert!(
             matches!(err, IngestError::Io { op, .. } if op == "link the copy into place"),
             "{err}"
@@ -709,12 +715,13 @@ mod tests {
                 "errno {code} is a real failure"
             );
         }
-        // A full flush is refused with a wider set than a link: some
-        // filesystems answer EINVAL or ENOTTY, and only the media-level
-        // guarantee is lost, not the copy.
-        assert!(is_sync_unsupported(&errno(libc::EINVAL)));
-        assert!(is_sync_unsupported(&errno(libc::ENOTTY)));
-        assert!(!is_sync_unsupported(&errno(libc::ENOSPC)));
+        // An optional step is refused with a wider set than a link: some
+        // filesystems answer EINVAL or ENOTTY, and only the extra fidelity
+        // is lost, not the copy.
+        assert!(is_optional_step_unsupported(&errno(libc::EINVAL)));
+        assert!(is_optional_step_unsupported(&errno(libc::ENOTTY)));
+        assert!(!is_optional_step_unsupported(&errno(libc::ENOSPC)));
+        assert!(!is_optional_step_unsupported(&errno(libc::EACCES)));
     }
 
     #[test]
@@ -732,12 +739,116 @@ mod tests {
         assert!(text.contains("GONE.CR3"), "{text}");
     }
 
+    /// The exFAT path must behave the same for the unverified entry point:
+    /// no hard link, no overwrite, and the report says which way it landed.
+    #[cfg(unix)]
+    #[test]
+    fn an_unverified_copy_also_publishes_without_links_or_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0007.CR3");
+        let data: Vec<u8> = (0..300_000).map(|i| ((i * 13 + 5) % 251) as u8).collect();
+        fs::write(&src, &data).unwrap();
+        let dst = dir.path().join("out/DSC_0007.CR3");
+        let r = copy_impl_with(&src, &dst, false, no_links, full_flush).unwrap();
+        assert_eq!(r.published, Publish::ExclusiveCopy);
+        assert_eq!(fs::read(&dst).unwrap(), data);
+        assert_eq!(r.sha256, sha256_file(&dst).unwrap());
+        // A second copy to the same name refuses instead of replacing it.
+        assert!(matches!(
+            copy_impl_with(&src, &dst, false, no_links, full_flush),
+            Err(IngestError::DestinationExists(p)) if p == dst
+        ));
+        assert_eq!(fs::read(&dst).unwrap(), data);
+    }
+
+    /// A folder that cannot be created names that step, not just the errno.
+    #[test]
+    fn an_unusable_destination_folder_names_the_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0008.CR3");
+        fs::write(&src, b"photo bytes").unwrap();
+        // `out` is a file, so there is no folder to put the copy in.
+        let blocker = dir.path().join("out");
+        fs::write(&blocker, b"not a folder").unwrap();
+        let dst = blocker.join("DSC_0008.CR3");
+        let err = copy_verified(&src, &dst).unwrap_err();
+        assert!(
+            matches!(err, IngestError::Io { op, .. } if op == "create the destination folder"),
+            "{err}"
+        );
+        // The message names the folder it could not create, not only the errno.
+        let text = err.to_string();
+        assert!(
+            text.starts_with("create the destination folder failed for "),
+            "{text}"
+        );
+        assert!(text.contains("/out:"), "{text}");
+        assert!(src.exists(), "source must never be removed");
+    }
+
     #[test]
     fn a_durable_flush_succeeds_on_a_writable_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("flush.bin");
         let mut f = File::create(&path).unwrap();
         f.write_all(b"bytes to flush").unwrap();
-        assert_eq!(sync_durable(&f, &path).unwrap(), SyncQuality::Full);
+        assert_eq!(
+            sync_durable(&f, &path, full_flush).unwrap(),
+            SyncQuality::Full
+        );
+    }
+
+    /// A flusher that reports the filesystem refuses a full flush, the way
+    /// exFAT on macOS does (`ENOTSUP` for `F_FULLFSYNC`).
+    #[cfg(unix)]
+    fn refused_flush(_file: &File) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_full_flush_degrades_to_a_plain_flush_and_keeps_the_copy() {
+        fn link(tmp: &Path, dst: &Path) -> io::Result<()> {
+            fs::hard_link(tmp, dst)
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0009.CR3");
+        let data: Vec<u8> = (0..200_000).map(|i| ((i * 7 + 1) % 251) as u8).collect();
+        fs::write(&src, &data).unwrap();
+        let dst = dir.path().join("out/DSC_0009.CR3");
+        let r = copy_impl_with(&src, &dst, true, link, refused_flush).unwrap();
+        assert_eq!(r.sync, SyncQuality::Fallback);
+        assert_eq!(r.published, Publish::HardLink);
+        assert_eq!(fs::read(&dst).unwrap(), data, "the published bytes differ");
+        assert_eq!(r.sha256, sha256_file(&dst).unwrap());
+        assert!(src.exists(), "source must never be removed");
+
+        // The exFAT shape: no links and no full flush, both degrading, and
+        // the copy still lands verified.
+        let dst2 = dir.path().join("out/DSC_0009-2.CR3");
+        let r2 = copy_impl_with(&src, &dst2, true, no_links, refused_flush).unwrap();
+        assert_eq!(r2.sync, SyncQuality::Fallback);
+        assert_eq!(r2.published, Publish::ExclusiveCopy);
+        assert_eq!(fs::read(&dst2).unwrap(), data);
+        assert_eq!(r2.sha256, sha256_file(&dst2).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_flush_that_fails_for_a_real_reason_still_fails_the_copy() {
+        fn full(_file: &File) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::ENOSPC))
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("DSC_0010.CR3");
+        fs::write(&src, b"photo bytes").unwrap();
+        let dst = dir.path().join("out/DSC_0010.CR3");
+        let err = copy_impl_with(&src, &dst, true, no_links, full).unwrap_err();
+        assert!(
+            matches!(err, IngestError::Io { op, .. } if op == "flush the copy to disk"),
+            "{err}"
+        );
+        assert!(!dst.exists(), "a failed flush publishes nothing");
+        assert!(src.exists(), "source must never be removed");
     }
 }
