@@ -8,6 +8,9 @@ All notable, user-visible changes. Versions follow semantic versioning;
 ### Changed
 - The screenshot published with each release now shows a small sample shoot instead of an empty folder, so the sheet, its thumbnails and the filmstrip are visible doing their job.
 
+### Fixed
+- A photo whose file carries no EXIF at all no longer leaves the inspector saying it is still reading. The summary is read for every file when the folder opens, so an empty result now reads "No EXIF in this file".
+
 ## [0.1.12] — 2026-11-09
 
 ### Fixed
