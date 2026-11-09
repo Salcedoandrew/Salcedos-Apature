@@ -15,6 +15,7 @@ import os
 import random
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL.ExifTags import IFD
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
 
@@ -251,13 +252,39 @@ def city(w=900, h=600):
     return finish(ImageChops.screen(img, streak.filter(ImageFilter.GaussianBlur(1.8))), 0.26)
 
 
-SPECS = [("IMG_0412.jpg", dawn), ("IMG_0427.jpg", bokeh), ("IMG_0431.jpg", dunes),
-         ("IMG_0444.jpg", sea), ("IMG_0458.jpg", peaks), ("IMG_0463.jpg", night),
-         ("IMG_0471.jpg", city)]
+# Each sample carries the camera, lens and exposure the inspector reads: a
+# shoot with no EXIF in it leaves the panel saying it is still reading. The
+# dates match the file dates the screenshot workflow stamps on the copies.
+SHOTS = [
+    ("IMG_0412.jpg", dawn, ("Canon", "Canon EOS R5", "RF24-70mm F2.8 L IS USM", (1, 250), (28, 10), 200, (35, 1), "2026:09:12 06:14:22")),
+    ("IMG_0427.jpg", bokeh, ("Sony", "ILCE-7M4", "FE 35mm F1.4 GM", (1, 80), (14, 10), 800, (35, 1), "2026:09:13 19:42:05")),
+    ("IMG_0431.jpg", dunes, ("NIKON CORPORATION", "NIKON Z 8", "NIKKOR Z 24-120mm f/4 S", (1, 500), (80, 10), 100, (70, 1), "2026:09:14 16:05:40")),
+    ("IMG_0444.jpg", sea, ("FUJIFILM", "X-T5", "XF16-55mmF2.8 R LM WR", (1, 320), (80, 10), 160, (45, 1), "2026:09:15 18:31:12")),
+    ("IMG_0458.jpg", peaks, ("Canon", "Canon EOS R6m2", "RF70-200mm F2.8 L IS USM", (1, 400), (56, 10), 100, (150, 1), "2026:09:16 07:02:47")),
+    ("IMG_0463.jpg", night, ("Sony", "ILCE-7M4", "FE 16-35mm F2.8 GM", (25, 1), (28, 10), 3200, (16, 1), "2026:09:17 23:18:33")),
+    ("IMG_0471.jpg", city, ("NIKON CORPORATION", "NIKON Z 8", "NIKKOR Z 85mm f/1.8 S", (1, 125), (28, 10), 640, (85, 1), "2026:09:18 20:07:58")),
+]
+
+
+def exif_for(make, model, lens, exposure, fnumber, iso, focal, taken):
+    ex = Image.Exif()
+    ex[0x010F] = make
+    ex[0x0110] = model
+    ex[0x0132] = taken
+    ifd = ex.get_ifd(IFD.Exif)
+    ifd[0x9003] = taken
+    ifd[0x829A] = exposure
+    ifd[0x829D] = fnumber
+    ifd[0x8827] = iso
+    ifd[0xA434] = lens
+    ifd[0x920A] = focal
+    return ex
+
 
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
-    for name, fn in SPECS:
+    for name, fn, meta in SHOTS:
         im = fn()
-        im.save(os.path.join(OUT, name), quality=80, optimize=True, progressive=True)
+        im.save(os.path.join(OUT, name), quality=80, optimize=True, progressive=True,
+                exif=exif_for(*meta))
         print(f"{name} {im.size[0]}x{im.size[1]}")
