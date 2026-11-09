@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [Unreleased]
+## [0.1.12] — 2026-11-09
 
 ### Fixed
 - Copying photos to an exFAT card or drive works again. Such volumes refuse the hard link Apature used to put a finished copy in place, so every photo failed with "Operation not supported (os error 45)"; the copy is now finished without that link and still never replaces a file that is already at the destination. A copy that does fail says which step failed and on which file, and a flush the volume cannot fully honour is reported as a weaker sync instead of failing the photo.
