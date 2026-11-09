@@ -232,11 +232,13 @@ pub fn extract_one(
     Ok(path)
 }
 
-/// The Alic image compressor's settings, applied to one preview: the picture
-/// is decoded at full size and written again as a lossy JPEG at `quality` with
-/// 4:2:0 chroma, which is how libcaesium (the engine Alic runs) asks mozjpeg
-/// for a JPEG. Only the picture is re-written here; Exif, XMP, IPTC-IIM, ICC
-/// and the file dates are added afterwards by [`extract_one`] and
+/// The Alic image compressor's JPEG settings, applied to one preview: the
+/// picture is decoded at full size and written again as a lossy JPEG at
+/// `quality` with 4:2:0 chroma, the settings libcaesium hands mozjpeg when
+/// Alic compresses a JPEG. The encoder is the app's own rather than
+/// libcaesium itself, which is MozJPEG behind a native build this repository
+/// does not ship. Only the picture is re-written here; Exif, XMP, IPTC-IIM,
+/// ICC and the file dates are added afterwards by [`extract_one`] and
 /// [`with_metadata`], so those checkboxes still decide what the JPEG carries.
 fn compress_preview(jpeg: &[u8], quality: u8) -> Result<Vec<u8>, String> {
     let img = apature_preview::decode::decode_jpeg(jpeg, None)
