@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [Unreleased]
+## [0.1.16] — 2026-11-09
 
 ### Changed
 - Compress extracted JPEGs keeps the preview as it came out of the RAW whenever re-encoding at that quality would make it bigger, so the box can only ever save space.
