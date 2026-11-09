@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [Unreleased]
+## [0.1.13] — 2026-11-09
 
 ### Changed
 - The screenshot published with each release now shows a small sample shoot instead of an empty folder, so the sheet, its thumbnails and the filmstrip are visible doing their job.
