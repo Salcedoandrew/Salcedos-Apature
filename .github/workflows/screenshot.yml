@@ -32,6 +32,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build the tagged commit
         run: cargo build --release -p apature
+      - name: Lay out a small sample shoot
+        # The sheet is only worth looking at with photos in it, and a tag cut
+        # before the samples existed still needs them, so they come from main
+        # rather than from the checkout above.
+        run: |
+          git fetch --depth=1 origin main
+          git checkout FETCH_HEAD -- tools/screenshot/samples
+          mkdir -p /tmp/smoke
+          cp tools/screenshot/samples/*.jpg /tmp/smoke/
+          # Distinct capture dates, so the sheet sorts like a real shoot.
+          day=12
+          for f in /tmp/smoke/IMG_*.jpg; do
+            touch -t "202609${day}1030" "$f"
+            day=$((day + 1))
+          done
+          ls -la /tmp/smoke
       - name: Render the sheet with the headless harness
         run: |
           version="${TAG#v}"
