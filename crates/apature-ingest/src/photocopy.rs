@@ -371,15 +371,27 @@ pub fn copy_preserving(src: &Path, dst: &Path, replace: bool) -> Result<u64, Ing
         // using it; anything there is debris from a dead one.
         let _ = fs::remove_file(&tmp);
         let r = copy_verified(src, &tmp)?;
-        let done = copy_dates(src, &tmp).and_then(|_| fs::rename(&tmp, dst));
-        if let Err(e) = done {
+        if let Err(e) = copy_dates(src, &tmp) {
             let _ = fs::remove_file(&tmp);
-            return Err(e.into());
+            return Err(IngestError::io(
+                "keep the original's dates on the copy",
+                &tmp,
+                e,
+            ));
+        }
+        if let Err(e) = fs::rename(&tmp, dst) {
+            let _ = fs::remove_file(&tmp);
+            return Err(IngestError::io(
+                "move the finished copy into place",
+                &tmp,
+                e,
+            ));
         }
         return Ok(r.bytes);
     }
     let r = copy_verified(src, dst)?;
-    copy_dates(src, dst)?;
+    copy_dates(src, dst)
+        .map_err(|e| IngestError::io("keep the original's dates on the copy", dst, e))?;
     Ok(r.bytes)
 }
 
