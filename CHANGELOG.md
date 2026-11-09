@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [Unreleased]
+## [0.1.15] — 2026-11-09
 
 ### Added
 - Extract JPEG Previews can compress each extracted preview at the Alic image compressor's JPEG quality (80 by default), so the JPEGs arrive already the size an Alic pass would leave them.
