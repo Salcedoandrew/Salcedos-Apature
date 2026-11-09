@@ -39,20 +39,21 @@ jobs:
         run: |
           git fetch --depth=1 origin main
           git checkout FETCH_HEAD -- tools/screenshot/samples
-          mkdir -p /tmp/smoke
-          cp tools/screenshot/samples/*.jpg /tmp/smoke/
+          mkdir -p /tmp/sample-shoot
+          cp tools/screenshot/samples/*.jpg /tmp/sample-shoot/
           # Distinct capture dates, so the sheet sorts like a real shoot.
           day=12
-          for f in /tmp/smoke/IMG_*.jpg; do
+          for f in /tmp/sample-shoot/IMG_*.jpg; do
             touch -t "202609${day}1030" "$f"
             day=$((day + 1))
           done
-          ls -la /tmp/smoke
+          ls -la /tmp/sample-shoot
       - name: Render the sheet with the headless harness
         run: |
           version="${TAG#v}"
-          mkdir -p /tmp/smoke
-          target/release/apature /tmp/smoke --screenshot "/tmp/Apature-${version}.png" --frames 60
+          # Enough frames for the thumbnails and the inspector's metadata to
+          # settle before the shot is taken.
+          target/release/apature /tmp/sample-shoot --screenshot "/tmp/Apature-${version}.png" --frames 150
           ls -la "/tmp/Apature-${version}.png"
         env:
           TAG: ${{ inputs.tag }}
