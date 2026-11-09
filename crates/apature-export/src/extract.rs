@@ -40,7 +40,8 @@ pub struct ExtractOptions {
     /// Compress extracted JPEGs: re-encode each preview at the Alic image
     /// compressor's JPEG quality, so the file comes out of the RAW the size
     /// an Alic pass would leave it. Off by default, because a preview's own
-    /// bytes are the closest thing to what the camera rendered.
+    /// bytes are the closest thing to what the camera rendered, and a preview
+    /// the re-encode would grow is kept as it came out of the RAW.
     pub compress: bool,
     /// JPEG quality for that re-encode (Alic's JPEG Quality slider, 1-100).
     pub compress_quality: u8,
@@ -186,7 +187,7 @@ pub fn extract_one(
     // new bytes keep it. A preview the decoder cannot read is still worth
     // writing as it came out of the RAW, so that is a warning, not a skip.
     let jpeg = if opts.compress {
-        match compress_preview(&jpeg, opts.compress_quality) {
+        match compressed_preview(&jpeg, opts.compress_quality) {
             Ok(smaller) => smaller,
             Err(e) => {
                 log::warn!("{}: {e}", raw.display());
@@ -240,11 +241,23 @@ pub fn extract_one(
 /// does not ship. Only the picture is re-written here; Exif, XMP, IPTC-IIM,
 /// ICC and the file dates are added afterwards by [`extract_one`] and
 /// [`with_metadata`], so those checkboxes still decide what the JPEG carries.
-fn compress_preview(jpeg: &[u8], quality: u8) -> Result<Vec<u8>, String> {
+/// The preview to write: the re-encode when it is smaller, otherwise the
+/// camera's own bytes.
+///
+/// Compression is only worth having when it compresses. A preview the body
+/// already wrote small (a JPEG-quality RAW preview, or a heavily squeezed
+/// one) can come out bigger at quality 80, and ticking a box must never do
+/// that to a file, so the original bytes are kept instead.
+fn compressed_preview(jpeg: &[u8], quality: u8) -> Result<Vec<u8>, String> {
     let img = apature_preview::decode::decode_jpeg(jpeg, None)
         .map_err(|e| format!("can't re-encode the preview: {e}"))?;
-    apature_preview::decode::encode_jpeg(&img, quality.clamp(1, 100))
-        .map_err(|e| format!("can't re-encode the preview: {e}"))
+    let encoded = apature_preview::decode::encode_jpeg(&img, quality.clamp(1, 100))
+        .map_err(|e| format!("can't re-encode the preview: {e}"))?;
+    Ok(if encoded.len() < jpeg.len() {
+        encoded
+    } else {
+        jpeg.to_vec()
+    })
 }
 
 /// Free output names for one extraction run, shared across the parallel
@@ -850,6 +863,50 @@ mod tests {
         assert!(small.len() < got.len(), "{} vs {}", small.len(), got.len());
         assert_eq!(
             apature_preview::jpeg_info::dimensions(&small),
+            Some((400, 200))
+        );
+    }
+
+    #[test]
+    fn compression_keeps_the_preview_when_re_encoding_would_grow_it() {
+        let d = tempfile::tempdir().unwrap();
+        // A preview the camera already squeezed: quality 5 survives a
+        // re-encode at 80 only by getting bigger.
+        let jpeg = busy_preview_jpeg(5);
+        let raw = d.path().join("E.NEF");
+        fake_nef(&raw, &jpeg);
+        let items = shoot(d.path());
+
+        let opts = ExtractOptions {
+            compress: true,
+            compress_quality: 80,
+            ..ExtractOptions::default()
+        };
+        let out = run(&items, None, &opts);
+        assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+        let got = fs::read(&out.extracted[0].1).unwrap();
+
+        // The picture is the preview's, byte for byte, and the file is only
+        // bigger by the metadata the other checkboxes add.
+        let picture = |b: &[u8]| {
+            let segs = header_segments(b).unwrap();
+            let end = segs
+                .iter()
+                .filter(|s| (0xE0..=0xEF).contains(&s.marker))
+                .map(|s| s.end)
+                .max()
+                .unwrap_or(2);
+            b[end..].to_vec()
+        };
+        assert_eq!(picture(&got), picture(&jpeg));
+        assert!(
+            got.len() < jpeg.len() + 4096,
+            "{} vs {}",
+            got.len(),
+            jpeg.len()
+        );
+        assert_eq!(
+            apature_preview::jpeg_info::dimensions(&got),
             Some((400, 200))
         );
     }
