@@ -1453,6 +1453,9 @@ impl App {
                     if o.cancelled {
                         text += " · cancelled";
                     }
+                    if o.saved > 0 {
+                        text += &format!(" · saved {}", ui::dialogs::human_bytes(o.saved));
+                    }
                     let into_open = self.folder.as_ref().is_some_and(|f| {
                         o.extracted
                             .iter()

@@ -75,6 +75,30 @@ pub struct ExtractOutcome {
     /// (photo, why it was skipped)
     pub skipped: Vec<(PathBuf, String)>,
     pub cancelled: bool,
+    /// Previews whose picture was replaced by a smaller re-encode.
+    pub compressed: usize,
+    /// Bytes those re-encodes took off the previews, summed. Zero when
+    /// Compress extracted JPEGs is off, or when nothing got smaller.
+    pub saved: u64,
+}
+
+/// One extracted preview: where it went, and what compression did to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Extracted {
+    /// The JPEG written.
+    pub path: PathBuf,
+    /// The preview's bytes as they came out of the RAW.
+    pub preview_bytes: u64,
+    /// The picture's bytes as written, before metadata was spliced in.
+    pub picture_bytes: u64,
+}
+
+impl Extracted {
+    /// Bytes Compress extracted JPEGs took off this preview; zero when the
+    /// camera's own bytes were written.
+    pub fn saved(&self) -> u64 {
+        self.preview_bytes.saturating_sub(self.picture_bytes)
+    }
 }
 
 /// The RAW file of a photo (its RAW half for a RAW+JPEG pair).
@@ -108,7 +132,7 @@ pub fn run_extract(
     let on_progress = Mutex::new(on_progress);
 
     enum One {
-        Done(PathBuf, PathBuf),
+        Done(PathBuf, Extracted),
         Skipped(PathBuf, String),
         /// Never started: Cancel was already set when its turn came.
         NotStarted,
@@ -130,7 +154,7 @@ pub fn run_extract(
                         None => raw.parent().map(Path::to_path_buf).unwrap_or_default(),
                     };
                     match extract_one(item, raw, &dir, opts, scheme, &names) {
-                        Ok(jpg) => One::Done(raw.to_path_buf(), jpg),
+                        Ok(done) => One::Done(raw.to_path_buf(), done),
                         Err(why) => One::Skipped(raw.to_path_buf(), why),
                     }
                 }
@@ -150,7 +174,13 @@ pub fn run_extract(
     let mut out = ExtractOutcome::default();
     for one in results {
         match one {
-            One::Done(raw, jpg) => out.extracted.push((raw, jpg)),
+            One::Done(raw, done) => {
+                if done.saved() > 0 {
+                    out.compressed += 1;
+                    out.saved += done.saved();
+                }
+                out.extracted.push((raw, done.path));
+            }
             One::Skipped(p, why) => out.skipped.push((p, why)),
             One::NotStarted => {}
         }
@@ -168,7 +198,8 @@ pub fn run_extract(
     out
 }
 
-/// One RAW's preview into `dir`; returns the JPEG's path.
+/// One RAW's preview into `dir`; returns where it went and what compression
+/// did to it.
 pub fn extract_one(
     item: &PhotoItem,
     raw: &Path,
@@ -176,12 +207,13 @@ pub fn extract_one(
     opts: &ExtractOptions,
     scheme: &ColorClassScheme,
     names: &FreeNames,
-) -> Result<PathBuf, String> {
+) -> Result<Extracted, String> {
     let (_, jpeg) = apature_preview::extract(raw, Prefer::Largest, usize::MAX)
         .map_err(|_| "no JPEG preview inside".to_string())?;
     if !apature_preview::jpeg_info::is_jpeg(&jpeg) {
         return Err("no JPEG preview inside".into());
     }
+    let preview_bytes = jpeg.len() as u64;
     // Compression happens before the metadata splice, so Preserve Exif,
     // Copy IPTC/XMP and Embed ICC Profile still decide what travels and the
     // new bytes keep it. A preview the decoder cannot read is still worth
@@ -197,6 +229,7 @@ pub fn extract_one(
     } else {
         jpeg
     };
+    let picture_bytes = jpeg.len() as u64;
     let file = with_metadata(item, raw, &jpeg, opts, scheme)?;
     fs::create_dir_all(dir).map_err(|e| format!("can't create the folder: {e}"))?;
     let stem = raw
@@ -230,7 +263,11 @@ pub fn extract_one(
         }
         let _ = f.set_times(times);
     }
-    Ok(path)
+    Ok(Extracted {
+        path,
+        preview_bytes,
+        picture_bytes,
+    })
 }
 
 /// The Alic image compressor's JPEG settings, applied to one preview: the
@@ -853,14 +890,25 @@ mod tests {
             Some("2026:10:06 14:03:11")
         );
 
+        // The run says what it saved.
+        assert_eq!(out.compressed, 1);
+        assert!(out.saved > 0);
+
         // The quality in the dialog is the one the encoder is given.
         let at_40 = ExtractOptions {
             compress: true,
             compress_quality: 40,
             ..ExtractOptions::default()
         };
-        let small = fs::read(&run(&items, None, &at_40).extracted[0].1).unwrap();
+        let out_40 = run(&items, None, &at_40);
+        let small = fs::read(&out_40.extracted[0].1).unwrap();
         assert!(small.len() < got.len(), "{} vs {}", small.len(), got.len());
+        assert!(
+            out_40.saved > out.saved,
+            "{} vs {}",
+            out_40.saved,
+            out.saved
+        );
         assert_eq!(
             apature_preview::jpeg_info::dimensions(&small),
             Some((400, 200))
@@ -899,6 +947,9 @@ mod tests {
             b[end..].to_vec()
         };
         assert_eq!(picture(&got), picture(&jpeg));
+        // Nothing was saved, and the run says so.
+        assert_eq!(out.saved, 0);
+        assert_eq!(out.compressed, 0);
         assert!(
             got.len() < jpeg.len() + 4096,
             "{} vs {}",
