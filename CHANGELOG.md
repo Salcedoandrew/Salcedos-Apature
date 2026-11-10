@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [Unreleased]
+## [0.1.17] — 2026-11-09
 
 ### Added
 - Extract JPEG Previews now says how much space compression saved when it finishes, both in the dialog's summary and in the status line.
