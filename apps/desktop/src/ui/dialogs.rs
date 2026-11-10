@@ -218,6 +218,9 @@ fn extract_previews(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Ve
                 if o.cancelled {
                     line += " · cancelled";
                 }
+                if o.saved > 0 {
+                    line += &format!(" · saved {}", human_bytes(o.saved));
+                }
                 ui.label(RichText::new(line).size(12.0).color(t.text));
                 egui::ScrollArea::vertical().max_height(160.0).auto_shrink([false, true]).show(ui, |ui| {
                     for (src, why) in o.skipped.iter().take(40) {
@@ -341,7 +344,7 @@ fn expand_home(text: &str) -> std::path::PathBuf {
     }
 }
 
-fn human_bytes(b: u64) -> String {
+pub(crate) fn human_bytes(b: u64) -> String {
     let b = b as f64;
     if b >= 1e9 {
         format!("{:.1} GB", b / 1e9)
