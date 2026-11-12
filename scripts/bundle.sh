@@ -79,12 +79,15 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -m1 -o '"Developer ID Application: [^"]*"' | tr -d '"' || true)"
 fi
 if [[ -n "$IDENTITY" ]]; then
-  codesign --force --deep --options runtime --timestamp \
+  # No --deep: it is deprecated, and the bundle holds no nested bundles to
+  # sign — one executable, an icon and a plist, all covered by signing the
+  # .app itself.
+  codesign --force --options runtime --timestamp \
     --entitlements apps/desktop/assets/entitlements.plist \
     --sign "$IDENTITY" "$APP"
   echo "signed with $IDENTITY"
 else
-  codesign --force --deep --sign - "$APP" >/dev/null
+  codesign --force --sign - "$APP" >/dev/null
   echo "ad-hoc signed (no Developer ID Application certificate found)"
 fi
 echo "built $APP (version $VERSION, build $BUILD)"

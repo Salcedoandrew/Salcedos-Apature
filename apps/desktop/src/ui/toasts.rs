@@ -78,7 +78,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                 };
                 egui::Frame::NONE
                     .fill(t.raised.gamma_multiply(a))
-                    .stroke(Stroke::new(1.0, stroke.gamma_multiply(a)))
+                    .stroke(Stroke::new(1.0_f32, stroke.gamma_multiply(a)))
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(S3 as i8, S2 as i8))
                     .show(ui, |ui| {

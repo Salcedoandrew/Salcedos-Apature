@@ -9,6 +9,7 @@ description = "Card ingest: plan first, verified copies to one or two destinatio
 apature-core.workspace = true
 apature-metadata.workspace = true
 thiserror.workspace = true
+log.workspace = true
 sha2.workspace = true
 serde.workspace = true
 serde_json = "1"

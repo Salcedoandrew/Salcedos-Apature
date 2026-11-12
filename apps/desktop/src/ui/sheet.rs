@@ -147,7 +147,7 @@ fn draw_cell(app: &App, ui: &egui::Ui, t: &Theme, rect: Rect, idx: usize) {
         p.rect_stroke(
             img_rect.shrink(0.5),
             CornerRadius::ZERO,
-            Stroke::new(1.0, t.select_photo.gamma_multiply(sel)),
+            Stroke::new(1.0_f32, t.select_photo.gamma_multiply(sel)),
             StrokeKind::Inside,
         );
     }
@@ -165,7 +165,7 @@ fn draw_cell(app: &App, ui: &egui::Ui, t: &Theme, rect: Rect, idx: usize) {
         p.rect_stroke(
             ring,
             CornerRadius::ZERO,
-            Stroke::new(2.0, t.accent),
+            Stroke::new(2.0_f32, t.accent),
             StrokeKind::Inside,
         );
     }
@@ -198,7 +198,7 @@ fn draw_cell(app: &App, ui: &egui::Ui, t: &Theme, rect: Rect, idx: usize) {
             p.rect_stroke(
                 img_rect.translate(Vec2::new(3.0, -3.0)),
                 CornerRadius::same(2),
-                Stroke::new(1.0, t.line_strong),
+                Stroke::new(1.0_f32, t.line_strong),
                 StrokeKind::Outside,
             );
         }
@@ -213,7 +213,7 @@ fn draw_cell(app: &App, ui: &egui::Ui, t: &Theme, rect: Rect, idx: usize) {
         p.rect_stroke(
             r,
             CornerRadius::same(5),
-            Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.6)),
+            Stroke::new(1.0_f32, Color32::WHITE.gamma_multiply(0.6)),
             StrokeKind::Inside,
         );
         p.text(
@@ -264,7 +264,7 @@ fn draw_cell(app: &App, ui: &egui::Ui, t: &Theme, rect: Rect, idx: usize) {
                 Pos2::new(rect.left(), y1 + 7.0),
                 Pos2::new(rect.left() + w, y1 + 7.0),
             ],
-            Stroke::new(1.0, t.muted),
+            Stroke::new(1.0_f32, t.muted),
         );
     }
     let y2 = y1 + 15.0;

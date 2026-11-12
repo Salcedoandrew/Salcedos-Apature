@@ -48,7 +48,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
             ui.columns(2, |cols| {
                 // ---- Source ----
                 let ui = &mut cols[0];
-                egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(S4 as i8)).show(ui, |ui| {
+                egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0_f32, t.line)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(S4 as i8)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     super::eyebrow(ui, t, "Source");
                     ui.add_space(S2);
@@ -121,7 +121,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
 
                 // ---- Destinations ----
                 let ui = &mut cols[1];
-                egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(S4 as i8)).show(ui, |ui| {
+                egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0_f32, t.line)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(S4 as i8)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     super::eyebrow(ui, t, "Destinations");
                     ui.add_space(S2);
@@ -256,7 +256,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
 
         ui.add_space(S3);
         // ---- Plan ----
-        egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(S4 as i8)).show(ui, |ui| {
+        egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0_f32, t.line)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(S4 as i8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             super::eyebrow(ui, t, "Plan");
             ui.add_space(S2);
@@ -343,7 +343,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
             // Finished: the card's border flashes accent and settles (600 ms).
             let flash = 1.0 - super::motion::progress(r.done_since, app.anim(0.6));
             let border = super::motion::lerp_color(t.line, t.accent, flash);
-            egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, border)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(S4 as i8)).show(ui, |ui| {
+            egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0_f32, border)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(S4 as i8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 super::eyebrow(ui, t, "Progress");
                 let total = plan.entries.len().max(1);

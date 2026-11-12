@@ -344,13 +344,28 @@ impl Prefs {
             return;
         }
         if let Some(dir) = p.parent() {
-            let _ = fs::create_dir_all(dir);
-        }
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let tmp = p.with_extension("json.tmp");
-            if fs::write(&tmp, text).is_ok() {
-                let _ = fs::rename(tmp, p);
+            if let Err(e) = fs::create_dir_all(dir) {
+                log::error!("could not save prefs: cannot create {}: {e}", dir.display());
+                return;
             }
+        }
+        let text = match serde_json::to_string_pretty(self) {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!("could not save prefs: cannot serialize settings: {e}");
+                return;
+            }
+        };
+        let tmp = p.with_extension("json.tmp");
+        if let Err(e) = fs::write(&tmp, text) {
+            log::error!("could not save prefs: cannot write {}: {e}", tmp.display());
+            return;
+        }
+        if let Err(e) = fs::rename(&tmp, &p) {
+            log::error!(
+                "could not save prefs: cannot move {} into place: {e}",
+                tmp.display()
+            );
         }
     }
 

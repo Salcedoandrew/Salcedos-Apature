@@ -116,9 +116,26 @@ impl Pool {
         });
         for i in 0..threads.max(1) {
             let s = shared.clone();
+            // A worker that dies outside a job (a panic in the queue code,
+            // not in a decode) restarts instead of shrinking the pool.
+            // worker_loop never returns on its own, so Ok here means it
+            // somehow exited and the thread can end; Err means it panicked
+            // and a fresh worker takes its place. The pause keeps a worker
+            // that panics on entry from restarting in a hot loop.
             let started = std::thread::Builder::new()
                 .name(format!("decode-{i}"))
-                .spawn(move || worker_loop(s));
+                .spawn(move || loop {
+                    let s2 = s.clone();
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        worker_loop(s2)
+                    }))
+                    .is_ok()
+                    {
+                        break;
+                    }
+                    log::error!("decode worker died; restarting it");
+                    std::thread::sleep(Duration::from_millis(100));
+                });
             if let Err(e) = started {
                 log::error!("could not start the worker: {e}");
             }
@@ -194,6 +211,17 @@ fn lock_queue(s: &Shared) -> std::sync::MutexGuard<'_, Queue> {
     s.q.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What a caught panic said, for the log and the failed result.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 fn worker_loop(s: Arc<Shared>) {
     loop {
         let (job, warm) = {
@@ -230,7 +258,30 @@ fn worker_loop(s: Arc<Shared>) {
                 }
             }
         };
-        let done = run(&s, &job);
+        // A decode that panics (a crafted file, an index the header lied
+        // about) must not take the photo and the worker with it: the panic
+        // becomes a failed result for that photo, the queue is cleaned up
+        // below exactly as for a normal result, and the worker carries on
+        // with the next job.
+        let done = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&s, &job))) {
+            Ok(done) => done,
+            Err(payload) => {
+                let msg = panic_message(&payload);
+                log::error!("decode panicked for {}: {msg}", job.path.display());
+                Done {
+                    idx: job.idx,
+                    kind: job.kind,
+                    generation: job.generation,
+                    path: job.path.clone(),
+                    result: Err(format!("decode panicked: {msg}")),
+                    exif: None,
+                    millis: 0.0,
+                    cache_hit: false,
+                    full: false,
+                    native: None,
+                }
+            }
+        };
         {
             let mut q = lock_queue(&s);
             q.inflight.remove(&(job.idx, job.kind));
@@ -442,5 +493,16 @@ mod tests {
         assert!(!d.belongs_to(8, Some(std::path::Path::new("/shoot/DSCF7641.RAF"))));
         // The slot no longer exists: dropped.
         assert!(!d.belongs_to(7, None));
+    }
+
+    #[test]
+    fn panic_message_reads_every_payload_kind() {
+        // Finding #6: a caught decode panic is reported, not swallowed.
+        let from_str: Box<dyn std::any::Any + Send> = Box::new("index out of bounds");
+        assert_eq!(panic_message(&from_str), "index out of bounds");
+        let from_string: Box<dyn std::any::Any + Send> = Box::new("explicit panic".to_string());
+        assert_eq!(panic_message(&from_string), "explicit panic");
+        let unknown: Box<dyn std::any::Any + Send> = Box::new(42u32);
+        assert_eq!(panic_message(&unknown), "unknown panic");
     }
 }

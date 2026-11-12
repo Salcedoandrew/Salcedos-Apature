@@ -56,7 +56,7 @@ fn section<R>(
     // Hairline between sections, like the sheet frames.
     let r = ui.available_rect_before_wrap();
     ui.painter()
-        .hline(r.x_range(), r.top(), egui::Stroke::new(1.0, t.line));
+        .hline(r.x_range(), r.top(), egui::Stroke::new(1.0_f32, t.line));
     ui.add_space(S2);
 }
 
@@ -509,7 +509,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     let r = resp.response.rect;
     ctx.layer_painter(egui::LayerId::background()).line_segment(
         [r.left_top(), r.left_bottom()],
-        egui::Stroke::new(1.0, t.line),
+        egui::Stroke::new(1.0_f32, t.line),
     );
     for c in cmds {
         app.dispatch(ctx, c);

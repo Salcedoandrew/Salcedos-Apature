@@ -28,14 +28,14 @@ pub fn button(
         p.rect_stroke(
             rect,
             CornerRadius::same(6),
-            Stroke::new(1.0, t.accent),
+            Stroke::new(1.0_f32, t.accent),
             StrokeKind::Inside,
         );
     } else if resp.hovered() {
         p.rect_filled(rect, CornerRadius::same(6), t.raised);
     }
     let fg = if selected { t.accent } else { t.text2 };
-    let s = Stroke::new(1.5, fg);
+    let s = Stroke::new(1.5_f32, fg);
     let g = Rect::from_center_size(rect.center(), Vec2::new(16.0, 13.0));
     match icon {
         Icon::Sidebar => {
@@ -70,7 +70,7 @@ pub fn button(
 /// A 16×12 pt drive glyph: SD card for cameras and cards, a drive with an
 /// activity dot for external disks, a drive with a slot line for the Mac's own.
 pub fn volume_glyph(p: &egui::Painter, center: Pos2, kind: VolumeKind, color: egui::Color32) {
-    let s = Stroke::new(1.4, color);
+    let s = Stroke::new(1.4_f32, color);
     match kind {
         VolumeKind::Camera => {
             // Card: 10×13, top-right corner cut, three contact ticks at the top.
@@ -88,7 +88,7 @@ pub fn volume_glyph(p: &egui::Painter, center: Pos2, kind: VolumeKind, color: eg
                 let x = r.left() + 2.5 + i as f32 * 2.5;
                 p.line_segment(
                     [Pos2::new(x, r.top() + 2.0), Pos2::new(x, r.top() + 4.5)],
-                    Stroke::new(1.0, color),
+                    Stroke::new(1.0_f32, color),
                 );
             }
         }
@@ -105,7 +105,7 @@ pub fn volume_glyph(p: &egui::Painter, center: Pos2, kind: VolumeKind, color: eg
                     Pos2::new(r.left() + 3.0, r.center().y),
                     Pos2::new(r.right() - 6.0, r.center().y),
                 ],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
             p.circle_filled(Pos2::new(r.right() - 3.5, r.center().y), 1.0, color);
         }
@@ -131,7 +131,7 @@ pub fn volume_chip(
         p.rect_stroke(
             rect,
             CornerRadius::same(6),
-            Stroke::new(1.0, t.accent),
+            Stroke::new(1.0_f32, t.accent),
             StrokeKind::Inside,
         );
     } else if resp.hovered() {
@@ -140,7 +140,7 @@ pub fn volume_chip(
         p.rect_stroke(
             rect,
             CornerRadius::same(6),
-            Stroke::new(1.0, t.line),
+            Stroke::new(1.0_f32, t.line),
             StrokeKind::Inside,
         );
     }
@@ -181,7 +181,7 @@ pub fn chip(ui: &mut egui::Ui, t: &Theme, label: &str, selected: bool) -> egui::
         p.rect_stroke(
             rect,
             CornerRadius::same(6),
-            Stroke::new(1.0, t.accent),
+            Stroke::new(1.0_f32, t.accent),
             StrokeKind::Inside,
         );
     } else if resp.hovered() {
@@ -190,7 +190,7 @@ pub fn chip(ui: &mut egui::Ui, t: &Theme, label: &str, selected: bool) -> egui::
         p.rect_stroke(
             rect,
             CornerRadius::same(6),
-            Stroke::new(1.0, t.line),
+            Stroke::new(1.0_f32, t.line),
             StrokeKind::Inside,
         );
     }
@@ -210,7 +210,7 @@ pub fn workspace_glyph(
     color: egui::Color32,
 ) {
     use crate::commands::Workspace;
-    let s = Stroke::new(1.3, color);
+    let s = Stroke::new(1.3_f32, color);
     let g = Rect::from_center_size(center, Vec2::new(14.0, 11.0));
     match w {
         Workspace::Sheet => {
@@ -331,7 +331,7 @@ pub fn workspace_button(
         p.rect_stroke(
             rect,
             CornerRadius::same(6),
-            Stroke::new(1.0, t.accent),
+            Stroke::new(1.0_f32, t.accent),
             StrokeKind::Inside,
         );
     } else if resp.hovered() && enabled {
@@ -377,7 +377,7 @@ pub fn focus_ring(p: &egui::Painter, rect: Rect, t: &Theme, resp: &egui::Respons
         p.rect_stroke(
             rect.expand(2.0),
             CornerRadius::same(8),
-            Stroke::new(2.0, t.accent),
+            Stroke::new(2.0_f32, t.accent),
             StrokeKind::Outside,
         );
     }

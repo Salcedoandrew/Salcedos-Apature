@@ -3,6 +3,22 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [Unreleased]
+
+### Fixed
+- A photo that breaks the decoder no longer takes its worker thread down with it. The photo is marked as failed and the next one still loads.
+- Settings, the delivery list and the list of already-imported photos now say so in the log when they cannot be saved or read, instead of failing silently. A list that cannot be read is treated as empty, so "only new photos" may offer photos that were already copied.
+- A JPEG header claiming an impossible size is now refused before decoding, instead of asking the machine for gigabytes of memory.
+- Renaming photos that gets interrupted halfway now says which files the rollback could not put back, instead of failing silently.
+- Dates read from a photo are now checked properly: an impossible date such as 31 February is ignored instead of being silently turned into 3 March.
+- The signing certificate used by releases is no longer written into the checkout folder; it lives in the runner's temporary folder and is removed when the job ends.
+- The release build no longer uses the deprecated deep-signing flag.
+- The copy summary now says how many files kept their dates only in part, instead of hiding the warnings in the log.
+- Delivery over FTP no longer uses a client library with a known command-injection flaw, and a compression library with a build-script leak is updated; both are now on versions the advisory database clears.
+
+### Changed
+- The release checks now include a dependency audit, so a library with a known vulnerability fails the build before it ships.
+
 ## [0.1.17] — 2026-11-09
 
 ### Added

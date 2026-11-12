@@ -701,7 +701,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     let r = resp.response.rect;
     ctx.layer_painter(egui::LayerId::background()).line_segment(
         [r.right_top(), r.right_bottom()],
-        egui::Stroke::new(1.0, t.line),
+        egui::Stroke::new(1.0_f32, t.line),
     );
     for c in cmds {
         app.dispatch(ctx, c);
