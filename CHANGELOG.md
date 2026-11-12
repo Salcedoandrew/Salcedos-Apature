@@ -3,7 +3,7 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
-## [Unreleased]
+## [0.1.18] — 2026-11-12
 
 ### Fixed
 - A photo that breaks the decoder no longer takes its worker thread down with it. The photo is marked as failed and the next one still loads.
