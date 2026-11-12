@@ -47,6 +47,19 @@ pub fn decode_jpeg(bytes: &[u8], max_long_side: Option<u32>) -> Result<Rgb, Deco
         .info()
         .ok_or(jpeg_decoder::Error::Format("no header".into()))?;
     let (mut w, mut h) = (info.width as u32, info.height as u32);
+    // A header can claim any size up to 65535×65535 (about 12.9 GB of RGB),
+    // and the decoder allocates that before a single pixel is read. No
+    // single-shot camera sensor is anywhere near 250 megapixels, so a header
+    // past that is a lie or a corrupt file: refuse it before decoding.
+    // Stitched panoramas come through the scaled path, whose target size
+    // bounds the decode; this check bounds the header claim itself.
+    const MAX_PIXELS: u64 = 250_000_000;
+    let claimed = w as u64 * h as u64;
+    if w == 0 || h == 0 || claimed > MAX_PIXELS {
+        return Err(DecodeError::Jpeg(jpeg_decoder::Error::Format(format!(
+            "refusing absurd JPEG dimensions {w}×{h} (over {MAX_PIXELS} pixels)"
+        ))));
+    }
     if let Some(t) = max_long_side {
         let long = w.max(h);
         if long > t && long > 0 {
@@ -201,5 +214,31 @@ mod tests {
         assert_eq!((r.width, r.height), (20, 40));
         assert_eq!(rotate(src.clone(), 1), src);
         assert_eq!(rotate(src.clone(), 3).data.len(), src.data.len());
+    }
+
+    #[test]
+    fn absurd_header_dimensions_are_refused_without_allocating() {
+        // Finding #9b: a header claiming 65535×65535 would make the decoder
+        // allocate about 12.9 GB before reading a pixel. The cap refuses it
+        // as an error instead. These bytes are only a header (SOI, APP0,
+        // SOF0) — there is no scan data, and the decode must fail before
+        // any of it is needed.
+        let bytes: Vec<u8> = vec![
+            0xFF, 0xD8, // SOI
+            0xFF, 0xE0, 0x00, 0x10, // APP0, length 16
+            b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+            0x00, // 14 bytes of JFIF payload
+            0xFF, 0xC0, 0x00, 0x11, // SOF0, length 17
+            0x08, // precision
+            0xFF, 0xFF, // height 65535
+            0xFF, 0xFF, // width 65535
+            0x03, // 3 components
+            0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+        ];
+        let err = decode_jpeg(&bytes, None).unwrap_err();
+        assert!(
+            err.to_string().contains("absurd"),
+            "expected the dimension cap, got: {err}"
+        );
     }
 }

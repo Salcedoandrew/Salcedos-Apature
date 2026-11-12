@@ -398,6 +398,13 @@ fn copy_photos(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Com
                 if o.cancelled {
                     line += " · cancelled";
                 }
+                if !o.warnings.is_empty() {
+                    line += &format!(
+                        " · dates not kept on {} file{}",
+                        o.warnings.len(),
+                        if o.warnings.len() == 1 { "" } else { "s" }
+                    );
+                }
                 if o.pad_written > 0 {
                     line += &format!(" · caption written to {} sidecar{}", o.pad_written, if o.pad_written == 1 { "" } else { "s" });
                 }

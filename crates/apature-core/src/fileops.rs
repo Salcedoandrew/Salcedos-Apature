@@ -123,6 +123,48 @@ fn is_one_of(p: &Path, sources: &HashSet<PathBuf>) -> bool {
     }
 }
 
+/// Undo a list of renames, newest first. A rename that itself fails is
+/// logged with both paths and returned as a stuck pair, so the caller can
+/// tell the user which files are stranded where instead of the rollback
+/// failing silently. Each pair is (where the file is now, where it belongs).
+fn roll_back(moves: &[(PathBuf, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
+    let mut stuck = Vec::new();
+    for (from, to) in moves.iter().rev() {
+        if let Err(e) = std::fs::rename(from, to) {
+            log::warn!(
+                "rollback failed: could not move {} back to {}: {e}",
+                from.display(),
+                to.display()
+            );
+            stuck.push((from.clone(), to.clone()));
+        }
+    }
+    stuck
+}
+
+/// The error for a failed rename, with any files the rollback could not
+/// restore named in the message.
+fn rollback_error(
+    path: PathBuf,
+    err: std::io::Error,
+    stuck: Vec<(PathBuf, PathBuf)>,
+) -> FileOpError {
+    if stuck.is_empty() {
+        return FileOpError::Io(path, err);
+    }
+    let stranded: Vec<String> = stuck
+        .iter()
+        .map(|(from, to)| format!("{} (belongs at {})", from.display(), to.display()))
+        .collect();
+    FileOpError::Io(
+        path,
+        std::io::Error::new(
+            err.kind(),
+            format!("{err}; rollback could not restore: {}", stranded.join(", ")),
+        ),
+    )
+}
+
 /// Execute a plan. Two phases (every source to a temporary name, then every
 /// temporary to its target) so swaps and case changes work; any failure rolls
 /// back what was done. Returns the completed moves.
@@ -144,22 +186,23 @@ pub fn rename(plan: &RenamePlan) -> Result<Vec<(PathBuf, PathBuf)>, FileOpError>
             // A staging file stranded by a crashed run: renaming over it
             // would silently destroy that content, so fail instead and
             // roll back what was staged.
-            for (f, t) in staged.iter().rev() {
-                let _ = std::fs::rename(t, f);
-            }
-            return Err(FileOpError::Io(
+            let back: Vec<(PathBuf, PathBuf)> =
+                staged.iter().map(|(f, t)| (t.clone(), f.clone())).collect();
+            let stuck = roll_back(&back);
+            return Err(rollback_error(
                 tmp,
                 std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     "staging file from an interrupted rename",
                 ),
+                stuck,
             ));
         }
         if let Err(e) = std::fs::rename(from, &tmp) {
-            for (f, t) in staged.iter().rev() {
-                let _ = std::fs::rename(t, f);
-            }
-            return Err(FileOpError::Io(from.clone(), e));
+            let back: Vec<(PathBuf, PathBuf)> =
+                staged.iter().map(|(f, t)| (t.clone(), f.clone())).collect();
+            let stuck = roll_back(&back);
+            return Err(rollback_error(from.clone(), e, stuck));
         }
         staged.push((from.clone(), tmp));
     }
@@ -167,25 +210,26 @@ pub fn rename(plan: &RenamePlan) -> Result<Vec<(PathBuf, PathBuf)>, FileOpError>
     for ((_, tmp), (_, to)) in staged.iter().zip(plan.moves.iter()) {
         if to.exists() {
             // Appeared since planning: roll everything back.
-            for (t, d) in done.iter().rev() {
-                let _ = std::fs::rename(d, t);
-            }
-            for (f, t) in staged.iter().rev() {
-                let _ = std::fs::rename(t, f);
-            }
-            return Err(FileOpError::Io(
+            let back_done: Vec<(PathBuf, PathBuf)> =
+                done.iter().map(|(t, d)| (d.clone(), t.clone())).collect();
+            let mut stuck = roll_back(&back_done);
+            let back: Vec<(PathBuf, PathBuf)> =
+                staged.iter().map(|(f, t)| (t.clone(), f.clone())).collect();
+            stuck.extend(roll_back(&back));
+            return Err(rollback_error(
                 to.clone(),
                 std::io::Error::new(std::io::ErrorKind::AlreadyExists, "appeared during rename"),
+                stuck,
             ));
         }
         if let Err(e) = std::fs::rename(tmp, to) {
-            for (t, d) in done.iter().rev() {
-                let _ = std::fs::rename(d, t);
-            }
-            for (f, t) in staged.iter().rev() {
-                let _ = std::fs::rename(t, f);
-            }
-            return Err(FileOpError::Io(to.clone(), e));
+            let back_done: Vec<(PathBuf, PathBuf)> =
+                done.iter().map(|(t, d)| (d.clone(), t.clone())).collect();
+            let mut stuck = roll_back(&back_done);
+            let back: Vec<(PathBuf, PathBuf)> =
+                staged.iter().map(|(f, t)| (t.clone(), f.clone())).collect();
+            stuck.extend(roll_back(&back));
+            return Err(rollback_error(to.clone(), e, stuck));
         }
         done.push((tmp.clone(), to.clone()));
     }

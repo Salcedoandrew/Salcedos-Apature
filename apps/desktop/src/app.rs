@@ -365,22 +365,63 @@ fn delivered_path() -> PathBuf {
 }
 
 fn load_delivered() -> HashMap<PathBuf, SentRecord> {
-    std::fs::read_to_string(delivered_path())
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    // A missing file is a first delivery and stays silent. A file that is
+    // there but cannot be read or parsed means the delivery history is
+    // lost — worth a warning, not a silent empty map.
+    let p = delivered_path();
+    match std::fs::read_to_string(&p) {
+        Ok(t) => match serde_json::from_str(&t) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!(
+                    "delivered.json at {} is unreadable ({e}); delivery history starts empty",
+                    p.display()
+                );
+                HashMap::new()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(e) => {
+            log::warn!(
+                "delivered.json at {} cannot be read ({e}); delivery history starts empty",
+                p.display()
+            );
+            HashMap::new()
+        }
+    }
 }
 
 fn save_delivered(map: &HashMap<PathBuf, SentRecord>) {
     let p = delivered_path();
     if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(t) = serde_json::to_string(map) {
-        let tmp = p.with_extension("json.tmp");
-        if std::fs::write(&tmp, t).is_ok() {
-            let _ = std::fs::rename(&tmp, &p);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            log::error!(
+                "could not save delivered.json: cannot create {}: {e}",
+                dir.display()
+            );
+            return;
         }
+    }
+    let t = match serde_json::to_string(map) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("could not save delivered.json: cannot serialize: {e}");
+            return;
+        }
+    };
+    let tmp = p.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, t) {
+        log::error!(
+            "could not save delivered.json: cannot write {}: {e}",
+            tmp.display()
+        );
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &p) {
+        log::error!(
+            "could not save delivered.json: cannot move {} into place: {e}",
+            tmp.display()
+        );
     }
 }
 
@@ -5415,7 +5456,7 @@ impl App {
         p.rect_stroke(
             r.shrink(S4),
             egui::CornerRadius::same(10),
-            egui::Stroke::new(2.0, t.accent),
+            egui::Stroke::new(2.0_f32, t.accent),
             egui::StrokeKind::Inside,
         );
         p.text(
@@ -5722,14 +5763,14 @@ impl eframe::App for App {
                 egui::pos2(r.left(), r.top() + ui::tokens::TOOLBAR_H),
                 egui::pos2(r.right(), r.top() + ui::tokens::TOOLBAR_H),
             ],
-            egui::Stroke::new(1.0, t.line),
+            egui::Stroke::new(1.0_f32, t.line),
         );
         ctx.layer_painter(egui::LayerId::background()).line_segment(
             [
                 egui::pos2(r.left(), r.bottom() - ui::tokens::STATUS_H),
                 egui::pos2(r.right(), r.bottom() - ui::tokens::STATUS_H),
             ],
-            egui::Stroke::new(1.0, t.line),
+            egui::Stroke::new(1.0_f32, t.line),
         );
 
         self.draw_drop_overlay(ctx, &t);

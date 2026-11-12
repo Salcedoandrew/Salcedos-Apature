@@ -48,7 +48,7 @@ fn section(ui: &mut egui::Ui, t: &Theme, title: &str) {
     ui.add_space(S2);
     let r = ui.available_rect_before_wrap();
     ui.painter()
-        .hline(r.x_range(), r.top(), egui::Stroke::new(1.0, t.line));
+        .hline(r.x_range(), r.top(), egui::Stroke::new(1.0_f32, t.line));
     ui.add_space(S3);
     super::eyebrow(ui, t, title);
     ui.add_space(S1);
@@ -256,9 +256,9 @@ fn body(app: &mut App, ctx: &egui::Context, t: &Theme, cmds: &mut Vec<Command>) 
                         let p = ui.painter();
                         p.circle_filled(rect.center(), 9.0, swatch.accent);
                         if selected {
-                            p.circle_stroke(rect.center(), 11.0, egui::Stroke::new(2.0, t.text));
+                            p.circle_stroke(rect.center(), 11.0, egui::Stroke::new(2.0_f32, t.text));
                         } else if resp.hovered() {
-                            p.circle_stroke(rect.center(), 11.0, egui::Stroke::new(1.0, t.line_strong));
+                            p.circle_stroke(rect.center(), 11.0, egui::Stroke::new(1.0_f32, t.line_strong));
                         }
                         if resp.clicked() {
                             app.prefs.accent = a;

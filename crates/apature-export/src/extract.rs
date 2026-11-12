@@ -591,6 +591,29 @@ fn local_time(s: &str) -> Option<SystemTime> {
     if !(1971..=9999).contains(&y) || !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
         return None;
     }
+    // mktime silently normalises out-of-range fields (2026:02:31 becomes
+    // 3 March), so validate them here instead of trusting it: a camera that
+    // wrote an impossible date gets no capture time, not a wrong one. The
+    // same check guards the non-Unix days-from-civil branch below.
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days_in_month = match mo {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    if d > days_in_month
+        || !(0..=23).contains(&h)
+        || !(0..=59).contains(&mi)
+        || !(0..=59).contains(&se)
+    {
+        return None;
+    }
     #[cfg(unix)]
     let secs = {
         // SAFETY: mktime only reads/normalises the struct we own.
@@ -1008,5 +1031,19 @@ mod tests {
         assert!(out.extracted.is_empty());
         assert_eq!(out.skipped[0].1, "no JPEG preview inside");
         assert!(!d.path().join("C.jpg").exists());
+    }
+
+    #[test]
+    fn impossible_exif_dates_are_rejected_not_normalised() {
+        // Finding #9f: mktime used to turn 2026:02:31 into 3 March.
+        assert_eq!(local_time("2026:02:31 10:00:00"), None);
+        assert_eq!(local_time("2026:02:29 10:00:00"), None); // 2026 is not a leap year
+        assert_eq!(local_time("2026:04:31 10:00:00"), None);
+        assert_eq!(local_time("2026:10:06 24:00:00"), None);
+        assert_eq!(local_time("2026:10:06 14:60:00"), None);
+        assert_eq!(local_time("2026:10:06 14:03:60"), None);
+        // But a real leap day and a normal date still parse.
+        assert!(local_time("2024:02:29 10:00:00").is_some());
+        assert!(local_time("2026:10:06 14:03:11").is_some());
     }
 }

@@ -27,7 +27,7 @@ fn card<R>(
 ) -> R {
     egui::Frame::NONE
         .fill(t.panel)
-        .stroke(egui::Stroke::new(1.0, stroke))
+        .stroke(egui::Stroke::new(1.0_f32, stroke))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(egui::Margin::same(S4 as i8))
         .show(ui, |ui| {

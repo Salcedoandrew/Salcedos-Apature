@@ -58,7 +58,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                         p.rect_stroke(
                             rect.shrink(1.0),
                             CornerRadius::ZERO,
-                            Stroke::new(2.0, t.accent),
+                            Stroke::new(2.0_f32, t.accent),
                             StrokeKind::Inside,
                         );
                     }
@@ -89,7 +89,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
         ctx.layer_painter(egui::LayerId::background()).hline(
             r.x_range(),
             r.top(),
-            Stroke::new(1.0, t.line),
+            Stroke::new(1.0_f32, t.line),
         );
     }
     for c in cmds {

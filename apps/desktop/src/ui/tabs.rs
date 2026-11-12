@@ -54,7 +54,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                         p.rect_stroke(
                             hl,
                             CornerRadius::same(6),
-                            Stroke::new(1.0, t.line_strong),
+                            Stroke::new(1.0_f32, t.line_strong),
                             egui::StrokeKind::Inside,
                         );
                     } else if resp.hovered() {

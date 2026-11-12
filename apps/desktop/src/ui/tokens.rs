@@ -165,26 +165,26 @@ impl Theme {
         v.override_text_color = Some(self.text);
         v.hyperlink_color = self.accent;
         v.selection.bg_fill = self.accent_wash;
-        v.selection.stroke = egui::Stroke::new(1.0, self.accent);
+        v.selection.stroke = egui::Stroke::new(1.0_f32, self.accent);
         v.widgets.noninteractive.bg_fill = self.panel;
-        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.line);
-        v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.text2);
+        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, self.line);
+        v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, self.text2);
         v.widgets.inactive.bg_fill = self.raised;
         v.widgets.inactive.weak_bg_fill = self.raised;
-        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, self.line);
-        v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, self.text2);
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, self.line);
+        v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, self.text2);
         v.widgets.hovered.bg_fill = self.raised;
         v.widgets.hovered.weak_bg_fill = self.raised;
-        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, self.line_strong);
-        v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, self.text);
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, self.line_strong);
+        v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, self.text);
         v.widgets.active.bg_fill = self.accent_wash;
         v.widgets.active.weak_bg_fill = self.accent_wash;
-        v.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.accent);
-        v.widgets.active.fg_stroke = egui::Stroke::new(1.0, self.text);
+        v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, self.accent);
+        v.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, self.text);
         v.widgets.open.bg_fill = self.raised;
         v.widgets.open.weak_bg_fill = self.raised;
-        v.widgets.open.bg_stroke = egui::Stroke::new(1.0, self.line_strong);
-        v.widgets.open.fg_stroke = egui::Stroke::new(1.0, self.text);
+        v.widgets.open.bg_stroke = egui::Stroke::new(1.0_f32, self.line_strong);
+        v.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, self.text);
         for w in [
             &mut v.widgets.noninteractive,
             &mut v.widgets.inactive,
@@ -196,7 +196,7 @@ impl Theme {
         }
         v.window_corner_radius = egui::CornerRadius::same(8);
         v.menu_corner_radius = egui::CornerRadius::same(8);
-        v.window_stroke = egui::Stroke::new(1.0, self.line);
+        v.window_stroke = egui::Stroke::new(1.0_f32, self.line);
         v.window_shadow = egui::epaint::Shadow {
             offset: [0, 8],
             blur: 24,

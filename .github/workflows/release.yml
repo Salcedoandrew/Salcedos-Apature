@@ -29,12 +29,17 @@ jobs:
       - name: Import the Developer ID certificate (when provided)
         if: env.P12 != ''
         run: |
-          echo "$P12" | base64 --decode > cert.p12
+          # The decoded certificate never lands in the checkout: $RUNNER_TEMP
+          # is outside the workspace, and the step after this one removes it.
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security create-keychain -p ci build.keychain
           security default-keychain -s build.keychain
           security unlock-keychain -p ci build.keychain
-          security import cert.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/cert.p12" -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+      - name: Remove the decoded certificate
+        if: always() && env.P12 != ''
+        run: rm -f "$RUNNER_TEMP/cert.p12"
       - name: Store notary credentials (when provided)
         if: env.APPLE_ID != ''
         run: xcrun notarytool store-credentials apature --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD"

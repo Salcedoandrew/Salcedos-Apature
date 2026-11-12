@@ -319,6 +319,7 @@ dependencies = [
  "apature-core",
  "apature-metadata",
  "libc",
+ "log",
  "rayon",
  "serde",
  "serde_json",

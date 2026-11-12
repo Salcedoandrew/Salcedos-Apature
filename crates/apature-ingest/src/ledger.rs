@@ -19,11 +19,30 @@ pub struct Ledger {
 
 impl Ledger {
     pub fn load(path: &Path) -> Ledger {
-        let seen = fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
-            .map(|v| v.into_iter().collect())
-            .unwrap_or_default();
+        // A missing file is a first run and stays silent. A file that is
+        // there but cannot be read or parsed is not silent: the ledger is
+        // what "only new photos" trusts, and an empty ledger re-offers
+        // photos already copied, so the loss is worth a warning in the log.
+        let seen = match fs::read_to_string(path) {
+            Ok(t) => match serde_json::from_str::<Vec<String>>(&t) {
+                Ok(v) => v.into_iter().collect(),
+                Err(e) => {
+                    log::warn!(
+                        "ingest ledger at {} is unreadable ({e}); treating it as empty — 'only new photos' will re-offer photos already copied",
+                        path.display()
+                    );
+                    BTreeSet::new()
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(e) => {
+                log::warn!(
+                    "ingest ledger at {} cannot be read ({e}); treating it as empty — 'only new photos' will re-offer photos already copied",
+                    path.display()
+                );
+                BTreeSet::new()
+            }
+        };
         Ledger {
             path: Some(path.to_path_buf()),
             seen,
