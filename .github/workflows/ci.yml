@@ -52,6 +52,19 @@ jobs:
         run: cargo clippy -p apature-core -p apature-preview -p apature-metadata -p apature-ingest -p apature-export -p apature-deliver -p apature-cli --all-targets -- -D warnings
       - run: cargo test --workspace --exclude apature
 
+  audit:
+    # A dependency with a known vulnerability fails the build before it
+    # merges or ships. Unmaintained and yanked crates are warnings only:
+    # they are mostly transitive, and failing on them would block every PR
+    # until an upstream project moves.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   desktop-macos-check:
     # The desktop is checked, the libraries are tested, and nothing is release
     # built: enough to catch a PR that breaks macOS-only code or macOS file

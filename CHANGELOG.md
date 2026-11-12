@@ -14,6 +14,7 @@ All notable, user-visible changes. Versions follow semantic versioning;
 - The signing certificate used by releases is no longer written into the checkout folder; it lives in the runner's temporary folder and is removed when the job ends.
 - The release build no longer uses the deprecated deep-signing flag.
 - The copy summary now says how many files kept their dates only in part, instead of hiding the warnings in the log.
+- Delivery over FTP no longer uses a client library with a known command-injection flaw, and a compression library with a build-script leak is updated; both are now on versions the advisory database clears.
 
 ### Changed
 - The release checks now include a dependency audit, so a library with a known vulnerability fails the build before it ships.

@@ -26,6 +26,12 @@ jobs:
           fetch-depth: 0 # the build number is the commit count
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The CI audit job covers pushes and pull requests, but a tag can be
+      # cut from anywhere: a release never ships with a dependency the
+      # advisory database flags.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Import the Developer ID certificate (when provided)
         if: env.P12 != ''
         run: |

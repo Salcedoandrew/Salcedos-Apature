@@ -9,7 +9,7 @@ description = "Send exported photos to a desk: FTP, FTPS and SFTP"
 thiserror.workspace = true
 log.workspace = true
 serde.workspace = true
-suppaftp = { version = "6", features = ["native-tls"] }
+suppaftp = { version = "10", features = ["native-tls"] }
 ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 
 [dev-dependencies]
