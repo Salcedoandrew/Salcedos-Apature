@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  checks: write # rustsec/audit-check creates a check run (run 43325466639 failed without it)
 
 jobs:
   dmg:
