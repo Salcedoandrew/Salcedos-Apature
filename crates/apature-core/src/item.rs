@@ -7,7 +7,20 @@ use std::time::SystemTime;
 pub enum Kind {
     Raw,
     Jpeg,
+    /// A single-image TIFF or PNG. Neither carries an embedded JPEG preview,
+    /// so the preview crate decodes the file itself.
+    Tiff,
+    Png,
     Heic,
+}
+
+impl Kind {
+    /// True for the kinds the contact sheet lists. HEIC is recognised (so
+    /// ingest still copies camera HEICs) but not listed: the preview decoder
+    /// has no HEIC path, so its cells would be blank.
+    pub fn is_displayable_image(self) -> bool {
+        matches!(self, Kind::Raw | Kind::Jpeg | Kind::Tiff | Kind::Png)
+    }
 }
 
 /// Map a file extension (any case) to a [`Kind`]. Unknown extensions return `None`.
@@ -16,6 +29,8 @@ pub fn kind_for_extension(ext: &str) -> Option<Kind> {
         "nef" | "nrw" | "cr2" | "cr3" | "crw" | "arw" | "srf" | "sr2" | "dng" | "raf" | "orf"
         | "rw2" | "rwl" | "pef" | "srw" | "3fr" | "fff" | "iiq" | "x3f" => Some(Kind::Raw),
         "jpg" | "jpeg" | "jpe" => Some(Kind::Jpeg),
+        "tif" | "tiff" => Some(Kind::Tiff),
+        "png" => Some(Kind::Png),
         "heic" | "heif" | "hif" => Some(Kind::Heic),
         _ => None,
     }
@@ -143,7 +158,16 @@ mod tests {
         }
         assert_eq!(kind_for_extension("jpg"), Some(Kind::Jpeg));
         assert_eq!(kind_for_extension("Jpeg"), Some(Kind::Jpeg));
+        assert_eq!(kind_for_extension("TIF"), Some(Kind::Tiff));
+        assert_eq!(kind_for_extension("tiff"), Some(Kind::Tiff));
+        assert_eq!(kind_for_extension("png"), Some(Kind::Png));
         assert_eq!(kind_for_extension("heic"), Some(Kind::Heic));
+        assert!(Kind::Raw.is_displayable_image());
+        assert!(Kind::Png.is_displayable_image());
+        assert!(
+            !Kind::Heic.is_displayable_image(),
+            "the decoder has no HEIC path"
+        );
         assert_eq!(kind_for_extension("xmp"), None);
         assert_eq!(kind_for_extension("txt"), None);
     }

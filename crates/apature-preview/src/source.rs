@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 
-use crate::decode::{decode_jpeg, DecodeError, Rgb};
+use crate::decode::{decode_jpeg, thumbnail, DecodeError, Rgb};
 use crate::embedded::{find_embedded_jpegs, pick, rgb_thumbnail, EmbeddedJpeg, Prefer};
 
 #[derive(Debug, thiserror::Error)]
@@ -47,7 +47,9 @@ impl Source {
         let mut candidates = find_embedded_jpegs(&map);
         let mut encoded = None;
         if candidates.is_empty() {
-            if let Some((c, jpeg)) = encode_rgb_thumbnail(&map) {
+            if let Some((c, jpeg)) =
+                encode_rgb_thumbnail(&map).or_else(|| decode_flat_image(path, &map))
+            {
                 candidates.push(c);
                 encoded = Some(jpeg);
             }
@@ -134,6 +136,39 @@ pub fn list_all(path: &Path) -> Result<Vec<EmbeddedJpeg>, SourceError> {
     Ok(Source::open(path)?.candidates)
 }
 
+/// The largest preview built from a PNG or TIFF file. Its full decode is
+/// bounded so a 100-megapixel scan is not held in memory just to fill a cell.
+const FLAT_MAX_SIDE: u32 = 2048;
+
+/// PNG and single-image TIFF files have no embedded JPEG preview. Decode one
+/// directly and re-encode it as a JPEG so thumbnails and previews use the
+/// same path as every other file.
+fn decode_flat_image(path: &Path, data: &[u8]) -> Option<(EmbeddedJpeg, Vec<u8>)> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "png" | "tif" | "tiff") {
+        return None;
+    }
+    let img = image::load_from_memory(data).ok()?.to_rgb8();
+    let rgb = thumbnail(&Rgb::from_image(img), FLAT_MAX_SIDE);
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode(
+            &rgb.data,
+            rgb.width,
+            rgb.height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .ok()?;
+    let c = EmbeddedJpeg {
+        offset: 0,
+        length: jpeg.len(),
+        width: rgb.width,
+        height: rgb.height,
+        source: format!("{ext} decoded"),
+    };
+    Some((c, jpeg))
+}
+
 /// Re-encode a RAW's uncompressed RGB thumbnail as a JPEG (quality 90).
 fn encode_rgb_thumbnail(data: &[u8]) -> Option<(EmbeddedJpeg, Vec<u8>)> {
     let t = rgb_thumbnail(data)?;
@@ -149,4 +184,21 @@ fn encode_rgb_thumbnail(data: &[u8]) -> Option<(EmbeddedJpeg, Vec<u8>)> {
         source: format!("{}:RGB thumbnail (re-encoded)", t.source),
     };
     Some((c, jpeg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn png_without_embedded_jpeg_decodes_and_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flat.png");
+        let img = image::RgbImage::from_pixel(40, 30, image::Rgb([10, 20, 30]));
+        img.save(&path).unwrap();
+        let src = Source::open(&path).unwrap();
+        let rgb = src.decode_for(320).unwrap();
+        assert_eq!((rgb.width, rgb.height), (40, 30));
+        assert!(rgb.data.chunks(3).all(|p| p == [10, 20, 30]));
+    }
 }

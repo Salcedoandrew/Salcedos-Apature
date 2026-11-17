@@ -10,7 +10,7 @@ apature-core.workspace = true
 thiserror.workspace = true
 memmap2.workspace = true
 jpeg-decoder.workspace = true
-image.workspace = true
+image = { workspace = true, features = ["png", "tiff"] }
 
 [dev-dependencies]
 tempfile.workspace = true

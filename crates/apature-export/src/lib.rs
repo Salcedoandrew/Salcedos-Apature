@@ -171,6 +171,8 @@ pub enum ExportError {
     NoPixels(PathBuf),
     #[error("{0}: HEIC export is not supported yet")]
     Heic(PathBuf),
+    #[error("{0}: TIFF and PNG export is not supported yet")]
+    Unsupported(PathBuf),
     #[error("{0} exists; export does not overwrite")]
     Exists(PathBuf),
     #[error("{0}: {1}")]
@@ -303,6 +305,7 @@ fn pixel_source(item: &PhotoItem) -> Result<(PathBuf, bool), ExportError> {
     match item.primary.kind {
         Kind::Raw => Ok((item.primary.path.clone(), false)),
         Kind::Heic => Err(ExportError::Heic(item.primary.path.clone())),
+        Kind::Tiff | Kind::Png => Err(ExportError::Unsupported(item.primary.path.clone())),
         Kind::Jpeg => Ok((item.primary.path.clone(), true)),
     }
 }

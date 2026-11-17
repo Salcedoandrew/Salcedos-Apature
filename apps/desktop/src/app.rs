@@ -3304,8 +3304,20 @@ impl App {
         log::info!("open folder {}", dir.display());
         self.folder_unplugged = None;
         let t0 = Instant::now();
-        match apature_core::scan(dir, &ScanOptions::default()) {
-            Ok(items) => {
+        match apature_core::scan(
+            dir,
+            &ScanOptions {
+                recursive: self.prefs.scan_subfolders,
+            },
+        ) {
+            Ok(mut items) => {
+                // The listing shows image files only. HEIC is still scanned
+                // (ingest copies it), but this decoder has no HEIC path, so
+                // its cells are not listed.
+                items.retain(|it| it.primary.kind.is_displayable_image());
+                for (i, it) in items.iter_mut().enumerate() {
+                    it.id = i;
+                }
                 self.pool.clear_pending();
                 self.next_generation += 1;
                 self.generation = self.next_generation;

@@ -43,7 +43,6 @@ const INDENT: f32 = 12.0;
 
 #[derive(Clone, Copy)]
 enum Glyph {
-    Box,
     Folder,
     Home,
     Volume(crate::platform::VolumeKind),
@@ -54,17 +53,6 @@ enum Disclosure {
     None,
     Closed,
     Open,
-}
-
-fn row(
-    ui: &mut egui::Ui,
-    t: &Theme,
-    label: &str,
-    count: Option<usize>,
-    selected: bool,
-) -> egui::Response {
-    let id = ui.next_auto_id();
-    draw_row(ui, t, id, label, count, selected, Glyph::Box, None, false).0
 }
 
 /// One sidebar row. With `tree` = Some((depth, disclosure)) it is a tree row:
@@ -132,14 +120,6 @@ fn draw_row(
         egui::Rect::from_center_size(egui::pos2(x + 6.0, rect.center().y), egui::vec2(12.0, 12.0));
     match glyph_kind {
         Glyph::Volume(kind) => super::icons::volume_glyph(p, glyph.center(), kind, fg),
-        Glyph::Box => {
-            p.rect_stroke(
-                glyph,
-                egui::CornerRadius::same(3),
-                egui::Stroke::new(1.5_f32, fg),
-                egui::StrokeKind::Inside,
-            );
-        }
         Glyph::Folder => folder_glyph(p, glyph, fg),
         Glyph::Home => home_glyph(p, glyph, fg),
     }
@@ -557,7 +537,6 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
     let favorites = app.prefs.favorites.clone();
     let volumes = app.volumes.clone();
     let kinds = app.volume_kinds.clone();
-    let recent = app.prefs.recent.clone();
     let mut pass = Pass {
         tree: &mut app.tree,
         ctx: ctx.clone(),
@@ -601,21 +580,6 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                             None,
                             crate::folder_tree::favorite_connected(f, &mounted),
                         );
-                    }
-                    ui.add_space(S3);
-                    super::eyebrow(ui, t, "Recent");
-                    for f in recent {
-                        if row(
-                            ui,
-                            t,
-                            &name_of(&f),
-                            None,
-                            current.as_deref() == Some(f.as_path()),
-                        )
-                        .clicked()
-                        {
-                            pass.cmds.push(Command::OpenFolder(f));
-                        }
                     }
                     ui.add_space(S3);
                     super::eyebrow(ui, t, "Folders");
