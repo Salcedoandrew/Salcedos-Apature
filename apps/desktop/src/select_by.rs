@@ -131,6 +131,8 @@ mod tests {
                 match k {
                     Kind::Raw => "NEF",
                     Kind::Jpeg => "JPG",
+                    Kind::Tiff => "TIF",
+                    Kind::Png => "PNG",
                     Kind::Heic => "HEIC",
                 }
             )),

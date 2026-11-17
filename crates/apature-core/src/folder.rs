@@ -91,7 +91,9 @@ pub fn scan(dir: &Path, opts: &ScanOptions) -> Result<Vec<PhotoItem>, ScanError>
         variants.sort_by_key(|v| match v.kind {
             Kind::Raw => 0,
             Kind::Jpeg => 1,
-            Kind::Heic => 2,
+            Kind::Tiff => 2,
+            Kind::Png => 3,
+            Kind::Heic => 4,
         });
         let primary = variants.remove(0);
         let stem = primary
@@ -156,6 +158,18 @@ mod tests {
             items.iter().map(|i| i.id).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
+    }
+
+    #[test]
+    fn tiff_and_png_are_photos_text_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.tif", "b.TIFF", "c.png", "d.xmp", "e.txt", "f.mp4"] {
+            fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let items = scan(dir.path(), &ScanOptions::default()).unwrap();
+        let names: Vec<_> = items.iter().map(|i| i.display_name()).collect();
+        assert_eq!(names, vec!["a.tif", "b.TIFF", "c.png"]);
+        assert!(items.iter().all(|i| i.primary.kind.is_displayable_image()));
     }
 
     #[test]

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use apature_core::{Kind, PhotoItem};
 use apature_metadata::jpeg_xmp::{header_segments, is_exif_segment, segment as jpeg_segment};
-use apature_metadata::{edits, exif, exif_write, iim, iptc, Iptc};
+use apature_metadata::{edits, exif, exif_write, iim, iptc, ExifSummary, Iptc};
 use apature_preview::{decode_jpeg, find_embedded_jpegs, rotate, Rgb};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -149,6 +149,25 @@ pub enum PixelSource {
     Jpeg,
     EmbeddedPreview,
     SystemRawDecode,
+    /// A TIFF or PNG decoded at full resolution by `image`'s own decoder.
+    FullDecode,
+}
+
+/// Source formats exported as themselves, never transcoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RasterFormat {
+    Tiff,
+    Png,
+}
+
+impl RasterFormat {
+    fn of(kind: Kind) -> Option<Self> {
+        match kind {
+            Kind::Tiff => Some(RasterFormat::Tiff),
+            Kind::Png => Some(RasterFormat::Png),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +190,10 @@ pub enum ExportError {
     NoPixels(PathBuf),
     #[error("{0}: HEIC export is not supported yet")]
     Heic(PathBuf),
+    #[error("{0}: {1}")]
+    Raster(PathBuf, image::ImageError),
+    #[error("{0}: {1}")]
+    Tiff(PathBuf, tiff::TiffError),
     #[error("{0} exists; export does not overwrite")]
     Exists(PathBuf),
     #[error("{0}: {1}")]
@@ -303,6 +326,9 @@ fn pixel_source(item: &PhotoItem) -> Result<(PathBuf, bool), ExportError> {
     match item.primary.kind {
         Kind::Raw => Ok((item.primary.path.clone(), false)),
         Kind::Heic => Err(ExportError::Heic(item.primary.path.clone())),
+        // Handled by `export_raster` before this is reached; a plain decode
+        // here would find no embedded JPEG and report NoPixels.
+        Kind::Tiff | Kind::Png => Ok((item.primary.path.clone(), false)),
         Kind::Jpeg => Ok((item.primary.path.clone(), true)),
     }
 }
@@ -323,6 +349,449 @@ fn resize_to(img: Rgb, long_side: u32) -> Rgb {
     };
     let out = image::imageops::resize(&src, w, h, image::imageops::FilterType::Lanczos3);
     Rgb::from_image(out)
+}
+
+/// Export a TIFF or PNG as itself: a full-resolution decode in the source's
+/// own channels and depth, the same crop/rotation edits and long-side resize
+/// as the JPEG path (through separate, generic helpers), then that format's
+/// encoder plus best-effort EXIF/XMP/IPTC.
+fn export_raster(
+    item: &PhotoItem,
+    iptc: &Iptc,
+    settings: &Settings,
+    format: RasterFormat,
+    out: &Path,
+    t0: std::time::Instant,
+) -> Result<Outcome, ExportError> {
+    let src_path = item.primary.path.clone();
+    let data = std::fs::read(&src_path).map_err(|e| ExportError::Io(src_path.clone(), e))?;
+    let summary = exif::from_bytes(&data).unwrap_or_default();
+    let edits = if settings.apply_edits {
+        edits::read(&item.sidecar_path()).unwrap_or_else(|e| {
+            log::warn!(
+                "{}: sidecar edits unreadable ({e}); exporting unedited",
+                src_path.display()
+            );
+            edits::Edits::default()
+        })
+    } else {
+        edits::Edits::default()
+    };
+    if edits.straightened_crop {
+        log::warn!(
+            "{}: the sidecar's crop has a straighten angle Apature cannot apply; exporting uncropped",
+            src_path.display()
+        );
+    }
+    // Deliberately not the 2048 px preview the contact sheet uses: an export
+    // at full size must be the whole file. The DynamicImage keeps the
+    // source's native channels and bit depth through every step below.
+    let decoded =
+        image::load_from_memory(&data).map_err(|e| ExportError::Raster(src_path.clone(), e))?;
+    let img = raster_edit(decoded, &edits, summary.orientation, settings.long_side);
+    let (width, height) = (img.width(), img.height());
+
+    // Metadata is best-effort: a block that cannot be built is logged and
+    // omitted, never turned into a failed export.
+    let xmp = if settings.write_xmp {
+        match iptc::apply("", iptc) {
+            Ok(packet) if !packet.trim().is_empty() => Some(packet.into_bytes()),
+            Ok(_) => None,
+            Err(e) => {
+                log::warn!("{}: XMP not written: {e}", src_path.display());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let iim = (settings.write_iim && !iptc.is_empty()).then(|| iim::datasets(iptc));
+
+    let (file, exif_written) = match format {
+        RasterFormat::Png => {
+            let file = encode_png(&img, &src_path)?;
+            let mut chunks = Vec::new();
+            let mut exif_written = false;
+            if settings.keep_exif {
+                let block = exif_write::minimal(
+                    &summary,
+                    width,
+                    height,
+                    iptc.creator
+                        .as_ref()
+                        .and_then(|c| c.first())
+                        .map(String::as_str),
+                    iptc.copyright.as_deref(),
+                );
+                chunks.push(png_chunk(b"eXIf", &block));
+                exif_written = true;
+            }
+            if let Some(packet) = &xmp {
+                chunks.push(png_itxt_xmp(packet));
+            }
+            (png_insert_after_ihdr(file, &chunks), exif_written)
+        }
+        RasterFormat::Tiff => {
+            let exif = settings.keep_exif.then_some(&summary);
+            let file = encode_tiff(img, &src_path, exif, xmp.as_deref(), iim.as_deref())?;
+            (file, settings.keep_exif)
+        }
+    };
+
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ExportError::Io(parent.to_path_buf(), e))?;
+    }
+    let (tmp, mut f) = reserve_temp(out).map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+    let result: Result<(), ExportError> = (|| {
+        use std::io::Write;
+        f.write_all(&file)
+            .map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+        f.sync_all()
+            .map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+        Ok(())
+    })();
+    drop(f);
+    if let Err(e) = result.and_then(|()| publish(&tmp, out, settings.overwrite)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let bytes_written = std::fs::metadata(out)
+        .map(|m| m.len())
+        .unwrap_or(file.len() as u64);
+    Ok(Outcome {
+        source: src_path,
+        pixels: PixelSource::FullDecode,
+        out: out.to_path_buf(),
+        width,
+        height,
+        bytes: bytes_written,
+        exif: if exif_written {
+            ExifSource::Minimal
+        } else {
+            ExifSource::None
+        },
+        edited: edits.is_edited(),
+        millis: t0.elapsed().as_millis(),
+    })
+}
+
+/// Crop, turn and resize a decoded image without leaving its native pixel
+/// type: every step works on the ImageBuffer's own channel type. This is the
+/// raster path's counterpart to `crop_to`/`rotate`/`resize_to`, which stay
+/// untouched for JPEG and RAW exports.
+fn raster_edit(
+    img: image::DynamicImage,
+    edits: &edits::Edits,
+    file_orientation: u32,
+    long_side: u32,
+) -> image::DynamicImage {
+    use image::DynamicImage as D;
+    macro_rules! carry {
+        ($buf:ident, $variant:ident, $edits:expr, $o:expr, $long:expr) => {{
+            let $buf = raster_edit_buffer($buf, $edits, $o, $long);
+            image::DynamicImage::$variant($buf)
+        }};
+    }
+    match img {
+        D::ImageLuma8(b) => carry!(b, ImageLuma8, edits, file_orientation, long_side),
+        D::ImageLumaA8(b) => carry!(b, ImageLumaA8, edits, file_orientation, long_side),
+        D::ImageRgb8(b) => carry!(b, ImageRgb8, edits, file_orientation, long_side),
+        D::ImageRgba8(b) => carry!(b, ImageRgba8, edits, file_orientation, long_side),
+        D::ImageLuma16(b) => carry!(b, ImageLuma16, edits, file_orientation, long_side),
+        D::ImageLumaA16(b) => carry!(b, ImageLumaA16, edits, file_orientation, long_side),
+        D::ImageRgb16(b) => carry!(b, ImageRgb16, edits, file_orientation, long_side),
+        D::ImageRgba16(b) => carry!(b, ImageRgba16, edits, file_orientation, long_side),
+        other => {
+            // 32-bit float sources have no native encoder here; keep all
+            // their channels by landing on 16-bit RGBA.
+            let b = other.to_rgba16();
+            carry!(b, ImageRgba16, edits, file_orientation, long_side)
+        }
+    }
+}
+
+fn raster_edit_buffer<P>(
+    img: image::ImageBuffer<P, Vec<P::Subpixel>>,
+    edits: &edits::Edits,
+    file_orientation: u32,
+    long_side: u32,
+) -> image::ImageBuffer<P, Vec<P::Subpixel>>
+where
+    P: image::Pixel + 'static,
+    P::Subpixel: 'static,
+{
+    let img = match edits.crop {
+        Some(c) => {
+            let (x, y, w, h) = c.pixels(img.width(), img.height());
+            image::imageops::crop_imm(&img, x, y, w, h).to_image()
+        }
+        None => img,
+    };
+    let img = raster_turn_buffer(img, edits.orientation_or(file_orientation));
+    raster_resize_buffer(img, long_side)
+}
+
+fn raster_turn_buffer<P>(
+    img: image::ImageBuffer<P, Vec<P::Subpixel>>,
+    orientation: u32,
+) -> image::ImageBuffer<P, Vec<P::Subpixel>>
+where
+    P: image::Pixel + 'static,
+    P::Subpixel: 'static,
+{
+    match orientation {
+        2 => image::imageops::flip_horizontal(&img),
+        3 => image::imageops::rotate180(&img),
+        4 => image::imageops::flip_vertical(&img),
+        5 => image::imageops::flip_horizontal(&image::imageops::rotate90(&img)),
+        6 => image::imageops::rotate90(&img),
+        7 => image::imageops::flip_horizontal(&image::imageops::rotate270(&img)),
+        8 => image::imageops::rotate270(&img),
+        _ => img,
+    }
+}
+
+fn raster_resize_buffer<P>(
+    img: image::ImageBuffer<P, Vec<P::Subpixel>>,
+    long_side: u32,
+) -> image::ImageBuffer<P, Vec<P::Subpixel>>
+where
+    P: image::Pixel + 'static,
+    P::Subpixel: 'static,
+{
+    let long = img.width().max(img.height());
+    if long_side == 0 || long == 0 || long <= long_side {
+        return img;
+    }
+    let s = long_side as f64 / long as f64;
+    let w = ((img.width() as f64) * s).round().max(1.0) as u32;
+    let h = ((img.height() as f64) * s).round().max(1.0) as u32;
+    image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3)
+}
+
+fn encode_png(img: &image::DynamicImage, src: &Path) -> Result<Vec<u8>, ExportError> {
+    let mut out = Vec::new();
+    {
+        let mut cursor = std::io::Cursor::new(&mut out);
+        img.write_to(&mut cursor, image::ImageFormat::Png)
+            .map_err(|e| ExportError::Raster(src.to_path_buf(), e))?;
+    }
+    Ok(out)
+}
+
+/// A PNG chunk: length, type, data, CRC (over type and data).
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + 12);
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    let mut crc_input = Vec::with_capacity(data.len() + 4);
+    crc_input.extend_from_slice(kind);
+    crc_input.extend_from_slice(data);
+    out.extend_from_slice(&png_crc32(&crc_input).to_be_bytes());
+    out
+}
+
+fn png_crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// `XML:com.adobe.xmp` iTXt chunk, uncompressed UTF-8 with empty language
+/// and translated-keyword fields.
+fn png_itxt_xmp(packet: &[u8]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(packet.len() + 24);
+    data.extend_from_slice(b"XML:com.adobe.xmp");
+    data.push(0); // keyword terminator
+    data.push(0); // compression flag: uncompressed
+    data.push(0); // compression method
+    data.push(0); // language tag (empty)
+    data.push(0); // translated keyword (empty)
+    data.extend_from_slice(packet);
+    png_chunk(b"iTXt", &data)
+}
+
+/// Insert chunks right after IHDR. A buffer that is not a PNG with IHDR first
+/// is returned untouched: metadata is best-effort.
+fn png_insert_after_ihdr(mut png: Vec<u8>, chunks: &[Vec<u8>]) -> Vec<u8> {
+    if chunks.is_empty() || png.len() < 16 || &png[12..16] != b"IHDR" {
+        return png;
+    }
+    let Ok(len) = <[u8; 4]>::try_from(&png[8..12]) else {
+        return png;
+    };
+    let at = 8 + 12 + u32::from_be_bytes(len) as usize;
+    if at > png.len() {
+        return png;
+    }
+    let tail = png.split_off(at);
+    for chunk in chunks {
+        png.extend_from_slice(chunk);
+    }
+    png.extend_from_slice(&tail);
+    png
+}
+
+/// TIFF needs a directory writer to carry real tags, so this path uses the
+/// `tiff` crate directly rather than `image`'s encoder. All tag writes are
+/// best-effort; only the pixel data and the container itself must succeed.
+fn encode_tiff(
+    img: image::DynamicImage,
+    src: &Path,
+    summary: Option<&ExifSummary>,
+    xmp: Option<&[u8]>,
+    iim: Option<&[u8]>,
+) -> Result<Vec<u8>, ExportError> {
+    use image::DynamicImage as D;
+    use tiff::encoder::colortype;
+    match img {
+        D::ImageLuma8(b) => tiff_buffer::<colortype::Gray8, _>(b, src, summary, xmp, iim),
+        D::ImageLuma16(b) => tiff_buffer::<colortype::Gray16, _>(b, src, summary, xmp, iim),
+        D::ImageRgb8(b) => tiff_buffer::<colortype::RGB8, _>(b, src, summary, xmp, iim),
+        D::ImageRgb16(b) => tiff_buffer::<colortype::RGB16, _>(b, src, summary, xmp, iim),
+        D::ImageRgba8(b) => tiff_buffer::<colortype::RGBA8, _>(b, src, summary, xmp, iim),
+        D::ImageRgba16(b) => tiff_buffer::<colortype::RGBA16, _>(b, src, summary, xmp, iim),
+        // TIFF has no gray+alpha colour type here: carry both channels as RGBA.
+        D::ImageLumaA8(b) => {
+            tiff_buffer::<colortype::RGBA8, _>(D::ImageLumaA8(b).to_rgba8(), src, summary, xmp, iim)
+        }
+        D::ImageLumaA16(b) => tiff_buffer::<colortype::RGBA16, _>(
+            D::ImageLumaA16(b).to_rgba16(),
+            src,
+            summary,
+            xmp,
+            iim,
+        ),
+        other => tiff_buffer::<colortype::RGBA16, _>(other.to_rgba16(), src, summary, xmp, iim),
+    }
+}
+
+fn tiff_buffer<C, P>(
+    buf: image::ImageBuffer<P, Vec<P::Subpixel>>,
+    src: &Path,
+    summary: Option<&ExifSummary>,
+    xmp: Option<&[u8]>,
+    iim: Option<&[u8]>,
+) -> Result<Vec<u8>, ExportError>
+where
+    C: tiff::encoder::colortype::ColorType,
+    P: image::Pixel<Subpixel = C::Inner> + 'static,
+    [C::Inner]: tiff::encoder::TiffValue,
+{
+    use tiff::tags::Tag;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    let mut tiff = tiff::encoder::TiffEncoder::new(&mut cursor)
+        .map_err(|e| ExportError::Tiff(src.to_path_buf(), e))?;
+
+    // EXIF is its own unchained directory written first; its offset becomes
+    // tag 34665 in the image directory below.
+    let exif_ptr = match summary {
+        Some(s) => match tiff.extra_directory() {
+            Ok(mut dir) => {
+                let mut wrote = false;
+                if let Some(v) = s.make.as_deref() {
+                    wrote |= dir.write_tag(Tag::Make, v).is_ok();
+                }
+                if let Some(v) = s.model.as_deref() {
+                    wrote |= dir.write_tag(Tag::Model, v).is_ok();
+                }
+                if let Some(v) = s.lens.as_deref() {
+                    wrote |= dir.write_tag(Tag::Unknown(0xA434), v).is_ok();
+                }
+                if let Some(v) = s.date_time_original.as_deref() {
+                    wrote |= dir.write_tag(Tag::Unknown(0x9003), v).is_ok();
+                }
+                if let Some((n, d)) = s.exposure_time {
+                    wrote |= dir
+                        .write_tag(Tag::Unknown(0x829A), tiff::encoder::Rational { n, d })
+                        .is_ok();
+                }
+                if let Some(v) = s.f_number {
+                    wrote |= dir
+                        .write_tag(
+                            Tag::Unknown(0x829D),
+                            tiff::encoder::Rational {
+                                n: (v * 10.0).round() as u32,
+                                d: 10,
+                            },
+                        )
+                        .is_ok();
+                }
+                if let Some(v) = s.iso {
+                    wrote |= dir
+                        .write_tag(Tag::Unknown(0x8827), v.min(u16::MAX as u32) as u16)
+                        .is_ok();
+                }
+                if let Some(v) = s.focal_length_mm {
+                    wrote |= dir
+                        .write_tag(
+                            Tag::Unknown(0x920A),
+                            tiff::encoder::Rational {
+                                n: (v * 10.0).round() as u32,
+                                d: 10,
+                            },
+                        )
+                        .is_ok();
+                }
+                wrote |= dir.write_tag(Tag::Software, "Apature").is_ok();
+                wrote |= dir.write_tag(Tag::Unknown(0xA002), buf.width()).is_ok();
+                wrote |= dir.write_tag(Tag::Unknown(0xA003), buf.height()).is_ok();
+                if !wrote {
+                    let _ = dir.finish();
+                    None
+                } else {
+                    match dir.finish_with_offsets() {
+                        Ok(ptr) => Some(ptr),
+                        Err(e) => {
+                            log::warn!("{}: EXIF directory not written: {e}", src.display());
+                            None
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("{}: EXIF directory not started: {e}", src.display());
+                None
+            }
+        },
+        None => None,
+    };
+
+    let mut image = tiff
+        .new_image::<C>(buf.width(), buf.height())
+        .map_err(|e| ExportError::Tiff(src.to_path_buf(), e))?;
+    if let Some(ptr) = exif_ptr {
+        if let Err(e) = image
+            .encoder()
+            .write_tag(Tag::ExifDirectory, ptr.pointer.0 as u32)
+        {
+            log::warn!("{}: EXIF pointer not written: {e}", src.display());
+        }
+    }
+    if let Some(packet) = xmp {
+        if let Err(e) = image.encoder().write_tag(Tag::Unknown(700), packet) {
+            log::warn!("{}: XMP tag not written: {e}", src.display());
+        }
+    }
+    if let Some(datasets) = iim {
+        if let Err(e) = image.encoder().write_tag(Tag::Unknown(33723), datasets) {
+            log::warn!("{}: IPTC tag not written: {e}", src.display());
+        }
+    }
+    image
+        .write_data(buf.as_raw())
+        .map_err(|e| ExportError::Tiff(src.to_path_buf(), e))?;
+    Ok(cursor.into_inner())
 }
 
 fn crop_to(img: Rgb, c: edits::Crop) -> Rgb {
@@ -391,6 +860,11 @@ pub fn export(
     let t0 = std::time::Instant::now();
     if out.exists() && !settings.overwrite {
         return Err(ExportError::Exists(out.to_path_buf()));
+    }
+    // TIFF and PNG keep their own format and are decoded at full size; their
+    // lossless encoders have no quality knob, so `settings.quality` is unused.
+    if let Some(format) = RasterFormat::of(item.primary.kind) {
+        return export_raster(item, iptc, settings, format, out, t0);
     }
     let (src_path, mut is_jpeg) = pixel_source(item)?;
     let mut pixels = if is_jpeg {
@@ -623,6 +1097,71 @@ mod tests {
                 modified: None,
             },
             secondary: Vec::new(),
+        }
+    }
+
+    fn item_of_kind(path: &Path, kind: Kind) -> PhotoItem {
+        let mut item = item_for(path);
+        item.primary.kind = kind;
+        item
+    }
+
+    #[test]
+    fn tiff_and_png_export_in_their_own_format_full_size_and_resized() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, kind) in [("shot.tif", Kind::Tiff), ("shot.png", Kind::Png)] {
+            let src = dir.path().join(name);
+            image::RgbImage::from_fn(120, 60, |x, y| {
+                image::Rgb([(x % 251) as u8, (y % 251) as u8, 40])
+            })
+            .save(&src)
+            .unwrap();
+            let item = item_of_kind(&src, kind);
+            // Full size (0), with a quality that would ruin a JPEG: the
+            // lossless encoders ignore it.
+            let out = dir.path().join("out").join(name);
+            let o = export(
+                &item,
+                &Iptc::default(),
+                &Settings {
+                    long_side: 0,
+                    quality: 1,
+                    ..Default::default()
+                },
+                &out,
+            )
+            .unwrap();
+            assert_eq!((o.width, o.height), (120, 60), "{name} full size");
+            assert_eq!(o.pixels, PixelSource::FullDecode);
+            let bytes = std::fs::read(&out).unwrap();
+            match kind {
+                Kind::Tiff => assert!(
+                    bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*"),
+                    "{name} is still a TIFF"
+                ),
+                _ => assert!(
+                    bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                    "{name} is still a PNG"
+                ),
+            }
+            let back = image::open(&out).unwrap();
+            assert_eq!((back.width(), back.height()), (120, 60));
+
+            // The long side still applies.
+            let small = dir.path().join("small").join(name);
+            let o = export(
+                &item,
+                &Iptc::default(),
+                &Settings {
+                    long_side: 30,
+                    ..Default::default()
+                },
+                &small,
+            )
+            .unwrap();
+            assert_eq!((o.width, o.height), (30, 15));
+            let back = image::open(&small).unwrap();
+            assert_eq!((back.width(), back.height()), (30, 15));
         }
     }
 
@@ -1032,5 +1571,154 @@ mod tests {
         let b = raw_tmp_name(Path::new("/b/X.NEF"));
         assert_ne!(a, b);
         assert!(a.ends_with("-X.jpg") && b.ends_with("-X.jpg"), "{a} {b}");
+    }
+
+    fn png_chunk_data<'a>(png: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+        let mut at = 8;
+        while at + 12 <= png.len() {
+            let len = u32::from_be_bytes(png[at..at + 4].try_into().ok()?) as usize;
+            let ty = png.get(at + 4..at + 8)?;
+            if ty == kind {
+                return png.get(at + 8..at + 8 + len);
+            }
+            at += 12 + len;
+        }
+        None
+    }
+
+    #[test]
+    fn a_16_bit_tiff_export_keeps_16_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("deep.tif");
+        let img = image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_fn(64, 32, |x, y| {
+            image::Rgb([x as u16 * 900, y as u16 * 1500, 60_000])
+        });
+        image::DynamicImage::ImageRgb16(img).save(&src).unwrap();
+        let out = dir.path().join("out/deep.tif");
+        let o = export(
+            &item_of_kind(&src, Kind::Tiff),
+            &Iptc::default(),
+            &Settings {
+                long_side: 0,
+                ..Default::default()
+            },
+            &out,
+        )
+        .unwrap();
+        assert_eq!((o.width, o.height), (64, 32));
+        let back = image::open(&out).unwrap();
+        assert_eq!(
+            back.color(),
+            image::ColorType::Rgb16,
+            "16-bit depth must survive the export"
+        );
+        assert_eq!(back.to_rgb16().get_pixel(1, 1).0[1], 1500);
+    }
+
+    #[test]
+    fn a_png_with_alpha_keeps_its_alpha_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("alpha.png");
+        let img = image::RgbaImage::from_fn(10, 8, |x, _| {
+            image::Rgba([200, 100, 50, if x == 0 { 0 } else { 255 }])
+        });
+        image::DynamicImage::ImageRgba8(img).save(&src).unwrap();
+        let out = dir.path().join("out/alpha.png");
+        export(
+            &item_of_kind(&src, Kind::Png),
+            &Iptc::default(),
+            &Settings {
+                long_side: 0,
+                ..Default::default()
+            },
+            &out,
+        )
+        .unwrap();
+        let back = image::open(&out).unwrap();
+        assert!(
+            matches!(back, image::DynamicImage::ImageRgba8(_)),
+            "the alpha channel must still be there"
+        );
+        let rgba = back.to_rgba8();
+        assert_eq!(rgba.get_pixel(0, 0).0[3], 0);
+        assert_eq!(rgba.get_pixel(1, 0).0[3], 255);
+    }
+
+    #[test]
+    fn a_png_export_carries_readable_exif_and_xmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("tagged.png");
+        image::RgbImage::from_pixel(20, 10, image::Rgb([1, 2, 3]))
+            .save(&src)
+            .unwrap();
+        let out = dir.path().join("out/tagged.png");
+        export(
+            &item_of_kind(&src, Kind::Png),
+            &sample_iptc(),
+            &Settings {
+                long_side: 0,
+                ..Default::default()
+            },
+            &out,
+        )
+        .unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let exif = png_chunk_data(&bytes, b"eXIf").expect("eXIf chunk");
+        assert!(
+            exif.starts_with(b"II*\0") || exif.starts_with(b"MM\0*"),
+            "eXIf payload is a TIFF block"
+        );
+        let summary = apature_metadata::exif::from_bytes(exif).expect("readable EXIF block");
+        assert_eq!((summary.orientation), 1);
+        let itxt = png_chunk_data(&bytes, b"iTXt").expect("iTXt XMP chunk");
+        let text = std::str::from_utf8(itxt).unwrap();
+        assert!(text.starts_with("XML:com.adobe.xmp\0"));
+        assert!(
+            text.contains("A caption."),
+            "the IPTC text is carried inside the XMP packet"
+        );
+    }
+
+    #[test]
+    fn a_tiff_export_carries_readable_exif_xmp_and_iptc_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("tagged.tif");
+        image::RgbImage::from_pixel(20, 10, image::Rgb([1, 2, 3]))
+            .save(&src)
+            .unwrap();
+        let out = dir.path().join("out/tagged.tif");
+        export(
+            &item_of_kind(&src, Kind::Tiff),
+            &sample_iptc(),
+            &Settings {
+                long_side: 0,
+                ..Default::default()
+            },
+            &out,
+        )
+        .unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let exif_ptr = decoder
+            .find_tag(tiff::tags::Tag::ExifDirectory)
+            .unwrap()
+            .expect("EXIF IFD pointer tag")
+            .into_ifd_pointer()
+            .unwrap();
+        let xmp = decoder
+            .get_tag_u8_vec(tiff::tags::Tag::Unknown(700))
+            .unwrap();
+        let xmp = String::from_utf8(xmp).unwrap();
+        assert!(xmp.contains("A caption."));
+        let iim = decoder
+            .get_tag_u8_vec(tiff::tags::Tag::Unknown(33723))
+            .unwrap();
+        assert!(iim.starts_with(&[0x1c, 1, 90]), "raw IIM datasets");
+        let dir = decoder.read_directory(exif_ptr).unwrap();
+        let software = decoder
+            .read_directory_tags(&dir)
+            .find_tag(tiff::tags::Tag::Software)
+            .unwrap();
+        assert!(software.is_some(), "the EXIF directory is readable");
     }
 }

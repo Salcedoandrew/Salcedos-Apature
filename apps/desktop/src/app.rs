@@ -1747,8 +1747,19 @@ impl App {
         for (i, &idx) in targets.iter().enumerate() {
             let it = &self.items[idx];
             let mut facts = apature_ingest::plan::facts_for(it, it.path(), headline.as_deref());
-            facts.ext = "jpg".into();
-            let name = export_file_name(&template, &facts, (i + 1) as u32);
+            // A TIFF or PNG export keeps the source's own extension; every
+            // other format is delivered as a JPEG.
+            let ext = match it.primary.kind {
+                apature_core::Kind::Tiff | apature_core::Kind::Png => it
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("jpg")
+                    .to_string(),
+                _ => "jpg".to_string(),
+            };
+            facts.ext = ext.clone();
+            let name = export_file_name(&template, &facts, (i + 1) as u32, &ext);
             let name = dedup_export_name(&name, &mut used);
             names.push((idx, dest.join(name)));
         }
@@ -3304,8 +3315,20 @@ impl App {
         log::info!("open folder {}", dir.display());
         self.folder_unplugged = None;
         let t0 = Instant::now();
-        match apature_core::scan(dir, &ScanOptions::default()) {
-            Ok(items) => {
+        match apature_core::scan(
+            dir,
+            &ScanOptions {
+                recursive: self.prefs.scan_subfolders,
+            },
+        ) {
+            Ok(mut items) => {
+                // The listing shows image files only. HEIC is still scanned
+                // (ingest copies it), but this decoder has no HEIC path, so
+                // its cells are not listed.
+                items.retain(|it| it.primary.kind.is_displayable_image());
+                for (i, it) in items.iter_mut().enumerate() {
+                    it.id = i;
+                }
                 self.pool.clear_pending();
                 self.next_generation += 1;
                 self.generation = self.next_generation;
@@ -5814,19 +5837,27 @@ fn same_folder(a: &Path, b: &Path) -> bool {
 /// the expansion is sanitized before it is joined to the destination —
 /// never the raw text. Falls back to the photo stem, then to
 /// `export-<seq>`, so the name is never empty.
-fn export_file_name(template: &str, facts: &apature_ingest::template::Facts, seq: u32) -> String {
+fn export_file_name(
+    template: &str,
+    facts: &apature_ingest::template::Facts,
+    seq: u32,
+    ext: &str,
+) -> String {
     let expanded = if template.trim().is_empty() {
-        format!("{}.jpg", facts.stem)
+        format!("{}.{ext}", facts.stem)
     } else {
         apature_ingest::template::expand(template, facts, seq)
     };
     let name = apature_ingest::template::sanitize_component(&expanded)
         .or_else(|| apature_ingest::template::sanitize_component(&facts.stem))
         .unwrap_or_else(|| format!("export-{seq}"));
-    if name.to_lowercase().ends_with(".jpg") {
+    if name
+        .to_lowercase()
+        .ends_with(&format!(".{}", ext.to_lowercase()))
+    {
         name
     } else {
-        format!("{name}.jpg")
+        format!("{name}.{ext}")
     }
 }
 
@@ -6047,26 +6078,41 @@ mod export_names_tests {
     fn export_names_keep_metadata_inside_the_destination() {
         // Finding #5: a `{camera}` template with a hostile EXIF Model.
         let dest = Path::new("/tmp/chosen");
-        let name = export_file_name("{camera}", &facts_with(Some("../outside"), "DSC_0001"), 1);
+        let name = export_file_name(
+            "{camera}",
+            &facts_with(Some("../outside"), "DSC_0001"),
+            1,
+            "jpg",
+        );
         assert!(
             !name.contains('/') && !name.contains('\\') && !name.contains(".."),
             "traversal must not survive sanitizing: {name}"
         );
         assert!(dest.join(&name).starts_with(dest));
         // An absolute model value must not discard the destination.
-        let name = export_file_name("{camera}", &facts_with(Some("/etc/passwd"), "DSC_0001"), 1);
+        let name = export_file_name(
+            "{camera}",
+            &facts_with(Some("/etc/passwd"), "DSC_0001"),
+            1,
+            "jpg",
+        );
         assert!(dest.join(&name).starts_with(dest));
         // A model that sanitizes to nothing falls back to the stem.
         assert_eq!(
-            export_file_name("{camera}", &facts_with(Some(".."), "DSC_0001"), 1),
+            export_file_name("{camera}", &facts_with(Some(".."), "DSC_0001"), 1, "jpg"),
             "DSC_0001.jpg"
         );
         // A missing model falls back too, and the name is never empty.
-        let name = export_file_name("{camera}", &facts_with(None, "DSC_0001"), 1);
+        let name = export_file_name("{camera}", &facts_with(None, "DSC_0001"), 1, "jpg");
         assert!(!name.is_empty());
         assert!(dest.join(&name).starts_with(dest));
         // A real camera string with a slash becomes a flat filename.
-        let name = export_file_name("{camera}", &facts_with(Some("Canon/EOS R5"), "DSC_0001"), 1);
+        let name = export_file_name(
+            "{camera}",
+            &facts_with(Some("Canon/EOS R5"), "DSC_0001"),
+            1,
+            "jpg",
+        );
         assert_eq!(name, "Canon-EOS R5.jpg");
     }
 
@@ -6120,7 +6166,7 @@ mod export_names_tests {
         let facts = apature_ingest::plan::facts_for(&item, item.path(), None);
         assert_eq!(facts.camera.as_deref(), Some("../outside"));
         let dest = d.join("chosen");
-        let name = export_file_name("{camera}", &facts, 1);
+        let name = export_file_name("{camera}", &facts, 1, "jpg");
         assert!(
             dest.join(&name).starts_with(&dest),
             "planned {name} escapes {dest:?}"

@@ -257,6 +257,8 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                             let k = match v.kind {
                                 Kind::Raw => "RAW",
                                 Kind::Jpeg => "JPEG",
+                                Kind::Tiff => "TIFF",
+                                Kind::Png => "PNG",
                                 Kind::Heic => "HEIC",
                             };
                             rows.push((

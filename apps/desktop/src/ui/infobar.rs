@@ -70,6 +70,21 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                         format!("{} photos", app.items.len())
                     };
                     ui.label(super::mono(format!("·  {count}"), 10.5, t.text2));
+                    let mut subfolders = app.prefs.scan_subfolders;
+                    if ui
+                        .checkbox(
+                            &mut subfolders,
+                            RichText::new("Include subfolders").size(11.0),
+                        )
+                        .on_hover_text(
+                            "List the photos in this folder's subfolders too. Off: this folder only.",
+                        )
+                        .changed()
+                    {
+                        app.prefs.scan_subfolders = subfolders;
+                        app.prefs_dirty = true;
+                        app.refresh_folder();
+                    }
                     let sel = app.selection.len();
                     if sel > 1 {
                         let bytes: u64 = app

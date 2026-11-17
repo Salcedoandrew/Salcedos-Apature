@@ -105,6 +105,9 @@ pub struct Prefs {
     pub cell: f32,
     pub favorites: Vec<PathBuf>,
     pub recent: Vec<PathBuf>,
+    /// Browse the open folder's subfolders too (the "Include subfolders"
+    /// toggle in the folder strip). Off: the folder's own files only.
+    pub scan_subfolders: bool,
     pub sort: crate::filter::Sort,
     pub sort_reversed: bool,
     pub advance_after_mark: bool,
@@ -197,6 +200,7 @@ impl Default for Prefs {
             cell: 180.0,
             favorites: Vec::new(),
             recent: Vec::new(),
+            scan_subfolders: false,
             sort: crate::filter::Sort::Name,
             sort_reversed: false,
             advance_after_mark: true,
