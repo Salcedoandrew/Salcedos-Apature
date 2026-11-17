@@ -12,6 +12,7 @@ apature-metadata.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 image = { workspace = true, features = ["png", "tiff"] }
+tiff = "0.11"
 log.workspace = true
 serde.workspace = true
 
