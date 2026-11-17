@@ -11,7 +11,7 @@ apature-preview.workspace = true
 apature-metadata.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
-image.workspace = true
+image = { workspace = true, features = ["png", "tiff"] }
 log.workspace = true
 serde.workspace = true
 

@@ -149,6 +149,25 @@ pub enum PixelSource {
     Jpeg,
     EmbeddedPreview,
     SystemRawDecode,
+    /// A TIFF or PNG decoded at full resolution by `image`'s own decoder.
+    FullDecode,
+}
+
+/// Source formats exported as themselves, never transcoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RasterFormat {
+    Tiff,
+    Png,
+}
+
+impl RasterFormat {
+    fn of(kind: Kind) -> Option<Self> {
+        match kind {
+            Kind::Tiff => Some(RasterFormat::Tiff),
+            Kind::Png => Some(RasterFormat::Png),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -171,8 +190,8 @@ pub enum ExportError {
     NoPixels(PathBuf),
     #[error("{0}: HEIC export is not supported yet")]
     Heic(PathBuf),
-    #[error("{0}: TIFF and PNG export is not supported yet")]
-    Unsupported(PathBuf),
+    #[error("{0}: {1}")]
+    Raster(PathBuf, image::ImageError),
     #[error("{0} exists; export does not overwrite")]
     Exists(PathBuf),
     #[error("{0}: {1}")]
@@ -305,7 +324,9 @@ fn pixel_source(item: &PhotoItem) -> Result<(PathBuf, bool), ExportError> {
     match item.primary.kind {
         Kind::Raw => Ok((item.primary.path.clone(), false)),
         Kind::Heic => Err(ExportError::Heic(item.primary.path.clone())),
-        Kind::Tiff | Kind::Png => Err(ExportError::Unsupported(item.primary.path.clone())),
+        // Handled by `export_raster` before this is reached; a plain decode
+        // here would find no embedded JPEG and report NoPixels.
+        Kind::Tiff | Kind::Png => Ok((item.primary.path.clone(), false)),
         Kind::Jpeg => Ok((item.primary.path.clone(), true)),
     }
 }
@@ -326,6 +347,100 @@ fn resize_to(img: Rgb, long_side: u32) -> Rgb {
     };
     let out = image::imageops::resize(&src, w, h, image::imageops::FilterType::Lanczos3);
     Rgb::from_image(out)
+}
+
+/// Export a TIFF or PNG as itself: full-resolution decode, the existing
+/// crop/rotation edits and long-side resize, then that format's encoder.
+/// EXIF is not re-embedded: `image`'s PNG and TIFF encoders write no metadata
+/// blocks, and a missing block must never fail an otherwise good export.
+fn export_raster(
+    item: &PhotoItem,
+    settings: &Settings,
+    format: RasterFormat,
+    out: &Path,
+    t0: std::time::Instant,
+) -> Result<Outcome, ExportError> {
+    let src_path = item.primary.path.clone();
+    let data = std::fs::read(&src_path).map_err(|e| ExportError::Io(src_path.clone(), e))?;
+    let summary = exif::from_bytes(&data).unwrap_or_default();
+    let edits = if settings.apply_edits {
+        edits::read(&item.sidecar_path()).unwrap_or_else(|e| {
+            log::warn!(
+                "{}: sidecar edits unreadable ({e}); exporting unedited",
+                src_path.display()
+            );
+            edits::Edits::default()
+        })
+    } else {
+        edits::Edits::default()
+    };
+    if edits.straightened_crop {
+        log::warn!(
+            "{}: the sidecar's crop has a straighten angle Apature cannot apply; exporting uncropped",
+            src_path.display()
+        );
+    }
+    // Deliberately not the 2048 px preview the contact sheet uses: an export
+    // at full size must be the whole file.
+    let decoded =
+        image::load_from_memory(&data).map_err(|e| ExportError::Raster(src_path.clone(), e))?;
+    let img = Rgb::from_image(decoded.to_rgb8());
+    let img = match edits.crop {
+        Some(c) => crop_to(img, c),
+        None => img,
+    };
+    let img = rotate(img, edits.orientation_or(summary.orientation));
+    let img = resize_to(img, settings.long_side);
+    let (width, height) = (img.width, img.height);
+    use image::ImageEncoder;
+    let file = match format {
+        RasterFormat::Png => {
+            let mut file = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut file)
+                .write_image(&img.data, width, height, image::ExtendedColorType::Rgb8)
+                .map_err(|e| ExportError::Raster(src_path.clone(), e))?;
+            file
+        }
+        RasterFormat::Tiff => {
+            // TiffEncoder needs Write + Seek, which a bare Vec does not give it.
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            image::codecs::tiff::TiffEncoder::new(&mut cursor)
+                .write_image(&img.data, width, height, image::ExtendedColorType::Rgb8)
+                .map_err(|e| ExportError::Raster(src_path.clone(), e))?;
+            cursor.into_inner()
+        }
+    };
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ExportError::Io(parent.to_path_buf(), e))?;
+    }
+    let (tmp, mut f) = reserve_temp(out).map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+    let result: Result<(), ExportError> = (|| {
+        use std::io::Write;
+        f.write_all(&file)
+            .map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+        f.sync_all()
+            .map_err(|e| ExportError::Io(out.to_path_buf(), e))?;
+        Ok(())
+    })();
+    drop(f);
+    if let Err(e) = result.and_then(|()| publish(&tmp, out, settings.overwrite)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let bytes_written = std::fs::metadata(out)
+        .map(|m| m.len())
+        .unwrap_or(file.len() as u64);
+    Ok(Outcome {
+        source: src_path,
+        pixels: PixelSource::FullDecode,
+        out: out.to_path_buf(),
+        width,
+        height,
+        bytes: bytes_written,
+        exif: ExifSource::None,
+        edited: edits.is_edited(),
+        millis: t0.elapsed().as_millis(),
+    })
 }
 
 fn crop_to(img: Rgb, c: edits::Crop) -> Rgb {
@@ -394,6 +509,11 @@ pub fn export(
     let t0 = std::time::Instant::now();
     if out.exists() && !settings.overwrite {
         return Err(ExportError::Exists(out.to_path_buf()));
+    }
+    // TIFF and PNG keep their own format and are decoded at full size; their
+    // lossless encoders have no quality knob, so `settings.quality` is unused.
+    if let Some(format) = RasterFormat::of(item.primary.kind) {
+        return export_raster(item, settings, format, out, t0);
     }
     let (src_path, mut is_jpeg) = pixel_source(item)?;
     let mut pixels = if is_jpeg {
@@ -626,6 +746,71 @@ mod tests {
                 modified: None,
             },
             secondary: Vec::new(),
+        }
+    }
+
+    fn item_of_kind(path: &Path, kind: Kind) -> PhotoItem {
+        let mut item = item_for(path);
+        item.primary.kind = kind;
+        item
+    }
+
+    #[test]
+    fn tiff_and_png_export_in_their_own_format_full_size_and_resized() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, kind) in [("shot.tif", Kind::Tiff), ("shot.png", Kind::Png)] {
+            let src = dir.path().join(name);
+            image::RgbImage::from_fn(120, 60, |x, y| {
+                image::Rgb([(x % 251) as u8, (y % 251) as u8, 40])
+            })
+            .save(&src)
+            .unwrap();
+            let item = item_of_kind(&src, kind);
+            // Full size (0), with a quality that would ruin a JPEG: the
+            // lossless encoders ignore it.
+            let out = dir.path().join("out").join(name);
+            let o = export(
+                &item,
+                &Iptc::default(),
+                &Settings {
+                    long_side: 0,
+                    quality: 1,
+                    ..Default::default()
+                },
+                &out,
+            )
+            .unwrap();
+            assert_eq!((o.width, o.height), (120, 60), "{name} full size");
+            assert_eq!(o.pixels, PixelSource::FullDecode);
+            let bytes = std::fs::read(&out).unwrap();
+            match kind {
+                Kind::Tiff => assert!(
+                    bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*"),
+                    "{name} is still a TIFF"
+                ),
+                _ => assert!(
+                    bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                    "{name} is still a PNG"
+                ),
+            }
+            let back = image::open(&out).unwrap();
+            assert_eq!((back.width(), back.height()), (120, 60));
+
+            // The long side still applies.
+            let small = dir.path().join("small").join(name);
+            let o = export(
+                &item,
+                &Iptc::default(),
+                &Settings {
+                    long_side: 30,
+                    ..Default::default()
+                },
+                &small,
+            )
+            .unwrap();
+            assert_eq!((o.width, o.height), (30, 15));
+            let back = image::open(&small).unwrap();
+            assert_eq!((back.width(), back.height()), (30, 15));
         }
     }
 
