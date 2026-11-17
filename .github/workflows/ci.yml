@@ -27,6 +27,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default: every job checks out the repository and reads it, and
+# none of them writes to it. The audit job asks for the one extra scope its
+# action needs, below.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -57,6 +63,9 @@ jobs:
     # merges or ships. Unmaintained and yanked crates are warnings only:
     # they are mostly transitive, and failing on them would block every PR
     # until an upstream project moves.
+    permissions:
+      contents: read
+      checks: write # rustsec/audit-check creates a check run
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
