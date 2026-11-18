@@ -3,6 +3,23 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.2.0] — 2026-11-17
+
+### Added
+- The folder strip has an Include subfolders checkbox. With it on, the contact sheet also lists the photos inside the selected folder's subfolders. It starts off and is remembered between launches.
+- TIFF and PNG pictures now appear in the contact sheet, so they can be browsed, marked and captioned with everything else. Their previews are built from at most 2048 pixels on the long side, so a very large scan is not held in memory just to fill a cell.
+- TIFF and PNG exports write the source format back at full resolution: a TIFF comes out a TIFF and a PNG a PNG, decoded from the whole file rather than from the reduced preview, with crop, rotate and resize applied as they are to JPEG.
+- A TIFF export keeps its bit depth and a PNG export keeps its alpha channel.
+- Exported PNGs carry their metadata in an eXIf chunk and an XMP iTXt block. Exported TIFFs carry an EXIF directory, plus the XMP and IPTC fields a TIFF can hold.
+
+### Changed
+- The sidebar shows only Favorites and Folders. Recent folders are gone from it, though Apature still reopens the last folder when it starts.
+- The contact sheet lists image files only: RAW, JPEG, TIFF and PNG.
+- HEIC files are no longer listed in the contact sheet, since there is no HEIC preview decoder. Ingest still copies them from a card.
+
+### Maintenance
+- CI now asks for the least access it needs: read-only by default, with check-run writing granted only to the dependency audit job.
+
 ## [0.2.0-beta.1] — 2026-11-17
 
 ### Added
