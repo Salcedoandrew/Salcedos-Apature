@@ -3,6 +3,11 @@
 All notable, user-visible changes. Versions follow semantic versioning;
 0.x while the app is finding its shape.
 
+## [0.2.1] — 2026-11-17
+
+### Fixed
+- Opening a large folder no longer hangs the inspector. Sidecar paths are now resolved from the folder scan's own listing instead of re-listing the directory on every frame, and the inspector no longer touches the filesystem to show sidecar state. A folder of thousands of photos, such as a 4,233-photo wedding folder, opens and browses without locking up the app.
+
 ## [0.2.0] — 2026-11-17
 
 ### Added
