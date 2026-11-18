@@ -519,4 +519,24 @@ mod tests {
         assert!(src.conflicts(JpegMarks::Sidecar).is_empty());
         assert_eq!(src.conflicts(JpegMarks::Embed).len(), 1);
     }
+
+    /// A mark write creates the sidecar through `xmp`, which records the name
+    /// it wrote: the inspector's cached view sees it without a rescan, and the
+    /// spelling is the one the photo's extension asked for.
+    #[test]
+    fn our_own_write_registers_the_sidecar_without_a_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("DSC_0009.NEF"), b"nef").unwrap();
+        let items = apature_core::scan(dir.path(), &ScanOptions::default()).unwrap();
+        let scheme = ColorClassScheme::default();
+        assert!(!items[0].has_sidecar());
+        let marks = Marks {
+            rating: Rating(2),
+            ..Default::default()
+        };
+        write(&items[0], &marks, &scheme, JpegMarks::Sidecar).unwrap();
+        assert!(items[0].has_sidecar());
+        assert_eq!(items[0].sidecar_path(), dir.path().join("DSC_0009.XMP"));
+        assert_eq!(read_marks(&items[0], &scheme), marks);
+    }
 }

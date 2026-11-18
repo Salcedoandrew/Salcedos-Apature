@@ -334,7 +334,12 @@ pub fn write_sidecar_with(
     verify: impl FnOnce(&str) -> bool,
 ) -> Result<(), XmpError> {
     let existing = match fs::read_to_string(path) {
-        Ok(t) => t,
+        Ok(t) => {
+            // It is on disk: remember this spelling, even when the edit below
+            // changes nothing (see `apature_core::sidecars`).
+            apature_core::sidecars::note_written(path);
+            t
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
@@ -355,6 +360,8 @@ pub fn write_sidecar_with(
         let _ = fs::remove_file(&tmp);
     }
     result?;
+    // New or replaced: the sidecar now has this name, whatever was guessed.
+    apature_core::sidecars::note_written(path);
     Ok(())
 }
 
@@ -362,7 +369,12 @@ pub fn write_sidecar_with(
 /// writes a temp file beside it and renames.
 pub fn write_marks(path: &Path, marks: &XmpMarks) -> Result<(), XmpError> {
     let existing = match fs::read_to_string(path) {
-        Ok(t) => t,
+        Ok(t) => {
+            // It is on disk: remember this spelling, even when the marks below
+            // change nothing (see `apature_core::sidecars`).
+            apature_core::sidecars::note_written(path);
+            t
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
@@ -385,6 +397,8 @@ pub fn write_marks(path: &Path, marks: &XmpMarks) -> Result<(), XmpError> {
         let _ = fs::remove_file(&tmp);
     }
     result?;
+    // New or replaced: the sidecar now has this name, whatever was guessed.
+    apature_core::sidecars::note_written(path);
     Ok(())
 }
 

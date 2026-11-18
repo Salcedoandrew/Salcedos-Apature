@@ -84,40 +84,52 @@ impl PhotoItem {
     /// `.xmp` extension. This matches Photo Mechanic and Lightroom.
     ///
     /// Case: Photo Mechanic writes `IMG.XMP` next to `IMG.NEF` (it copies the
-    /// case of the source extension). An existing sidecar of either case is
-    /// returned with the spelling it has on disk, so we never create a second
-    /// file on a case-sensitive filesystem and never report a path that does
-    /// not exist on one; when none exists, the case follows the primary's
-    /// extension.
+    /// case of the source extension), so with no sidecar yet the spelling
+    /// follows the primary's extension. The spelling of one that exists comes
+    /// from the directory listing [`crate::scan`] took, never from a guess: on
+    /// a case-insensitive volume `IMG.XMP` and `IMG.xmp` are one file, and the
+    /// wrong spelling is a different name on a case-sensitive destination.
+    ///
+    /// That lookup is memory only. The inspector asks for this once per frame,
+    /// and a directory listing here read every file in the folder on the UI
+    /// thread each time; only an item from a directory no scan has listed (one
+    /// built by hand, say) still gets the one-off listing.
     pub fn sidecar_path(&self) -> PathBuf {
-        let lower = self.primary.path.with_extension("xmp");
-        let upper = self.primary.path.with_extension("XMP");
+        let preferred = self.preferred_sidecar_path();
+        if let Some(found) = crate::sidecars::resolve(&preferred) {
+            return found;
+        }
+        match preferred.parent() {
+            Some(parent) if crate::sidecars::listed(parent) => preferred,
+            _ => existing_with_case(&preferred).unwrap_or(preferred),
+        }
+    }
+
+    /// True when this item has a sidecar. The scan's listing answers this, so
+    /// callers on the draw path can show the state without a `stat`; only an
+    /// item from a directory no scan has listed falls back to the disk.
+    pub fn has_sidecar(&self) -> bool {
+        let p = self.primary.path.with_extension("xmp");
+        match p.parent() {
+            Some(parent) if crate::sidecars::listed(parent) => {
+                crate::sidecars::resolve(&p).is_some()
+            }
+            _ => p.is_file(),
+        }
+    }
+
+    /// The sidecar name with no listing taken into account: the spelling that
+    /// follows the primary's extension case.
+    fn preferred_sidecar_path(&self) -> PathBuf {
         let ext_is_upper = self
             .primary
             .path
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| e.chars().any(|c| c.is_ascii_uppercase()))
-            .unwrap_or(false);
-        let (preferred, other) = if ext_is_upper {
-            (upper, lower)
-        } else {
-            (lower, upper)
-        };
-        // One spelling opens a file and the other does not: names were
-        // compared exactly, so the hit is the spelling on disk.
-        //
-        // When *both* open a file, a case-insensitive volume has matched the
-        // same entry twice (`IMG.XMP` and `IMG.xmp` are one file there), and
-        // `is_file` cannot tell which spelling the directory entry has. Ask
-        // the directory. Returning `preferred` on a guess is what reported
-        // `DSC_0001.XMP` for a sidecar Photo Mechanic wrote as `DSC_0001.xmp`,
-        // and that spelling is a different file name on a case-sensitive
-        // destination.
-        if preferred.is_file() && !other.is_file() {
-            return preferred;
-        }
-        existing_with_case(&preferred).unwrap_or(preferred)
+            .is_some_and(|e| e.chars().any(|c| c.is_ascii_uppercase()));
+        self.primary
+            .path
+            .with_extension(if ext_is_upper { "XMP" } else { "xmp" })
     }
 
     pub fn variants(&self) -> impl Iterator<Item = &Variant> {
@@ -128,7 +140,8 @@ impl PhotoItem {
 /// The directory entry whose name equals `p`'s file name ignoring ASCII case,
 /// with its real spelling, preferring the exact spelling when both exist (a
 /// case-sensitive directory can hold `IMG.XMP` and `IMG.xmp` at once); None
-/// when there is none.
+/// when there is none. Only for a directory no scan has listed: a scan puts
+/// the same information in [`crate::sidecars`] without touching the disk.
 fn existing_with_case(p: &Path) -> Option<PathBuf> {
     let parent = p.parent()?;
     let want = p.file_name()?.to_str()?;

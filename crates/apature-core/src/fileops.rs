@@ -231,6 +231,15 @@ pub fn rename(plan: &RenamePlan) -> Result<Vec<(PathBuf, PathBuf)>, FileOpError>
             stuck.extend(roll_back(&back));
             return Err(rollback_error(to.clone(), e, stuck));
         }
+        if to
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+        {
+            // Keep the index on the sidecar's new name, with the spelling it
+            // now has on disk: `sidecar_path` reads the listing, not the disk.
+            crate::sidecars::note_written(to);
+        }
         done.push((tmp.clone(), to.clone()));
     }
     Ok(plan.moves.clone())
@@ -343,6 +352,22 @@ mod tests {
         assert!(!plan.can_run());
         assert!(matches!(rename(&plan), Err(FileOpError::Collisions)));
         assert!(d.path().join("DSC_0003.NEF").is_file(), "nothing moved");
+    }
+
+    #[test]
+    fn a_rename_records_the_sidecar_it_moved() {
+        let d = tempfile::tempdir().unwrap();
+        let a = item(d.path(), "DSC_0001", &["NEF"]);
+        std::fs::write(d.path().join("DSC_0001.xmp"), "x").unwrap();
+        // A scan is what lists a directory; this stands in for one.
+        crate::sidecars::note_dir(d.path(), &["DSC_0001.xmp".into()]);
+        let plan = plan_rename(&[(&a, "BUTLR-001".into())]).unwrap();
+        rename(&plan).unwrap();
+        assert_eq!(
+            crate::sidecars::resolve(&d.path().join("BUTLR-001.XMP")),
+            Some(d.path().join("BUTLR-001.xmp")),
+            "the index follows the sidecar to its new name and spelling"
+        );
     }
 
     #[test]
