@@ -29,6 +29,9 @@ pub fn scan(dir: &Path, opts: &ScanOptions) -> Result<Vec<PhotoItem>, ScanError>
 
     // Group by (directory, lowercase stem) so that pairs in the same folder collapse.
     let mut groups: BTreeMap<(PathBuf, String), Vec<Variant>> = BTreeMap::new();
+    // The sidecar names per directory, collected from this same walk: one
+    // listing per directory, so `sidecar_path` never has to list one again.
+    let mut sidecars: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
 
     // Hidden directories (.Trashes, .Spotlight-V100, .fseventsd on a card) are
     // skipped before descent: macOS refuses to read some of them, and a
@@ -61,9 +64,17 @@ pub fn scan(dir: &Path, opts: &ScanOptions) -> Result<Vec<PhotoItem>, ScanError>
             continue;
         }
         let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
+        let parent = path.parent().unwrap_or(dir).to_path_buf();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        // Every directory with files in it is recorded, even one with no
+        // sidecars, so a sidecar removed since the last scan drops out below.
+        let listing = sidecars.entry(parent.clone()).or_default();
+        if ext.eq_ignore_ascii_case("xmp") {
+            listing.push(name.into_owned());
+        }
         let Some(kind) = kind_for_extension(ext) else {
             continue;
         };
@@ -78,11 +89,16 @@ pub fn scan(dir: &Path, opts: &ScanOptions) -> Result<Vec<PhotoItem>, ScanError>
             size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
             modified: meta.and_then(|m| m.modified().ok()),
         };
-        let parent = path.parent().unwrap_or(dir).to_path_buf();
         groups
             .entry((parent, stem.to_lowercase()))
             .or_default()
             .push(variant);
+    }
+
+    // Publish the listings: this scan is what rebuilds an entry, and a
+    // directory with no sidecars clears the one it had.
+    for (dir, names) in &sidecars {
+        crate::sidecars::note_dir(dir, names);
     }
 
     let mut items = Vec::with_capacity(groups.len());
@@ -151,8 +167,11 @@ mod tests {
             "uppercase source extension → uppercase sidecar, like Photo Mechanic"
         );
         assert_eq!(items[2].sidecar_path(), dir.path().join("dsc_0003.xmp"));
-        // An existing sidecar of the other case wins.
+        // An existing sidecar of the other case wins, with the spelling it
+        // has on disk, on the next scan: nothing watches the folder, so a
+        // scan is what rebuilds a directory's listing.
         fs::write(dir.path().join("DSC_0001.xmp"), b"x").unwrap();
+        let items = scan(dir.path(), &ScanOptions::default()).unwrap();
         assert_eq!(items[0].sidecar_path(), dir.path().join("DSC_0001.xmp"));
         assert_eq!(
             items.iter().map(|i| i.id).collect::<Vec<_>>(),
@@ -185,5 +204,51 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// The inspector asks for a sidecar path every frame, so after the scan it
+    /// must never list the directory again. Removing the directory has to
+    /// leave the resolved names untouched, on-disk case included.
+    #[test]
+    fn sidecar_paths_come_from_the_scan_listing_not_the_filesystem() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("card");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("DSC_0001.NEF"), b"x").unwrap();
+        fs::write(dir.join("DSC_0001.xmp"), b"x").unwrap();
+        fs::write(dir.join("DSC_0002.JPG"), b"x").unwrap();
+        fs::write(dir.join("DSC_0002.XMP"), b"x").unwrap();
+        fs::write(dir.join("DSC_0003.jpg"), b"x").unwrap();
+        let items = scan(&dir, &ScanOptions::default()).unwrap();
+        assert_eq!(items[0].sidecar_path(), dir.join("DSC_0001.xmp"));
+        assert_eq!(items[1].sidecar_path(), dir.join("DSC_0002.XMP"));
+        assert!(items[0].has_sidecar() && items[1].has_sidecar());
+        assert!(!items[2].has_sidecar(), "DSC_0003 has no sidecar");
+
+        // Nothing can be listed from here on: the directory is gone.
+        fs::rename(&dir, root.path().join("gone")).unwrap();
+        assert!(!dir.exists());
+        assert_eq!(items[0].sidecar_path(), dir.join("DSC_0001.xmp"));
+        assert_eq!(items[1].sidecar_path(), dir.join("DSC_0002.XMP"));
+        assert_eq!(items[2].sidecar_path(), dir.join("DSC_0003.xmp"));
+        assert!(items[0].has_sidecar() && items[1].has_sidecar());
+        assert!(!items[2].has_sidecar());
+    }
+
+    /// Our own writes register the name they created (marks and edits write
+    /// through `apature_metadata::xmp`), so a new sidecar shows without a
+    /// rescan.
+    #[test]
+    fn a_sidecar_we_write_is_known_without_a_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("DSC_0007.NEF"), b"x").unwrap();
+        let items = scan(dir.path(), &ScanOptions::default()).unwrap();
+        assert!(!items[0].has_sidecar());
+        let sc = items[0].sidecar_path();
+        assert_eq!(sc, dir.path().join("DSC_0007.XMP"));
+        fs::write(&sc, b"x").unwrap();
+        crate::sidecars::note_written(&sc);
+        assert!(items[0].has_sidecar());
+        assert_eq!(items[0].sidecar_path(), sc);
     }
 }

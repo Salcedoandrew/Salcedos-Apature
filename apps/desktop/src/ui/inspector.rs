@@ -267,9 +267,12 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                             ));
                         }
                         let sc = it.sidecar_path();
+                        // From the scan's listing: this runs on every frame and
+                        // must not list or stat the folder.
+                        let sc_present = it.has_sidecar();
                         rows.push((
                             "Sidecar",
-                            if sc.is_file() {
+                            if sc_present {
                                 format!(
                                     "{} · present",
                                     sc.file_name()
@@ -286,7 +289,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, t: &Theme) {
                         if let Some(s) = app.deliver.sent.get(it.path()) {
                             rows.push(("Sent", format!("{} · {}", s.target, s.at)));
                         }
-                        if sc.is_file() {
+                        if sc_present {
                             if let Ok(e) = apature_metadata::edits::read(&sc) {
                                 let mut parts = Vec::new();
                                 if let Some(o) = e.orientation {

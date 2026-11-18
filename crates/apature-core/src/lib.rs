@@ -10,6 +10,7 @@ pub mod folder;
 pub mod item;
 pub mod marks;
 pub mod paths;
+pub mod sidecars;
 pub mod tiff;
 
 pub use folder::{scan, ScanOptions};
